@@ -16,8 +16,8 @@ import type { TelegramMessage, TelegramUpdate } from "./types.js";
 const WARNING_NOT_STARTED =
   "⚠️ Đã ẩn thông tin! QLL cần bấm /start ở khung chat riêng với Bot để nhận Inbox.";
 
-function confirmationLine(ctvName: string): string {
-  return `🔒 ${ctvName} đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL.`;
+function confirmationLine(_ctvName: string): string {
+  return `🔒 Em đã gửi tin nhắn cho mình rồi ạ. Anh/chị kiểm tra tin nhắn nha ạ`;
 }
 
 // Builds the inbox payload delivered to the QLL: the QLL's own request first,

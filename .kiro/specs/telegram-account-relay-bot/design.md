@@ -231,9 +231,9 @@ Branches:
 
 The confirmation line posted in the group is (satisfies Requirement 2.6):
 
-> 🔒 [Tên CTV] đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL.
+> 🔒 Em đã gửi tin nhắn cho mình rồi ạ. Anh/chị kiểm tra tin nhắn nha ạ
 
-where `[Tên CTV]` is replaced with the CTV display name computed by the field-mapping logic.
+This is a fixed, friendly confirmation line (it no longer embeds the CTV display name) and is posted as a Telegram reply to the QLL Request_Message.
 
 ### `lib/types.ts` — shared types
 

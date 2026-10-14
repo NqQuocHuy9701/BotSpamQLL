@@ -119,12 +119,12 @@ describe("handleUpdate — happy path", () => {
       QLL_ID,
       "📩 Yêu cầu của bạn: Cho mình xin tài khoản\n\nTK: user / MK: pass"
     );
-    // Confirmation line with the CTV display name, posted as a REPLY to the
-    // QLL's original request message (message_id 400).
+    // Friendly confirmation line, posted as a REPLY to the QLL's original
+    // request message (message_id 400).
     expect(sendMessage).toHaveBeenNthCalledWith(
       2,
       GROUP_ID,
-      "🔒 Minh CTV đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL.",
+      "🔒 Em đã gửi tin nhắn cho mình rồi ạ. Anh/chị kiểm tra tin nhắn nha ạ",
       400
     );
     expect(deleteMessage).toHaveBeenCalledTimes(1);

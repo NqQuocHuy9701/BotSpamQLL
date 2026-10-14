@@ -106,7 +106,7 @@ describe("integration: api/webhook end-to-end", () => {
       (fetchSpy.mock.calls[2][1] as RequestInit).body as string
     );
     expect(confirmBody.text).toBe(
-      "🔒 Minh CTV đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL."
+      "🔒 Em đã gửi tin nhắn cho mình rồi ạ. Anh/chị kiểm tra tin nhắn nha ạ"
     );
 
     expect(supabaseFrom).toHaveBeenCalledWith("bot_account_logs");
