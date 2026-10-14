@@ -6,6 +6,7 @@ import { buildLogRecord, displayName } from "./mapping.js";
 import { insertLog } from "./supabase.js";
 import {
   deleteWithRetry,
+  TimeoutError,
   withTimeout,
   type TelegramClient,
 } from "./telegram.js";
@@ -90,10 +91,20 @@ async function relay(
       deps.telegram.sendMessage(qllId as number, sensitiveText),
       SEND_TIMEOUT_MS
     );
-  } catch {
-    // Timeout (or send threw) is treated identically to a 403.
-    timedOut = true;
-    sendResult = { ok: false, forbidden: false, description: "timeout" };
+  } catch (error) {
+    if (error instanceof TimeoutError) {
+      // No response within 10s (Requirement 4.5) -> treat identically to 403.
+      timedOut = true;
+      sendResult = { ok: false, forbidden: false, description: "timeout" };
+    } else {
+      // Any other transport rejection is a non-403 delivery failure
+      // (Requirement 2.3): retain the reply, do NOT take the destructive path.
+      sendResult = {
+        ok: false,
+        forbidden: false,
+        description: error instanceof Error ? error.message : "send error",
+      };
+    }
   }
 
   // Security path: 403 Forbidden OR 10s timeout — delete FIRST, then warn.

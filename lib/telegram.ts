@@ -21,54 +21,84 @@ export class TimeoutError extends Error {
   }
 }
 
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return fallback;
+}
+
 export function createTelegramClient(botToken: string): TelegramClient {
   const base = `${TELEGRAM_API_BASE}/bot${botToken}`;
 
   async function sendMessage(chatId: number, text: string): Promise<SendResult> {
-    const response = await fetch(`${base}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-    });
+    try {
+      const response = await fetch(`${base}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text }),
+      });
 
-    const payload = (await response.json()) as {
-      ok: boolean;
-      result?: { message_id: number };
-      error_code?: number;
-      description?: string;
-    };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        result?: { message_id: number };
+        error_code?: number;
+        description?: string;
+      };
 
-    if (payload.ok && payload.result) {
-      return { ok: true, messageId: payload.result.message_id };
+      if (payload.ok && payload.result) {
+        return { ok: true, messageId: payload.result.message_id };
+      }
+
+      return {
+        ok: false,
+        forbidden: payload.error_code === 403,
+        description: payload.description ?? "sendMessage failed",
+      };
+    } catch (error) {
+      // Native fetch / JSON parsing rejected (DNS, socket, malformed body).
+      // Surface as a non-forbidden transport failure so the handler can take
+      // the retain path (Requirement 2.3) rather than the destructive 403 path.
+      return {
+        ok: false,
+        forbidden: false,
+        description: errorMessage(error, "sendMessage transport error"),
+      };
     }
-
-    return {
-      ok: false,
-      forbidden: payload.error_code === 403,
-      description: payload.description ?? "sendMessage failed",
-    };
   }
 
   async function deleteMessage(
     chatId: number,
     messageId: number
   ): Promise<DeleteResult> {
-    const response = await fetch(`${base}/deleteMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
-    });
+    try {
+      const response = await fetch(`${base}/deleteMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+      });
 
-    const payload = (await response.json()) as {
-      ok: boolean;
-      description?: string;
-    };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        description?: string;
+      };
 
-    if (payload.ok) {
-      return { ok: true };
+      if (payload.ok) {
+        return { ok: true };
+      }
+
+      return {
+        ok: false,
+        description: payload.description ?? "deleteMessage failed",
+      };
+    } catch (error) {
+      // Normalize a rejected fetch/JSON parse into a structured failure so
+      // deleteWithRetry retries instead of aborting after one attempt.
+      return {
+        ok: false,
+        description: errorMessage(error, "deleteMessage transport error"),
+      };
     }
-
-    return { ok: false, description: payload.description ?? "deleteMessage failed" };
   }
 
   return { sendMessage, deleteMessage };
@@ -104,7 +134,13 @@ export async function deleteWithRetry(
   let last: DeleteResult = { ok: false, description: "no attempt made" };
 
   for (let i = 0; i < attempts; i++) {
-    last = await client.deleteMessage(chatId, messageId);
+    try {
+      last = await client.deleteMessage(chatId, messageId);
+    } catch (error) {
+      // A rejected attempt must not abort the retry budget; normalize it to a
+      // structured failure and keep trying up to `attempts` times.
+      last = { ok: false, description: errorMessage(error, "deleteMessage rejected") };
+    }
     if (last.ok) {
       return last;
     }

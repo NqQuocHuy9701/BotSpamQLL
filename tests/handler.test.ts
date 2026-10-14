@@ -15,6 +15,9 @@ const WARNING =
 function makeDeps(options: {
   sendResults?: SendResult[];
   sendThrows?: Error[]; // index-aligned; if set, that send call throws
+  // index-aligned; if true, that send returns a promise that never settles
+  // (used with fake timers to drive the real 10s withTimeout boundary)
+  sendPending?: boolean[];
   deleteResults?: DeleteResult[];
 }): {
   deps: Deps;
@@ -29,15 +32,22 @@ function makeDeps(options: {
 
   const sendResults = options.sendResults ?? [];
   const sendThrows = options.sendThrows ?? [];
+  const sendPending = options.sendPending ?? [];
   const deleteResults = options.deleteResults ?? [];
 
-  const sendMessage = vi.fn(async (chatId: number, _text: string) => {
+  const sendMessage = vi.fn((chatId: number, _text: string) => {
     const i = sendIdx++;
     trace.push(`send:${chatId}`);
-    if (sendThrows[i]) {
-      throw sendThrows[i];
+    if (sendPending[i]) {
+      // A promise that never settles; the handler's withTimeout must fire.
+      return new Promise<SendResult>(() => {});
     }
-    return sendResults[i] ?? ({ ok: true, messageId: 1 } as SendResult);
+    if (sendThrows[i]) {
+      return Promise.reject(sendThrows[i]);
+    }
+    return Promise.resolve(
+      sendResults[i] ?? ({ ok: true, messageId: 1 } as SendResult)
+    );
   });
 
   const deleteMessage = vi.fn(async (chatId: number, messageId: number) => {
@@ -132,14 +142,26 @@ describe("handleUpdate — 403 security path", () => {
   });
 });
 
-describe("handleUpdate — timeout behaves like 403", () => {
-  it("treats a 10s timeout identically to 403", async () => {
+describe("handleUpdate — real 10s timeout behaves like 403", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drives the actual 10,000ms timeout, then deletes -> logs -> warns in order", async () => {
+    vi.useFakeTimers();
     const { deps, trace, sendMessage } = makeDeps({
-      sendThrows: [new Error("timed out")],
+      sendPending: [true], // inbox send never settles -> withTimeout fires at 10s
       deleteResults: [{ ok: true }],
     });
 
-    await handleUpdate(sensitiveReply(), deps);
+    const done = handleUpdate(sensitiveReply(), deps);
+    // Nothing destructive should happen before the 10s boundary.
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(trace).toEqual([`send:${QLL_ID}`]);
+
+    // Cross the 10,000ms budget; the timeout now drives the security path.
+    await vi.advanceTimersByTimeAsync(1);
+    await done;
 
     expect(trace).toEqual([
       `send:${QLL_ID}`,
@@ -155,6 +177,19 @@ describe("handleUpdate — non-403 delivery failure", () => {
   it("retains the reply (no delete) and logs a delivery-failure status", async () => {
     const { deps, trace, deleteMessage } = makeDeps({
       sendResults: [{ ok: false, forbidden: false, description: "Bad Request" }],
+    });
+
+    await handleUpdate(sensitiveReply(), deps);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(trace).toEqual([`send:${QLL_ID}`, "log:Lỗi gửi Inbox"]);
+  });
+
+  it("retains the reply when the inbox send rejects with a transport error (not a timeout)", async () => {
+    const { deps, trace, deleteMessage } = makeDeps({
+      // A bare network rejection (DNS/socket/JSON) is NOT a 10s timeout and
+      // must NOT take the destructive delete-first path (Requirement 2.3).
+      sendThrows: [new Error("getaddrinfo ENOTFOUND")],
     });
 
     await handleUpdate(sensitiveReply(), deps);
@@ -186,6 +221,88 @@ describe("handleUpdate — delete-retry exhaustion on success path", () => {
       "log:Lỗi thu hồi",
     ]);
     // No confirmation posted when the reply could not be removed.
+  });
+});
+
+describe("handleUpdate — delete-retry exhaustion on 403 security path", () => {
+  it("tries delete 3 times, logs 'Lỗi thu hồi', and posts NO warning", async () => {
+    const { deps, trace, sendMessage, deleteMessage } = makeDeps({
+      sendResults: [{ ok: false, forbidden: true, description: "Forbidden" }],
+      deleteResults: [
+        { ok: false, description: "x" },
+        { ok: false, description: "x" },
+        { ok: false, description: "x" },
+      ],
+    });
+
+    await handleUpdate(sensitiveReply(), deps);
+
+    expect(deleteMessage).toHaveBeenCalledTimes(3);
+    expect(trace).toEqual([
+      `send:${QLL_ID}`,
+      `delete:${GROUP_ID}:${REPLY_MSG_ID}`,
+      `delete:${GROUP_ID}:${REPLY_MSG_ID}`,
+      `delete:${GROUP_ID}:${REPLY_MSG_ID}`,
+      "log:Lỗi thu hồi",
+    ]);
+    // The warning stays pending until the reply is confirmed deleted:
+    // only the inbox send happened, no group warning was posted.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleUpdate — 500ms removal SLA (send-before-delete ordering)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("issues the group delete immediately after the inbox send resolves", async () => {
+    vi.useFakeTimers();
+
+    // The inbox send resolves after 300ms; the delete must follow right after
+    // confirmed delivery within the same invocation (design: send-before-delete,
+    // delete issued promptly — not blocked behind the 10s budget).
+    let resolveSend: ((r: SendResult) => void) | undefined;
+    const trace: string[] = [];
+
+    const sendMessage = vi.fn((chatId: number, _text: string) => {
+      trace.push(`send:${chatId}`);
+      if (!resolveSend) {
+        return new Promise<SendResult>((resolve) => {
+          resolveSend = resolve;
+        });
+      }
+      return Promise.resolve({ ok: true, messageId: 2 } as SendResult);
+    });
+    const deleteMessage = vi.fn(async (chatId: number, messageId: number) => {
+      trace.push(`delete:${chatId}:${messageId}`);
+      return { ok: true } as DeleteResult;
+    });
+    const insert = vi.fn(async (record: { status: string }) => {
+      trace.push(`log:${record.status}`);
+      return { error: null };
+    });
+    const deps: Deps = {
+      telegram: { sendMessage, deleteMessage },
+      supabase: { from: vi.fn(() => ({ insert })) } as unknown as SupabaseClient,
+    };
+
+    const done = handleUpdate(sensitiveReply(), deps);
+
+    // Inbox send is in flight; no delete yet.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(trace).toEqual([`send:${QLL_ID}`]);
+    expect(deleteMessage).not.toHaveBeenCalled();
+
+    // Delivery confirms -> delete is issued on the next microtask, well before
+    // the 10s timeout budget would ever elapse.
+    resolveSend?.({ ok: true, messageId: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    await done;
+
+    expect(trace[0]).toBe(`send:${QLL_ID}`);
+    expect(trace[1]).toBe(`delete:${GROUP_ID}:${REPLY_MSG_ID}`);
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
   });
 });
 

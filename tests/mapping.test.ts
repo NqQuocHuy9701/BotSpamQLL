@@ -67,6 +67,17 @@ describe("buildLogRecord", () => {
     expect(buildLogRecord(msg, "Đã gửi Inbox").request_content).toBe("");
   });
 
+  it("preserves an explicit empty-string replied-to text as ''", () => {
+    const msg: TelegramMessage = {
+      ...baseMessage,
+      reply_to_message: {
+        ...baseMessage.reply_to_message!,
+        text: "",
+      },
+    };
+    expect(buildLogRecord(msg, "Đã gửi Inbox").request_content).toBe("");
+  });
+
   it("falls back to username in qll_name / ctv_name", () => {
     const msg: TelegramMessage = {
       ...baseMessage,

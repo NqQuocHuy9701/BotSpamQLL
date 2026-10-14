@@ -81,6 +81,41 @@ describe("createTelegramClient.deleteMessage", () => {
       description: "message not found",
     });
   });
+
+  it("normalizes a rejected fetch into a structured failure (no throw)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNRESET");
+      }) as unknown as typeof fetch
+    );
+    const client = createTelegramClient("token");
+    const result = await client.deleteMessage(1, 2);
+    expect(result.ok).toBe(false);
+    expect((result as { description: string }).description).toBe("ECONNRESET");
+  });
+});
+
+describe("createTelegramClient.sendMessage transport failures", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("normalizes a rejected fetch into a non-forbidden failure (no throw)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("getaddrinfo ENOTFOUND");
+      }) as unknown as typeof fetch
+    );
+    const client = createTelegramClient("token");
+    const result = await client.sendMessage(1, "hi");
+    expect(result).toEqual({
+      ok: false,
+      forbidden: false,
+      description: "getaddrinfo ENOTFOUND",
+    });
+  });
 });
 
 describe("withTimeout", () => {
@@ -135,5 +170,33 @@ describe("deleteWithRetry", () => {
     const result = await deleteWithRetry(client, 1, 2);
     expect(result).toEqual({ ok: true });
     expect(deleteMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers after a rejected attempt and still succeeds", async () => {
+    const deleteMessage = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("socket hang up"))
+      .mockResolvedValueOnce({ ok: true });
+    const client: TelegramClient = {
+      sendMessage: vi.fn(),
+      deleteMessage,
+    };
+    const result = await deleteWithRetry(client, 1, 2);
+    expect(result).toEqual({ ok: true });
+    expect(deleteMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after 3 rejected attempts and returns a structured failure", async () => {
+    const deleteMessage = vi
+      .fn()
+      .mockRejectedValue(new Error("socket hang up"));
+    const client: TelegramClient = {
+      sendMessage: vi.fn(),
+      deleteMessage,
+    };
+    const result = await deleteWithRetry(client, 1, 2);
+    expect(result.ok).toBe(false);
+    expect((result as { description: string }).description).toBe("socket hang up");
+    expect(deleteMessage).toHaveBeenCalledTimes(3);
   });
 });

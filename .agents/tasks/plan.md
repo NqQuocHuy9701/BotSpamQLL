@@ -1,14 +1,37 @@
-# Verification note (iteration 1 — implementation complete)
+# Verification note (iteration 2 — review findings fixed)
 
 Commands run at the workspace root on the Windows/PowerShell host, npm:
 
-- `npm install` — succeeded (197 packages added; esbuild postinstall scripts
-  approved via `npm install-scripts approve esbuild` so vitest/esbuild can run).
+- `npm install` — PASS (exit 0; dependencies already resolved, 198 packages audited).
 - `npx tsc --noEmit` — PASS (exit 0, no type errors across `api/`, `lib/`, `tests/`).
-- `npm test` (→ `vitest run`) — PASS: **8 test files, 63 tests, all green.**
-  - detector.test.ts (22), telegram.test.ts (11), handler.test.ts (9),
-    mapping.test.ts (8), config.test.ts (5), supabase.test.ts (3),
+- `npm test` (→ `vitest run`) — PASS: **8 test files, 71 tests, all green.**
+  - detector.test.ts (22), telegram.test.ts (15), handler.test.ts (12),
+    mapping.test.ts (9), config.test.ts (5), supabase.test.ts (3),
     webhook.test.ts (3), integration.test.ts (2).
+
+Review findings addressed (from `.agents/tasks/review.json` + review-a/review-b):
+1. **Timeout vs transport errors** — `lib/handler.ts` now catches `TimeoutError`
+   specifically for the destructive 403 security path; any other send rejection
+   (DNS/socket/fetch/JSON) routes to the non-403 retain path (Req 2.3). Added a
+   handler test that drives the real 10,000ms `withTimeout` boundary with fake
+   timers (delete → log → exact warning order) and a test that a bare transport
+   rejection retains the reply.
+2. **Rejected deletes bypass retries** — `lib/telegram.ts` `sendMessage`/
+   `deleteMessage` now normalize a rejected `fetch`/JSON parse into a structured
+   result, and `deleteWithRetry` catches per-attempt rejections so the 3-attempt
+   budget is honored. Added wrapper rejection tests plus `deleteWithRetry`
+   rejected-attempt recovery and three-rejection exhaustion tests.
+3. **403 delete exhaustion** — added a handler test: 403 + three failed deletes →
+   exactly three delete attempts, one `"Lỗi thu hồi"` log, no group warning.
+4. **Explicit-empty request text** — added a mapping test with `text: ""`
+   asserting `request_content === ""` (alongside the existing `undefined` case).
+5. **500ms removal SLA** — the spec's send-before-delete ordering is retained
+   (design.md: deliver to inbox first, delete only after confirmed delivery, both
+   in the same invocation). Added a fake-timer timed test proving the group delete
+   is issued immediately after the inbox send resolves, not blocked behind the 10s
+   budget. No user-visible behavior or spec'd branch was changed.
+6. **Verification evidence** — this note plus the coder final message both carry
+   the exact commands and their pass summary.
 
 Zero live network calls: `fetch`, the Supabase client, and (in webhook unit
 tests) the handler/config are all mocked. The real BotFather token is NOT present
