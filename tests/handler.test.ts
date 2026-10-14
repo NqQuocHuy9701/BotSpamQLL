@@ -25,6 +25,7 @@ function makeDeps(options: {
   sendMessage: ReturnType<typeof vi.fn>;
   deleteMessage: ReturnType<typeof vi.fn>;
   insert: ReturnType<typeof vi.fn>;
+  from: ReturnType<typeof vi.fn>;
 } {
   const trace: string[] = [];
   let sendIdx = 0;
@@ -63,11 +64,12 @@ function makeDeps(options: {
     trace.push(`log:${record.status}`);
     return { error: null };
   });
+  const from = vi.fn(() => ({ insert }));
   const supabase = {
-    from: vi.fn(() => ({ insert })),
+    from,
   } as unknown as SupabaseClient;
 
-  return { deps: { telegram, supabase }, trace, sendMessage, deleteMessage, insert };
+  return { deps: { telegram, supabase }, trace, sendMessage, deleteMessage, insert, from };
 }
 
 const GROUP_ID = -1001;
@@ -329,7 +331,7 @@ describe("handleUpdate — removal timing contract (send-before-delete)", () => 
 
 describe("handleUpdate — ignore branches", () => {
   it("ignores a group message that is not a reply (zero calls)", async () => {
-    const { deps, sendMessage, deleteMessage, insert } = makeDeps({});
+    const { deps, sendMessage, deleteMessage, insert, from } = makeDeps({});
     await handleUpdate(
       {
         update_id: 2,
@@ -346,21 +348,25 @@ describe("handleUpdate — ignore branches", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
+    // The Supabase query builder must not even be consulted for an ignored update.
+    expect(from).not.toHaveBeenCalled();
   });
 
   it("ignores a group reply that is not sensitive (zero calls)", async () => {
-    const { deps, sendMessage, deleteMessage, insert } = makeDeps({});
+    const { deps, sendMessage, deleteMessage, insert, from } = makeDeps({});
     const update = sensitiveReply("Chào bạn nhé");
     await handleUpdate(update, deps);
     expect(sendMessage).not.toHaveBeenCalled();
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
+    // The Supabase query builder must not even be consulted for an ignored update.
+    expect(from).not.toHaveBeenCalled();
   });
 });
 
 describe("handleUpdate — private /start", () => {
   it("acknowledges the inbox and does nothing else", async () => {
-    const { deps, sendMessage, deleteMessage, insert } = makeDeps({});
+    const { deps, sendMessage, deleteMessage, insert, from } = makeDeps({});
     await handleUpdate(
       {
         update_id: 3,
@@ -378,6 +384,7 @@ describe("handleUpdate — private /start", () => {
     expect(sendMessage.mock.calls[0][0]).toBe(QLL_ID);
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
   });
 });
 
