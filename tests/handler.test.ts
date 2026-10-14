@@ -113,8 +113,12 @@ describe("handleUpdate — happy path", () => {
       `send:${GROUP_ID}`,
     ]);
 
-    // Inbox send carries the exact sensitive text to the QLL.
-    expect(sendMessage).toHaveBeenNthCalledWith(1, QLL_ID, "TK: user / MK: pass");
+    // Inbox send carries the QLL's own request followed by the credential text.
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      QLL_ID,
+      "📩 Yêu cầu của bạn: Cho mình xin tài khoản\n\nTK: user / MK: pass"
+    );
     // Confirmation line with the CTV display name.
     expect(sendMessage).toHaveBeenNthCalledWith(
       2,
@@ -122,6 +126,37 @@ describe("handleUpdate — happy path", () => {
       "🔒 Minh CTV đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL."
     );
     expect(deleteMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends only the credential text when the QLL request has no text", async () => {
+    const { deps, sendMessage } = makeDeps({
+      sendResults: [{ ok: true, messageId: 9 }],
+      deleteResults: [{ ok: true }],
+    });
+
+    // A sensitive reply whose replied-to QLL request carries no text.
+    const update: TelegramUpdate = {
+      update_id: 1,
+      message: {
+        message_id: REPLY_MSG_ID,
+        date: 1_700_000_100,
+        chat: { id: GROUP_ID, type: "supergroup" },
+        from: { id: 222, first_name: "Minh", last_name: "CTV" },
+        text: "TK: user / MK: pass",
+        reply_to_message: {
+          message_id: 400,
+          date: 1_700_000_000,
+          chat: { id: GROUP_ID, type: "supergroup" },
+          from: { id: QLL_ID, first_name: "Boss", last_name: "QLL" },
+          // no text
+        },
+      },
+    };
+
+    await handleUpdate(update, deps);
+
+    // No empty "📩 Yêu cầu của bạn:" header line when there is no request text.
+    expect(sendMessage).toHaveBeenNthCalledWith(1, QLL_ID, "TK: user / MK: pass");
   });
 });
 

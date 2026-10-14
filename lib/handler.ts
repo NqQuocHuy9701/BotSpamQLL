@@ -20,6 +20,17 @@ function confirmationLine(ctvName: string): string {
   return `🔒 ${ctvName} đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL.`;
 }
 
+// Builds the inbox payload delivered to the QLL: the QLL's own request first,
+// then the credential text the CTV replied with. When the request has no text,
+// only the credential text is sent (no empty header line).
+function buildInboxText(requestText: string, credentialText: string): string {
+  const request = requestText.trim();
+  if (request === "") {
+    return credentialText;
+  }
+  return `📩 Yêu cầu của bạn: ${request}\n\n${credentialText}`;
+}
+
 const START_ACK =
   "✅ Inbox đã sẵn sàng. Bot sẽ gửi thông tin Tài khoản / Mật khẩu vào đây.";
 
@@ -77,6 +88,7 @@ async function relay(
   const groupChatId = message.chat.id;
   const replyMessageId = message.message_id;
   const sensitiveText = message.text ?? "";
+  const inboxText = buildInboxText(replyTo.text ?? "", sensitiveText);
   const ctvName = message.from ? displayName(message.from) : "";
   const qllId = replyTo.from?.id;
 
@@ -88,7 +100,7 @@ async function relay(
 
   try {
     sendResult = await withTimeout(
-      deps.telegram.sendMessage(qllId as number, sensitiveText),
+      deps.telegram.sendMessage(qllId as number, inboxText),
       SEND_TIMEOUT_MS
     );
   } catch (error) {

@@ -37,13 +37,13 @@ Telegram Account Relay Bot is a serverless Telegram bot that protects sensitive 
 
 #### Acceptance Criteria
 
-1. WHEN the Webhook_Handler receives a Reply_Message in the Shared_Group that contains Sensitive_Content, THE Bot SHALL send the exact Sensitive_Content text to the Private_Inbox of the QLL who authored the replied-to Request_Message via Telegram sendMessage within 5 seconds of receipt.
+1. WHEN the Webhook_Handler receives a Reply_Message in the Shared_Group that contains Sensitive_Content, THE Bot SHALL send to the Private_Inbox of the QLL who authored the replied-to Request_Message, via Telegram sendMessage within 5 seconds of receipt, a message composed of the QLL Request_Message text prefixed with "📩 Yêu cầu của bạn: " followed by a blank line and then the exact Sensitive_Content text; and IF the replied-to Request_Message has no text, THEN THE Bot SHALL send only the exact Sensitive_Content text with no prefix line.
 2. WHEN the Bot has confirmed successful delivery of the Sensitive_Content to the Private_Inbox, THE Bot SHALL delete the originating Reply_Message from the Shared_Group via Telegram deleteMessage within 5 seconds of the delivery confirmation.
 3. IF the Telegram sendMessage call to the Private_Inbox does not return a success response, THEN THE Bot SHALL retain the Reply_Message in the Shared_Group, SHALL NOT delete the Reply_Message, and SHALL write one record to the Account_Logs_Table with a Log_Status value indicating private-inbox delivery failure.
 4. IF the Telegram deleteMessage call fails after the Sensitive_Content was successfully delivered to the Private_Inbox, THEN THE Bot SHALL retry the deleteMessage call up to 3 times and, if all retries fail, SHALL write one record to the Account_Logs_Table with a Log_Status value indicating deletion failure.
 5. WHEN the Bot has both successfully delivered the Sensitive_Content to the Private_Inbox and successfully deleted the Reply_Message from the Shared_Group, THE Bot SHALL write exactly one record to the Account_Logs_Table with Log_Status "Đã gửi Inbox".
 6. WHEN the Bot has both successfully delivered the Sensitive_Content to the Private_Inbox and successfully deleted the Reply_Message from the Shared_Group, THE Bot SHALL post the confirmation message "🔒 [Tên CTV] đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL." in the Shared_Group, substituting the display name of the CTV who authored the Reply_Message for [Tên CTV].
-7. WHEN the Bot sends Sensitive_Content to the Private_Inbox, THE Bot SHALL deliver text that is byte-for-byte identical to the Sensitive_Content contained in the Reply_Message, with no truncation, reformatting, or added characters.
+7. WHEN the Bot sends the Private_Inbox message, THE Bot SHALL include the Sensitive_Content from the Reply_Message byte-for-byte, with no truncation, reformatting, or added characters within the Sensitive_Content portion; the only text the Bot may add around it is the "📩 Yêu cầu của bạn: " prefix, the QLL Request_Message text, and the blank-line separator defined in criterion 1.
 
 ### Requirement 3: Sensitive Content Detection
 
