@@ -1,0 +1,23 @@
+{
+  "name": "telegram-account-relay-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram Account Relay Bot — a single Vercel Serverless Function that relays sensitive credentials to a private inbox and removes them from the group.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.2.24",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  },
+  "allowScripts": {
+    "esbuild@0.14.47": true,
+    "esbuild@0.21.5": true
+  }
+}
