@@ -251,19 +251,32 @@ describe("handleUpdate — delete-retry exhaustion on 403 security path", () => 
   });
 });
 
-describe("handleUpdate — 500ms removal SLA (send-before-delete ordering)", () => {
+describe("handleUpdate — removal timing contract (send-before-delete)", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("issues the group delete immediately after the inbox send resolves", async () => {
+  // Resolving the Requirement 2.2 (delete only AFTER confirmed inbox delivery)
+  // vs. Requirement 10.1 (issue delete within 500ms of webhook receipt)
+  // conflict: when Telegram's own sendMessage takes longer than 500ms, the two
+  // cannot both hold. design.md ("Critical action ordering") picks
+  // confirmed-delivery-first as the contract with precedence, so credentials
+  // are never removed from the group before they reach the QLL. The receipt-
+  // relative 500ms is therefore a documented best-effort exception, NOT a hard
+  // guarantee the handler can meet when the upstream send is slow.
+  //
+  // This test proves the contract that actually holds: once delivery confirms,
+  // the delete is issued PROMPTLY (same invocation, no extra wait), i.e. it is
+  // not blocked behind the 10s timeout budget. It intentionally does NOT claim
+  // a 500ms-from-receipt SLA, because that is bounded by Telegram, not by us.
+  it("issues the group delete promptly after delivery confirms (no extra wait past the send)", async () => {
     vi.useFakeTimers();
 
-    // The inbox send resolves after 300ms; the delete must follow right after
-    // confirmed delivery within the same invocation (design: send-before-delete,
-    // delete issued promptly — not blocked behind the 10s budget).
+    // The inbox send stays in flight; the delete must follow right after
+    // confirmed delivery within the same invocation.
     let resolveSend: ((r: SendResult) => void) | undefined;
     const trace: string[] = [];
+    const times: Record<string, number> = {};
 
     const sendMessage = vi.fn((chatId: number, _text: string) => {
       trace.push(`send:${chatId}`);
@@ -276,6 +289,7 @@ describe("handleUpdate — 500ms removal SLA (send-before-delete ordering)", () 
     });
     const deleteMessage = vi.fn(async (chatId: number, messageId: number) => {
       trace.push(`delete:${chatId}:${messageId}`);
+      times.delete = Date.now();
       return { ok: true } as DeleteResult;
     });
     const insert = vi.fn(async (record: { status: string }) => {
@@ -289,20 +303,25 @@ describe("handleUpdate — 500ms removal SLA (send-before-delete ordering)", () 
 
     const done = handleUpdate(sensitiveReply(), deps);
 
-    // Inbox send is in flight; no delete yet.
-    await vi.advanceTimersByTimeAsync(300);
+    // The upstream send is slow (900ms, i.e. already past any 500ms window);
+    // no delete may happen yet because delivery is not confirmed.
+    await vi.advanceTimersByTimeAsync(900);
     expect(trace).toEqual([`send:${QLL_ID}`]);
     expect(deleteMessage).not.toHaveBeenCalled();
 
-    // Delivery confirms -> delete is issued on the next microtask, well before
-    // the 10s timeout budget would ever elapse.
+    // Delivery confirms. From this instant, the delete must be issued without
+    // advancing the clock at all (prompt, same invocation).
+    const confirmAt = Date.now();
     resolveSend?.({ ok: true, messageId: 2 });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0); // drain microtasks only, 0ms elapsed
     await done;
 
     expect(trace[0]).toBe(`send:${QLL_ID}`);
     expect(trace[1]).toBe(`delete:${GROUP_ID}:${REPLY_MSG_ID}`);
     expect(deleteMessage).toHaveBeenCalledTimes(1);
+    // Elapsed time from delivery confirmation to the delete call is zero —
+    // the delete is NOT blocked behind the remaining 10s timeout budget.
+    expect(times.delete! - confirmAt).toBe(0);
   });
 });
 

@@ -46,6 +46,8 @@ describe("isSensitive — negatives", () => {
     "booktok is trending", // incidental t/k letters
     "milkman delivered", // incidental m/k letters
     "attack the problem", // contains "tk" letters inside a word
+    "notksecret", // contiguous "tk" embedded inside a larger word (no boundary)
+    "somkvalue", // contiguous "mk" embedded inside a larger word (no boundary)
     "", // empty
   ];
 

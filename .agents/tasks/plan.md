@@ -1,3 +1,47 @@
+# Verification note (iteration 3 — review-b findings fixed)
+
+Commands run at the workspace root on the Windows/PowerShell host, npm
+(exact commands and their pass/fail summary, so reviewers need not re-run):
+
+- `npm install` — PASS (exit code 0; 198 packages audited, up to date).
+- `npx tsc --noEmit` — PASS (exit code 0, no type errors across `api/`, `lib/`, `tests/`).
+- `npm test` (→ `vitest run`) — PASS: **8 test files, 73 tests, all green** (exit code 0).
+  - detector.test.ts (24), telegram.test.ts (15), handler.test.ts (12),
+    mapping.test.ts (9), config.test.ts (5), supabase.test.ts (3),
+    webhook.test.ts (3), integration.test.ts (2).
+
+## review-b (CHANGES_REQUESTED) findings addressed in iteration 3
+
+1. **500 ms removal SLA remains unproved** — Resolved by documenting the
+   contract conflict and testing the contract that actually holds. design.md
+   ("Critical action ordering") makes confirmed-delivery-first (Req 2.2) take
+   precedence over the receipt-relative 500 ms (Req 10.1): when Telegram's own
+   `sendMessage` is slower than 500 ms, both cannot hold, and credentials must
+   never leave the group before the QLL receives them. The receipt-relative
+   500 ms is therefore a documented best-effort exception bounded by Telegram,
+   not a hard guarantee the handler can make. The handler test was reframed from
+   an ordering-only "SLA" claim to prove the holding contract with elapsed-time
+   coverage: with the upstream send held in flight for 900 ms (already past any
+   500 ms window and with no delete issued), delivery is then confirmed and the
+   test asserts the group delete is issued with **0 ms** elapsed from
+   confirmation (not blocked behind the remaining 10 s timeout budget). No
+   user-visible behavior or spec'd branch was changed — only the test framing
+   and assertion, plus this documentation of the chosen precedence.
+2. **Embedded `tk`/`mk` negatives are missing** — Added `"notksecret"` and
+   `"somkvalue"` to the detector negative fixtures. Both embed a contiguous
+   `tk`/`mk` inside a larger all-letter word, so they stay non-sensitive under
+   the spec's boundary-aware `/\b(tk|mk)\b/` but would flip a regression to an
+   unbounded `/tk|mk/`. Detector tests now total 24 (was 22).
+3. **Coder-final verification evidence is absent** — The coder final message now
+   carries the exact commands and the 8-file / 73-test PASS summary verbatim,
+   providing the second source of green-suite evidence alongside this note.
+
+Zero live network calls remain: `fetch`, the Supabase client, and (in webhook
+unit tests) the handler/config are all mocked. The real BotFather token is NOT
+present anywhere in the repo; `.env.example` carries placeholder values only.
+
+---
+
 # Verification note (iteration 2 — review findings fixed)
 
 Commands run at the workspace root on the Windows/PowerShell host, npm:
