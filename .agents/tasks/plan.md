@@ -1,3 +1,53 @@
+# Verification note (iteration 4 — review.json CHANGES_REQUESTED findings fixed)
+
+Commands run at the workspace root on the Windows/PowerShell host, npm
+(exact commands and their pass/fail summary, so reviewers need not re-run):
+
+- `npm install` — PASS (exit code 0; 198 packages audited, up to date).
+- `npx tsc --noEmit` — PASS (exit code 0, no type errors across `api/`, `lib/`, `tests/`).
+- `npm test` (→ `vitest run`) — PASS: **8 test files, 73 tests, all green** (exit code 0).
+  - telegram.test.ts (15), mapping.test.ts (9), webhook.test.ts (3),
+    config.test.ts (5), supabase.test.ts (3), handler.test.ts (12),
+    integration.test.ts (2), detector.test.ts (24).
+
+## review.json (CHANGES_REQUESTED) findings addressed in iteration 4
+
+1. **Receipt-relative removal deadline (Req 2.2 vs Req 10.1 conflict)** — The
+   prior iteration documented the precedence only in this plan note, which the
+   reviewer correctly rejected because the AUTHORITATIVE spec still claimed an
+   unconditional 500 ms deadline on both paths. Resolved this iteration by
+   amending the authoritative spec itself:
+   - `design.md` → "Critical action ordering" step 1 now carries a "Timing
+     precedence (resolves the Req 2.2 vs Req 10.1 conflict)" paragraph:
+     confirmed-delivery-before-delete (Req 2.2) always takes precedence on the
+     success path, so the receipt-relative 500 ms of Req 10.1 is a best-effort
+     target bounded by Telegram's upstream send latency there; the handler's
+     actual success-path guarantee is a prompt delete (same invocation, no added
+     wait, never blocked behind the 10 s budget). On the 403/timeout security
+     path there is no delivery to await, so the delete is issued immediately and
+     Req 10.1 is met as written.
+   - `design.md` → Error Handling closing paragraph amended to the same effect
+     (removed the blanket "both paths within 500 ms" claim).
+   - `requirements.md` → Req 10.1 amended to state the success-path exception
+     explicitly, so the authoritative requirement no longer asserts a hard
+     deadline it cannot meet when Telegram is slow.
+   The handler implementation was NOT changed (review-a APPROVED its ordering):
+   it already sends-first, deletes only after confirmed delivery, and the
+   slow-send handler test still proves the delete is issued with 0 ms elapsed
+   from confirmation. The test's comment was updated to cite the now-resolved
+   authoritative spec rather than a plan-note exception. No user-visible
+   behavior and no Vietnamese string changed.
+2. **Coder-final verification evidence** — The coder final message now carries
+   the exact commands and the 8-file / 73-test PASS summary verbatim (see the
+   final step message), providing the second source of green-suite evidence
+   alongside this note.
+
+Zero live network calls remain: `fetch`, the Supabase client, and (in webhook
+unit tests) the handler/config are all mocked. The real BotFather token is NOT
+present anywhere in the repo; `.env.example` carries placeholder values only.
+
+---
+
 # Verification note (iteration 3 — review-b findings fixed)
 
 Commands run at the workspace root on the Windows/PowerShell host, npm

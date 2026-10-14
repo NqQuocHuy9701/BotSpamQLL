@@ -125,5 +125,5 @@ Telegram Account Relay Bot is a serverless Telegram bot that protects sensitive 
 
 #### Acceptance Criteria
 
-1. WHEN the Webhook_Handler receives a Reply_Message containing Sensitive_Content, THE Bot SHALL issue the deleteMessage request within 500 milliseconds of receiving the update.
+1. WHEN the Webhook_Handler receives a Reply_Message containing Sensitive_Content, THE Bot SHALL issue the deleteMessage request within 500 milliseconds of receiving the update, EXCEPT on the success path where confirmed-delivery-before-delete (Requirement 2.2) takes precedence: there the 500-millisecond target is best-effort and bounded by Telegram's own sendMessage latency, and THE Bot SHALL instead issue the deleteMessage promptly within the same webhook invocation once inbox delivery is confirmed, without additional delay. On the 403 / timeout security path, where there is no delivery to await, THE Bot SHALL issue the deleteMessage within 500 milliseconds of receiving the update.
 2. WHEN the Bot sends Sensitive_Content to the Private_Inbox, THE Bot SHALL issue the sendMessage request during the same webhook invocation that processes the Reply_Message.

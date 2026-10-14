@@ -256,19 +256,21 @@ describe("handleUpdate — removal timing contract (send-before-delete)", () => 
     vi.useRealTimers();
   });
 
-  // Resolving the Requirement 2.2 (delete only AFTER confirmed inbox delivery)
-  // vs. Requirement 10.1 (issue delete within 500ms of webhook receipt)
-  // conflict: when Telegram's own sendMessage takes longer than 500ms, the two
-  // cannot both hold. design.md ("Critical action ordering") picks
-  // confirmed-delivery-first as the contract with precedence, so credentials
-  // are never removed from the group before they reach the QLL. The receipt-
-  // relative 500ms is therefore a documented best-effort exception, NOT a hard
-  // guarantee the handler can meet when the upstream send is slow.
+  // The Req 2.2 (delete only AFTER confirmed inbox delivery) vs. Req 10.1
+  // (issue delete within 500ms of webhook receipt) conflict is resolved in the
+  // AUTHORITATIVE spec: design.md "Critical action ordering" > "Timing
+  // precedence" and the amended requirements.md Req 10.1 both make
+  // confirmed-delivery-before-delete take precedence on the success path, so
+  // credentials are never removed from the group before they reach the QLL.
+  // The receipt-relative 500ms is, on the success path, a best-effort target
+  // bounded by Telegram's own sendMessage latency — NOT a hard guarantee the
+  // handler can meet when the upstream send is slow.
   //
-  // This test proves the contract that actually holds: once delivery confirms,
-  // the delete is issued PROMPTLY (same invocation, no extra wait), i.e. it is
-  // not blocked behind the 10s timeout budget. It intentionally does NOT claim
-  // a 500ms-from-receipt SLA, because that is bounded by Telegram, not by us.
+  // This test proves the contract the resolved spec actually guarantees on the
+  // success path: once delivery confirms, the delete is issued PROMPTLY (same
+  // invocation, no extra wait), i.e. not blocked behind the 10s timeout budget.
+  // It intentionally does NOT claim a 500ms-from-receipt SLA on the success
+  // path, because that is bounded by Telegram, not by the handler.
   it("issues the group delete promptly after delivery confirms (no extra wait past the send)", async () => {
     vi.useFakeTimers();
 
