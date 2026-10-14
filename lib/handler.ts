@@ -132,7 +132,11 @@ async function relay(
         deps.supabase,
         buildLogRecord(message, "Lỗi chưa start bot")
       );
-      await deps.telegram.sendMessage(groupChatId, WARNING_NOT_STARTED);
+      await deps.telegram.sendMessage(
+        groupChatId,
+        WARNING_NOT_STARTED,
+        replyTo.message_id
+      );
     } else {
       // Deletes failed; log the delete failure. The warning stays pending
       // until the reply is confirmed deleted.
@@ -162,7 +166,11 @@ async function relay(
 
   if (deleteResult.ok) {
     await insertLog(deps.supabase, buildLogRecord(message, "Đã gửi Inbox"));
-    await deps.telegram.sendMessage(groupChatId, confirmationLine(ctvName));
+    await deps.telegram.sendMessage(
+      groupChatId,
+      confirmationLine(ctvName),
+      replyTo.message_id
+    );
   } else {
     // Delivered to inbox but all 3 delete retries failed.
     await insertLog(

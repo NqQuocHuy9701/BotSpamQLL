@@ -60,6 +60,34 @@ describe("createTelegramClient.sendMessage", () => {
     const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
     expect(body).toEqual({ chat_id: 99, text: "TK: user / MK: pass" });
   });
+
+  it("includes reply_to_message_id when a reply target is given", async () => {
+    const spy = vi.fn(async (_url: string, _init?: RequestInit) => ({
+      json: async () => ({ ok: true, result: { message_id: 1 } }),
+    }));
+    vi.stubGlobal("fetch", spy as unknown as typeof fetch);
+    const client = createTelegramClient("token");
+    await client.sendMessage(42, "xong rồi nhé", 400);
+    const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({
+      chat_id: 42,
+      text: "xong rồi nhé",
+      reply_to_message_id: 400,
+      allow_sending_without_reply: true,
+    });
+  });
+
+  it("omits reply fields when no reply target is given", async () => {
+    const spy = vi.fn(async (_url: string, _init?: RequestInit) => ({
+      json: async () => ({ ok: true, result: { message_id: 1 } }),
+    }));
+    vi.stubGlobal("fetch", spy as unknown as typeof fetch);
+    const client = createTelegramClient("token");
+    await client.sendMessage(42, "no reply");
+    const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.reply_to_message_id).toBeUndefined();
+    expect(body.allow_sending_without_reply).toBeUndefined();
+  });
 });
 
 describe("createTelegramClient.deleteMessage", () => {

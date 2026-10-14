@@ -119,11 +119,13 @@ describe("handleUpdate — happy path", () => {
       QLL_ID,
       "📩 Yêu cầu của bạn: Cho mình xin tài khoản\n\nTK: user / MK: pass"
     );
-    // Confirmation line with the CTV display name.
+    // Confirmation line with the CTV display name, posted as a REPLY to the
+    // QLL's original request message (message_id 400).
     expect(sendMessage).toHaveBeenNthCalledWith(
       2,
       GROUP_ID,
-      "🔒 Minh CTV đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL."
+      "🔒 Minh CTV đã gửi thông tin Tài khoản / Mật khẩu vào Inbox cá nhân của QLL.",
+      400
     );
     expect(deleteMessage).toHaveBeenCalledTimes(1);
   });
@@ -175,7 +177,7 @@ describe("handleUpdate — 403 security path", () => {
       "log:Lỗi chưa start bot",
       `send:${GROUP_ID}`,
     ]);
-    expect(sendMessage).toHaveBeenNthCalledWith(2, GROUP_ID, WARNING);
+    expect(sendMessage).toHaveBeenNthCalledWith(2, GROUP_ID, WARNING, 400);
   });
 });
 
@@ -206,7 +208,7 @@ describe("handleUpdate — real 10s timeout behaves like 403", () => {
       "log:Lỗi chưa start bot",
       `send:${GROUP_ID}`,
     ]);
-    expect(sendMessage).toHaveBeenNthCalledWith(2, GROUP_ID, WARNING);
+    expect(sendMessage).toHaveBeenNthCalledWith(2, GROUP_ID, WARNING, 400);
   });
 });
 

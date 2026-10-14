@@ -4,7 +4,11 @@
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
 export interface TelegramClient {
-  sendMessage(chatId: number, text: string): Promise<SendResult>;
+  sendMessage(
+    chatId: number,
+    text: string,
+    replyToMessageId?: number
+  ): Promise<SendResult>;
   deleteMessage(chatId: number, messageId: number): Promise<DeleteResult>;
 }
 
@@ -31,12 +35,22 @@ function errorMessage(error: unknown, fallback: string): string {
 export function createTelegramClient(botToken: string): TelegramClient {
   const base = `${TELEGRAM_API_BASE}/bot${botToken}`;
 
-  async function sendMessage(chatId: number, text: string): Promise<SendResult> {
+  async function sendMessage(
+    chatId: number,
+    text: string,
+    replyToMessageId?: number
+  ): Promise<SendResult> {
     try {
+      const body: Record<string, unknown> = { chat_id: chatId, text };
+      if (replyToMessageId !== undefined) {
+        body.reply_to_message_id = replyToMessageId;
+        // Don't fail the whole send if the replied-to message was deleted.
+        body.allow_sending_without_reply = true;
+      }
       const response = await fetch(`${base}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text }),
+        body: JSON.stringify(body),
       });
 
       const payload = (await response.json()) as {
