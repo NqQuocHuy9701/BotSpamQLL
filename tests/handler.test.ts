@@ -458,6 +458,64 @@ describe("handleUpdate — private /start", () => {
   });
 });
 
+describe("handleUpdate — /spamtest (admin-only PoC)", () => {
+  const ADMIN_ID = 6532155675;
+  const EXPECTED_MESSAGE = [
+    "✅ Thông tin học của con",
+    "Học sinh: Nguyễn Đức Minh",
+    "Lịch học: T5 (20:30-21:30)",
+    "Thời lượng buổi học : 60 phút",
+    "Ngày tham gia lớp học: 15-10-2026",
+    "Mã lớp học: TCLC.2025.0207 Khối lớp: 3",
+    "",
+    "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_AnhMTK",
+  ].join("\n");
+
+  function spamTestUpdate(fromId: number, text = "/spamtest"): TelegramUpdate {
+    return {
+      update_id: 50,
+      message: {
+        message_id: 1,
+        date: 1_700_000_000,
+        chat: { id: GROUP_ID, type: "supergroup", title: "Nhóm QLL" },
+        from: { id: fromId, first_name: "Tester" },
+        text,
+      },
+    };
+  }
+
+  it("posts the announcement form tagging @SA_AnhMTK when the admin runs it", async () => {
+    // relay stays OFF — /spamtest is independent of the relay switch.
+    const { deps, sendMessage, deleteMessage, insert } = makeDeps({
+      relayEnabled: false,
+    });
+
+    await handleUpdate(spamTestUpdate(ADMIN_ID), deps);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(GROUP_ID, EXPECTED_MESSAGE);
+    // Pure announcement: no deletes, no credential logging.
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("ignores /spamtest from a non-admin (posts nothing)", async () => {
+    const { deps, sendMessage } = makeDeps({ relayEnabled: false });
+    await handleUpdate(spamTestUpdate(999999), deps);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("still works when relay is enabled, without running the relay flow", async () => {
+    const { deps, sendMessage, deleteMessage } = makeDeps({
+      relayEnabled: true,
+    });
+    await handleUpdate(spamTestUpdate(ADMIN_ID), deps);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(GROUP_ID, EXPECTED_MESSAGE);
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("handleUpdate — passive collection mode (relay disabled)", () => {
   it("collects the sender but performs NO relay action when relay is off", async () => {
     // Even a sensitive reply must not be deleted, relayed, or replied to while

@@ -38,6 +38,24 @@ function buildInboxText(requestText: string, credentialText: string): string {
 const START_ACK =
   "✅ Inbox đã sẵn sàng. Bot sẽ gửi thông tin Tài khoản / Mật khẩu vào đây.";
 
+// --- /spamtest: one-off proof-of-concept for tagging a QLL in the group. ---
+// Locked to a single admin telegram_id; anyone else is ignored. Independent of
+// RELAY_ENABLED (the credential relay stays off). Posts exactly ONE message.
+const SPAMTEST_COMMAND = "/spamtest";
+const SPAMTEST_ADMIN_ID = 6532155675; // Quốc Huy 🐾 (OP_HuyNQ5)
+
+// The sample announcement form, tagging the fixed target @SA_AnhMTK.
+const SPAMTEST_MESSAGE = [
+  "✅ Thông tin học của con",
+  "Học sinh: Nguyễn Đức Minh",
+  "Lịch học: T5 (20:30-21:30)",
+  "Thời lượng buổi học : 60 phút",
+  "Ngày tham gia lớp học: 15-10-2026",
+  "Mã lớp học: TCLC.2025.0207 Khối lớp: 3",
+  "",
+  "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_AnhMTK",
+].join("\n");
+
 // Internal (non-glossary) audit markers written to the status column.
 const STATUS_DELIVERY_FAILURE = "Lỗi gửi Inbox";
 const STATUS_DELETION_FAILURE = "Lỗi thu hồi";
@@ -65,6 +83,11 @@ export async function handleUpdate(
   // Passive user collection runs on EVERY group update, regardless of the
   // relay switch: capture the sender and any newly-joined members.
   await collectUsers(message, deps);
+
+  // /spamtest: admin-only, one message, independent of the relay switch.
+  if (await maybeHandleSpamTest(message, deps)) {
+    return;
+  }
 
   // HARD STOP when relay is disabled. The bot must not delete, send to inbox,
   // or reply to anyone while collecting users. This is the "nằm vùng" mode.
@@ -129,6 +152,26 @@ async function collectUsers(
 
 function isBot(user: TelegramUser): boolean {
   return user.is_bot === true;
+}
+
+// Handles the admin-only /spamtest command. Returns true if the update WAS a
+// /spamtest attempt (so the caller stops further processing), false otherwise.
+// Only SPAMTEST_ADMIN_ID may trigger it; anyone else is a silent no-op.
+async function maybeHandleSpamTest(
+  message: TelegramMessage,
+  deps: Deps
+): Promise<boolean> {
+  const text = message.text?.trim() ?? "";
+  if (text !== SPAMTEST_COMMAND) {
+    return false;
+  }
+  const isGroup =
+    message.chat.type === "group" || message.chat.type === "supergroup";
+  if (!isGroup || message.from?.id !== SPAMTEST_ADMIN_ID) {
+    return true; // swallow: not authorized / wrong chat, post nothing
+  }
+  await deps.telegram.sendMessage(message.chat.id, SPAMTEST_MESSAGE);
+  return true;
 }
 
 async function relay(
