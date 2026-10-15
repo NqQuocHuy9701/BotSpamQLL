@@ -293,16 +293,11 @@ async function maybeHandleQllCommands(
       );
       return true;
     }
-    // Reject duplicates: one username = one QLL row. If it already exists
-    // (added manually OR auto-collected from the group), do NOT add again.
+    // One username = one QLL row. If the username already exists (added
+    // manually OR auto-collected), UPDATE its registered full name to the new
+    // one (so mapping-by-full-name works for the sheet's name); otherwise add a
+    // fresh row. Either way there is never a duplicate row for a username.
     const existing = await findUserByUsername(deps.supabase, username);
-    if (existing.exists) {
-      await deps.telegram.sendMessage(
-        message.chat.id,
-        `⚠️ QLL @${username} đã có trong hệ thống (${existing.fullName || "?"}). Không thêm trùng.`
-      );
-      return true;
-    }
     await addUserManual(
       deps.supabase,
       username,
@@ -311,7 +306,9 @@ async function maybeHandleQllCommands(
     );
     await deps.telegram.sendMessage(
       message.chat.id,
-      `✅ Đã thêm QLL: @${username} (${fullName}).`
+      existing.exists
+        ? `♻️ Đã cập nhật tên QLL: @${username} -> ${fullName}.`
+        : `✅ Đã thêm QLL: @${username} (${fullName}).`
     );
     return true;
   }

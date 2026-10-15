@@ -62,10 +62,19 @@ riêng và thao tác trong nhóm QLL. Nó có **3 nhóm chức năng**:
 
 > `/adduser` chấp nhận username có hoặc không có `@`; phần còn lại của dòng là họ
 > tên đầy đủ (có dấu, có khoảng trắng). **Mỗi username chỉ lưu đúng 1 dòng** —
-> không bao giờ trùng. Nếu username đã có (dù do thêm tay hay bot tự gom), bot
-> báo `⚠️ QLL @... đã có trong hệ thống. Không thêm trùng.` và **không ghi đè**.
-> Khi QLL (đã thêm tay) sau này nhắn trong nhóm, bot **cập nhật đúng dòng đó**
-> thay vì tạo dòng mới. Thiếu username hoặc họ tên → bot báo cú pháp, không ghi.
+> không bao giờ trùng. Nếu username **chưa có** → bot thêm mới (`✅ Đã thêm`).
+> Nếu username **đã có** (do thêm tay hoặc bot tự gom) → bot **cập nhật tên**
+> thành tên bạn vừa nhập (`♻️ Đã cập nhật tên`), vẫn giữ đúng 1 dòng. Nhờ vậy
+> bạn có thể gán **tên chuẩn trong sheet** cho một username mà bot tự gom được
+> với tên Telegram khác (vd username `@SSA_HuyenKTT1` tự đặt tên "Huyen Thu" →
+> `/adduser @SSA_HuyenKTT1 Khuất Thị Thu Huyền 1` để map đúng theo sheet).
+> Thiếu username hoặc họ tên → bot báo cú pháp, không ghi.
+>
+> **Vì sao cần:** bot map tên QLL trong sheet ra username theo quy tắc (mục 6).
+> Nếu username **không theo chuẩn** `SA_/OP_/VH_` (vd gõ nhầm `SSA_`, hoặc có
+> hậu tố số lạ), quy tắc có thể trượt. Khi đó dùng `/adduser` để đăng ký thẳng
+> **tên-trong-sheet ↔ username**: bot sẽ ưu tiên khớp theo đúng tên đã đăng ký
+> trước, nên map được bất kể username có chuẩn hay không.
 
 > Lệnh `/ok` nhận cả chữ hoa/thường và dư khoảng trắng (vd `/OK  21:00`).
 > Giờ theo định dạng 24h `HH:MM`, ngày theo `dd/mm` (ngày/tháng). Nhập sai (vd

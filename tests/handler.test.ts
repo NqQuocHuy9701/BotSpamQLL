@@ -1156,20 +1156,23 @@ describe("handleUpdate — manual QLL commands (admin DM)", () => {
     expect(sendMessage.mock.calls.some((c) => c[0] === TARGET_GROUP)).toBe(false);
   });
 
-  it("/adduser reports 'đã có' and does NOT upsert when the username already exists", async () => {
-    const { deps, sendMessage, upsert } = makeDeps({
+  it("/adduser UPDATES the registered name when the username already exists", async () => {
+    const { deps, sendMessage } = makeDeps({
       relayEnabled: false,
-      existingUser: { username: "SA_HaNH3", fullName: "Nguyễn Hải Hà 3" },
+      existingUser: { username: "SA_HaNH3", fullName: "Ha Nguyen" },
     });
-    await handleUpdate(textDm(ADMIN_ID, "/adduser @SA_HaNH3 Người Khác"), deps);
+    await handleUpdate(
+      textDm(ADMIN_ID, "/adduser @SA_HaNH3 Nguyễn Hải Hà 3"),
+      deps
+    );
 
-    // No new row written; the admin is told it already exists.
-    expect(upsert).not.toHaveBeenCalled();
+    // One row per username is preserved; the admin is told the name was updated.
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const reply = sendMessage.mock.calls[0] as [number, string];
     expect(reply[0]).toBe(ADMIN_ID);
     expect(reply[1]).toContain("@SA_HaNH3");
-    expect(reply[1]).toContain("đã có");
+    expect(reply[1]).toContain("cập nhật");
+    expect(reply[1]).toContain("Nguyễn Hải Hà 3");
   });
 
   it("/adduser without the leading @ still upserts the bare username", async () => {
