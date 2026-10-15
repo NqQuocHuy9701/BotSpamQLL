@@ -146,6 +146,63 @@ describe("createTelegramClient.sendMessage transport failures", () => {
   });
 });
 
+describe("createTelegramClient.downloadFile", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves getFile then downloads the bytes from the file host", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce({
+        json: async () => ({
+          ok: true,
+          result: { file_path: "documents/x.xlsx" },
+        }),
+      })
+      .mockResolvedValueOnce({
+        arrayBuffer: async () => bytes,
+      });
+    vi.stubGlobal("fetch", spy as unknown as typeof fetch);
+
+    const client = createTelegramClient("token");
+    const result = await client.downloadFile("file-123");
+
+    expect(result.ok).toBe(true);
+    expect((result as { buffer: Buffer }).buffer).toEqual(
+      Buffer.from([1, 2, 3, 4])
+    );
+    // First call hits getFile with the file_id; second hits the /file/bot host.
+    expect(spy.mock.calls[0][0]).toBe(
+      "https://api.telegram.org/bottoken/getFile?file_id=file-123"
+    );
+    expect(spy.mock.calls[1][0]).toBe(
+      "https://api.telegram.org/file/bottoken/documents/x.xlsx"
+    );
+  });
+
+  it("returns a structured failure when getFile reports not-ok", async () => {
+    mockFetchOnce({ ok: false, description: "file not found" });
+    const client = createTelegramClient("token");
+    const result = await client.downloadFile("missing");
+    expect(result).toEqual({ ok: false, description: "file not found" });
+  });
+
+  it("returns a structured failure when fetch rejects (no throw)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNRESET");
+      }) as unknown as typeof fetch
+    );
+    const client = createTelegramClient("token");
+    const result = await client.downloadFile("file-123");
+    expect(result.ok).toBe(false);
+    expect((result as { description: string }).description).toBe("ECONNRESET");
+  });
+});
+
 describe("withTimeout", () => {
   it("resolves when the promise settles in time", async () => {
     await expect(withTimeout(Promise.resolve("ok"), 1000)).resolves.toBe("ok");
@@ -167,6 +224,7 @@ describe("deleteWithRetry", () => {
     const client: TelegramClient = {
       sendMessage: vi.fn(),
       deleteMessage: vi.fn(async () => ({ ok: true as const })),
+      downloadFile: vi.fn(),
     };
     const result = await deleteWithRetry(client, 1, 2);
     expect(result).toEqual({ ok: true });
@@ -180,6 +238,7 @@ describe("deleteWithRetry", () => {
         ok: false as const,
         description: "fail",
       })),
+      downloadFile: vi.fn(),
     };
     const result = await deleteWithRetry(client, 1, 2);
     expect(result).toEqual({ ok: false, description: "fail" });
@@ -194,6 +253,7 @@ describe("deleteWithRetry", () => {
     const client: TelegramClient = {
       sendMessage: vi.fn(),
       deleteMessage,
+      downloadFile: vi.fn(),
     };
     const result = await deleteWithRetry(client, 1, 2);
     expect(result).toEqual({ ok: true });
@@ -208,6 +268,7 @@ describe("deleteWithRetry", () => {
     const client: TelegramClient = {
       sendMessage: vi.fn(),
       deleteMessage,
+      downloadFile: vi.fn(),
     };
     const result = await deleteWithRetry(client, 1, 2);
     expect(result).toEqual({ ok: true });
@@ -221,6 +282,7 @@ describe("deleteWithRetry", () => {
     const client: TelegramClient = {
       sendMessage: vi.fn(),
       deleteMessage,
+      downloadFile: vi.fn(),
     };
     const result = await deleteWithRetry(client, 1, 2);
     expect(result.ok).toBe(false);

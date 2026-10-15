@@ -1,9 +1,18 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { buildAnnouncement, buildSummary, parseSheet } from "./batch.js";
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
-import { insertLog, upsertUser } from "./supabase.js";
+import { mapQll } from "./qllmap.js";
+import {
+  deletePendingBatch,
+  insertLog,
+  listUsernames,
+  loadPendingBatch,
+  savePendingBatch,
+  upsertUser,
+} from "./supabase.js";
 import {
   deleteWithRetry,
   TimeoutError,
@@ -11,6 +20,7 @@ import {
   type TelegramClient,
 } from "./telegram.js";
 import type {
+  MappedItem,
   TelegramMessage,
   TelegramUpdate,
   TelegramUser,
@@ -52,6 +62,16 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
+
+// Batch-announcement commands (admin private DM only) and the inter-send delay
+// used when posting the confirmed batch into the target group.
+const BATCH_OK_COMMAND = "/ok";
+const BATCH_CANCEL_COMMAND = "/huy";
+const SEND_DELAY_MS = 400;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // The sample announcement form, tagging the fixed target @SA_AnhMTK.
 const SPAMTEST_MESSAGE = [
@@ -95,6 +115,12 @@ export async function handleUpdate(
 
   // /spamtest: admin-only, one message, independent of the relay switch.
   if (await maybeHandleSpamTest(message, deps)) {
+    return;
+  }
+
+  // Batch announcement from an .xlsx file (admin private DM only). Independent
+  // of the relay switch, exactly like /spam.
+  if (await maybeHandleBatch(message, deps)) {
     return;
   }
 
@@ -194,6 +220,141 @@ async function maybeHandleSpamTest(
     "✅ Đã gửi thông báo vào nhóm."
   );
   return true;
+}
+
+// True only for a private-chat message sent by an allow-listed operator.
+function isAdminPrivate(message: TelegramMessage): boolean {
+  const fromId = message.from?.id;
+  return (
+    message.chat.type === "private" &&
+    fromId !== undefined &&
+    SPAMTEST_ADMIN_IDS.includes(fromId)
+  );
+}
+
+// Batch-announcement dispatcher. Only an admin in a private chat is served;
+// everyone/everywhere else returns false so normal processing continues (and
+// group documents still get passively collected upstream). Returns true when
+// this handler OWNED the update. All downstream errors are caught and reported
+// privately — the function never throws, so the webhook always returns 200.
+//
+// Three owned cases:
+//   1. a document (any caption that is not /ok): download + parse + map, save
+//      the ready-to-send items to pending_batches, reply with a summary. Posts
+//      NOTHING to the group.
+//   2. /ok: load the pending batch and post one announcement per mapped item
+//      into the target group, delete the pending row, confirm.
+//   3. /huy: delete the pending row and confirm.
+async function maybeHandleBatch(
+  message: TelegramMessage,
+  deps: Deps
+): Promise<boolean> {
+  if (!isAdminPrivate(message)) {
+    return false;
+  }
+  const adminId = message.from!.id;
+  const text = message.text?.trim() ?? "";
+
+  // Case 1: a document upload (unless the caption is exactly /ok, which we let
+  // the /ok text path own — in practice /ok arrives as text, not a caption).
+  if (message.document && message.caption?.trim() !== BATCH_OK_COMMAND) {
+    const download = await deps.telegram.downloadFile(message.document.file_id);
+    if (!download.ok) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Không tải được file. Thử gửi lại nhé."
+      );
+      return true;
+    }
+
+    let rows;
+    try {
+      rows = parseSheet(download.buffer);
+    } catch {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Không đọc được file Excel. Kiểm tra lại định dạng .xlsx."
+      );
+      return true;
+    }
+
+    const known = await listUsernames(deps.supabase);
+    const knownUsernames = known.usernames;
+
+    const items: MappedItem[] = [];
+    const mappedSummary: { tenHS: string; username: string }[] = [];
+    const unmapped: string[] = [];
+
+    for (const row of rows) {
+      const match = mapQll(row.qll, knownUsernames);
+      if (match.kind === "found") {
+        items.push({
+          tenHS: row.tenHS,
+          maLop: row.maLop,
+          ngayHoc: row.ngayHoc,
+          lichHoc: row.lichHoc,
+          username: match.username,
+        });
+        mappedSummary.push({ tenHS: row.tenHS, username: match.username });
+      } else {
+        unmapped.push(row.qll);
+      }
+    }
+
+    await savePendingBatch(deps.supabase, adminId, items);
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      buildSummary(rows.length, mappedSummary, unmapped)
+    );
+    return true;
+  }
+
+  // Case 2: /ok -> post the pending batch into the target group.
+  if (text === BATCH_OK_COMMAND) {
+    const pending = await loadPendingBatch(deps.supabase, adminId);
+    const items = pending.items ?? [];
+    if (!pending.ok || items.length === 0) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Không có danh sách nào đang chờ."
+      );
+      return true;
+    }
+
+    let sent = 0;
+    for (let i = 0; i < items.length; i++) {
+      const result = await deps.telegram.sendMessage(
+        SPAMTEST_TARGET_CHAT_ID,
+        buildAnnouncement(items[i])
+      );
+      if (result.ok) {
+        sent++;
+      }
+      if (i < items.length - 1) {
+        await sleep(SEND_DELAY_MS);
+      }
+    }
+
+    await deletePendingBatch(deps.supabase, adminId);
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      `✅ Đã gửi ${sent}/${items.length} HS vào nhóm.`
+    );
+    return true;
+  }
+
+  // Case 3: /huy -> drop the pending batch.
+  if (text === BATCH_CANCEL_COMMAND) {
+    await deletePendingBatch(deps.supabase, adminId);
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      "Đã huỷ danh sách đang chờ."
+    );
+    return true;
+  }
+
+  // Anything else from the admin private chat (e.g. /start) is not ours.
+  return false;
 }
 
 async function relay(

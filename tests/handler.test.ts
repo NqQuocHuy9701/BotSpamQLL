@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { handleUpdate, type Deps } from "../lib/handler.js";
+import * as XLSX from "xlsx";
 import type {
   SendResult,
   DeleteResult,
+  DownloadResult,
   TelegramClient,
 } from "../lib/telegram.js";
-import type { TelegramUpdate } from "../lib/types.js";
+import type { MappedItem, TelegramUpdate } from "../lib/types.js";
+import { buildAnnouncement } from "../lib/batch.js";
 
 const WARNING =
   "⚠️ Đã ẩn thông tin! QLL cần bấm /start ở khung chat riêng với Bot để nhận Inbox.";
@@ -20,13 +23,21 @@ function makeDeps(options: {
   sendPending?: boolean[];
   deleteResults?: DeleteResult[];
   relayEnabled?: boolean;
+  // Batch feature: control downloadFile and the pending_batches / username
+  // queries used by maybeHandleBatch.
+  downloadResult?: DownloadResult;
+  pendingItems?: MappedItem[] | null;
+  knownUsernames?: string[];
 }): {
   deps: Deps;
   trace: string[];
   sendMessage: ReturnType<typeof vi.fn>;
   deleteMessage: ReturnType<typeof vi.fn>;
+  downloadFile: ReturnType<typeof vi.fn>;
   insert: ReturnType<typeof vi.fn>;
   upsert: ReturnType<typeof vi.fn>;
+  pendingUpsert: ReturnType<typeof vi.fn>;
+  pendingDeleteEq: ReturnType<typeof vi.fn>;
   from: ReturnType<typeof vi.fn>;
 } {
   const trace: string[] = [];
@@ -59,7 +70,15 @@ function makeDeps(options: {
     return deleteResults[i] ?? ({ ok: true } as DeleteResult);
   });
 
-  const telegram: TelegramClient = { sendMessage, deleteMessage };
+  const downloadFile = vi.fn(async (_fileId: string) => {
+    trace.push("download");
+    return (
+      options.downloadResult ??
+      ({ ok: false, description: "no download set" } as DownloadResult)
+    );
+  });
+
+  const telegram: TelegramClient = { sendMessage, deleteMessage, downloadFile };
 
   // Records each inserted log row in the trace.
   const insert = vi.fn(async (record: { status: string }) => {
@@ -71,10 +90,44 @@ function makeDeps(options: {
   const upsert = vi.fn(async (_record: { telegram_id: number }) => {
     return { error: null };
   });
+
+  // pending_batches query-builder stubs.
+  const pendingUpsert = vi.fn(async () => {
+    trace.push("savePending");
+    return { error: null };
+  });
+  const pendingDeleteEq = vi.fn(async () => {
+    trace.push("deletePending");
+    return { error: null };
+  });
+  const pendingSelectMaybeSingle = vi.fn(async () => ({
+    data:
+      options.pendingItems === undefined || options.pendingItems === null
+        ? null
+        : { items: options.pendingItems },
+    error: null,
+  }));
+
+  // telegram_users_qll .select("username") returns the injected known list.
+  const usernameSelect = vi.fn(async () => ({
+    data: (options.knownUsernames ?? []).map((username) => ({ username })),
+    error: null,
+  }));
+
   // Route .from(table) to the right query-builder stub by table name.
   const from = vi.fn((table: string) => {
     if (table === "telegram_users_qll") {
-      return { upsert };
+      // Passive collection uses .upsert; batch mapping uses .select("username").
+      return { upsert, select: usernameSelect };
+    }
+    if (table === "pending_batches") {
+      return {
+        upsert: pendingUpsert,
+        select: () => ({
+          eq: () => ({ maybeSingle: pendingSelectMaybeSingle }),
+        }),
+        delete: () => ({ eq: pendingDeleteEq }),
+      };
     }
     return { insert };
   });
@@ -91,8 +144,11 @@ function makeDeps(options: {
     trace,
     sendMessage,
     deleteMessage,
+    downloadFile,
     insert,
     upsert,
+    pendingUpsert,
+    pendingDeleteEq,
     from,
   };
 }
@@ -363,8 +419,9 @@ describe("handleUpdate — removal timing contract (send-before-delete)", () => 
       return { error: null };
     });
     const upsert = vi.fn(async () => ({ error: null }));
+    const downloadFile = vi.fn();
     const deps: Deps = {
-      telegram: { sendMessage, deleteMessage },
+      telegram: { sendMessage, deleteMessage, downloadFile },
       supabase: {
         from: vi.fn((table: string) =>
           table === "telegram_users_qll" ? { upsert } : { insert }
@@ -612,6 +669,225 @@ describe("handleUpdate — passive collection mode (relay disabled)", () => {
     // Private chat is out of scope for collection, and relay is off so no ack.
     expect(upsert).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)", () => {
+  const ADMIN_ID = 6532155675;
+  const TARGET_GROUP = -1002273179613;
+  const KNOWN = ["SA_LanNT18", "SAAnhPTH5"];
+
+  // Builds an .xlsx buffer with the standard 5-column header and the given rows.
+  function makeXlsx(rows: unknown[][]): Buffer {
+    const aoa = [["Tên", "Mã lớp", "Ngày học", "QLL", "Lịch học"], ...rows];
+    const sheet = XLSX.utils.aoa_to_sheet(aoa);
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, sheet, "Sheet1");
+    return XLSX.write(book, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  }
+
+  function docDm(fromId: number, chatType = "private"): TelegramUpdate {
+    return {
+      update_id: 70,
+      message: {
+        message_id: 1,
+        date: 1_700_000_000,
+        chat: { id: fromId, type: chatType as "private" | "supergroup" },
+        from: { id: fromId, first_name: "Operator" },
+        document: {
+          file_id: "file-123",
+          file_name: "lophoc.xlsx",
+          mime_type:
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+      },
+    };
+  }
+
+  function textDm(fromId: number, text: string): TelegramUpdate {
+    return {
+      update_id: 71,
+      message: {
+        message_id: 2,
+        date: 1_700_000_000,
+        chat: { id: fromId, type: "private" },
+        from: { id: fromId, first_name: "Operator" },
+        text,
+      },
+    };
+  }
+
+  it("downloads, parses, maps, saves pending, replies summary, posts NOTHING to the group", async () => {
+    const buf = makeXlsx([
+      ["Vũ Xuân Kỳ (SID: 189064)", "KHTN.2026.0913", "15/10/2026", "Nông Thị Lan 18", "T5 20:30-21:30"],
+      ["Đặng Mai Vy (SID: 213054)", "KHTN.2026.1972", "15/10/2026", "Phạm Thị Hải Anh 5", ""],
+      ["Ai Đó", "L9", "15/10/2026", "Trần Văn Khoa 9", "T6"],
+    ]);
+    const { deps, sendMessage, pendingUpsert, downloadFile } = makeDeps({
+      relayEnabled: false,
+      downloadResult: { ok: true, buffer: buf },
+      knownUsernames: KNOWN,
+    });
+
+    await handleUpdate(docDm(ADMIN_ID), deps);
+
+    expect(downloadFile).toHaveBeenCalledWith("file-123");
+    // Pending saved with exactly the two mapped items.
+    expect(pendingUpsert).toHaveBeenCalledTimes(1);
+    const saved = pendingUpsert.mock.calls[0][0] as {
+      admin_id: number;
+      items: MappedItem[];
+    };
+    expect(saved.admin_id).toBe(ADMIN_ID);
+    expect(saved.items).toEqual([
+      {
+        tenHS: "Vũ Xuân Kỳ (SID: 189064)",
+        maLop: "KHTN.2026.0913",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T5 20:30-21:30",
+        username: "SA_LanNT18",
+      },
+      {
+        tenHS: "Đặng Mai Vy (SID: 213054)",
+        maLop: "KHTN.2026.1972",
+        ngayHoc: "15/10/2026",
+        lichHoc: "",
+        username: "SAAnhPTH5",
+      },
+    ]);
+
+    // Exactly one message back to the admin (the summary); nothing to the group.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
+    const summary = sendMessage.mock.calls[0][1] as string;
+    expect(summary).toContain("Tổng số dòng: 3");
+    expect(summary).toContain("Đã map (2):");
+    expect(summary).toContain("Không tìm thấy (1):");
+    expect(summary).toContain("- Trần Văn Khoa 9");
+    expect(summary).toContain("Gõ /ok để gửi, /huy để huỷ.");
+    // Never posts to the target group during the preview step.
+    const postedToGroup = sendMessage.mock.calls.some(
+      (c) => c[0] === TARGET_GROUP
+    );
+    expect(postedToGroup).toBe(false);
+  });
+
+  it("/ok posts one announcement per item to the target group, deletes pending, confirms", async () => {
+    vi.useFakeTimers();
+    const items: MappedItem[] = [
+      {
+        tenHS: "Vũ Xuân Kỳ (SID: 189064)",
+        maLop: "KHTN.2026.0913",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T5 20:30-21:30",
+        username: "SA_LanNT18",
+      },
+      {
+        tenHS: "Đặng Mai Vy (SID: 213054)",
+        maLop: "KHTN.2026.1972",
+        ngayHoc: "15/10/2026",
+        lichHoc: "",
+        username: "SAAnhPTH5",
+      },
+    ];
+    const { deps, sendMessage, pendingDeleteEq } = makeDeps({
+      relayEnabled: false,
+      pendingItems: items,
+    });
+
+    const done = handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
+    // Drive the ~400ms inter-send delay without waiting in real time.
+    await vi.advanceTimersByTimeAsync(500);
+    await done;
+    vi.useRealTimers();
+
+    // One announcement per item into the target group, then the confirmation.
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      TARGET_GROUP,
+      buildAnnouncement(items[0])
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      TARGET_GROUP,
+      buildAnnouncement(items[1])
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      3,
+      ADMIN_ID,
+      "✅ Đã gửi 2/2 HS vào nhóm."
+    );
+    expect(pendingDeleteEq).toHaveBeenCalledTimes(1);
+  });
+
+  it("/ok with no pending batch replies 'Không có danh sách nào đang chờ.' and posts nothing", async () => {
+    const { deps, sendMessage } = makeDeps({
+      relayEnabled: false,
+      pendingItems: null,
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "Không có danh sách nào đang chờ."
+    );
+  });
+
+  it("/huy deletes the pending batch and confirms", async () => {
+    const { deps, sendMessage, pendingDeleteEq } = makeDeps({
+      relayEnabled: false,
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/huy"), deps);
+    expect(pendingDeleteEq).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "Đã huỷ danh sách đang chờ."
+    );
+  });
+
+  it("ignores a document from a non-admin private chat", async () => {
+    const { deps, sendMessage, downloadFile } = makeDeps({
+      relayEnabled: false,
+      downloadResult: { ok: true, buffer: makeXlsx([]) },
+    });
+    await handleUpdate(docDm(999999), deps);
+    expect(downloadFile).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores a document sent in a group (still passively collects the sender)", async () => {
+    const { deps, sendMessage, downloadFile, upsert } = makeDeps({
+      relayEnabled: false,
+      downloadResult: { ok: true, buffer: makeXlsx([]) },
+    });
+    await handleUpdate(
+      {
+        update_id: 72,
+        message: {
+          message_id: 3,
+          date: 1_700_000_000,
+          chat: { id: GROUP_ID, type: "supergroup", title: "Nhóm QLL" },
+          from: { id: ADMIN_ID, first_name: "Operator" },
+          document: { file_id: "file-123", file_name: "x.xlsx" },
+        },
+      },
+      deps
+    );
+    expect(downloadFile).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    // Group document still triggers passive collection of the sender.
+    expect(upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a download failure privately and posts nothing to the group", async () => {
+    const { deps, sendMessage, pendingUpsert } = makeDeps({
+      relayEnabled: false,
+      downloadResult: { ok: false, description: "boom" },
+    });
+    await handleUpdate(docDm(ADMIN_ID), deps);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
+    expect(pendingUpsert).not.toHaveBeenCalled();
   });
 });
 

@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4"
+    "@supabase/supabase-js": "^2.45.4",
+    "xlsx": "0.18.5"
   },
   "devDependencies": {
     "@vercel/node": "^3.2.24",

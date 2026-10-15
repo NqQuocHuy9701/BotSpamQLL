@@ -10,6 +10,9 @@ export interface TelegramClient {
     replyToMessageId?: number
   ): Promise<SendResult>;
   deleteMessage(chatId: number, messageId: number): Promise<DeleteResult>;
+  // Downloads a file by its Telegram file_id. Resolves a structured failure
+  // (never throws) so the handler can report an error privately.
+  downloadFile(fileId: string): Promise<DownloadResult>;
 }
 
 export type SendResult =
@@ -17,6 +20,10 @@ export type SendResult =
   | { ok: false; forbidden: boolean; description: string };
 
 export type DeleteResult = { ok: true } | { ok: false; description: string };
+
+export type DownloadResult =
+  | { ok: true; buffer: Buffer }
+  | { ok: false; description: string };
 
 export class TimeoutError extends Error {
   constructor(message = "Operation timed out") {
@@ -115,7 +122,42 @@ export function createTelegramClient(botToken: string): TelegramClient {
     }
   }
 
-  return { sendMessage, deleteMessage };
+  // Two-step Telegram file download: getFile resolves the file_path, then the
+  // bytes are fetched from the file host (api.telegram.org/file/bot<token>/...,
+  // NOT the /bot<token> API base). Any failure is normalized to a structured
+  // result so the caller never has to catch.
+  async function downloadFile(fileId: string): Promise<DownloadResult> {
+    try {
+      const getFileRes = await fetch(
+        `${base}/getFile?file_id=${encodeURIComponent(fileId)}`
+      );
+      const payload = (await getFileRes.json()) as {
+        ok: boolean;
+        result?: { file_path?: string };
+        description?: string;
+      };
+
+      if (!payload.ok || !payload.result?.file_path) {
+        return {
+          ok: false,
+          description: payload.description ?? "getFile failed",
+        };
+      }
+
+      const fileRes = await fetch(
+        `${TELEGRAM_API_BASE}/file/bot${botToken}/${payload.result.file_path}`
+      );
+      const arrayBuffer = await fileRes.arrayBuffer();
+      return { ok: true, buffer: Buffer.from(arrayBuffer) };
+    } catch (error) {
+      return {
+        ok: false,
+        description: errorMessage(error, "downloadFile transport error"),
+      };
+    }
+  }
+
+  return { sendMessage, deleteMessage, downloadFile };
 }
 
 // Rejects with a TimeoutError if the promise does not settle within `ms`.
