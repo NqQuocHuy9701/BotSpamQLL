@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx";
-import { buildAnnouncement, buildSummary, parseSheet } from "../lib/batch.js";
+import {
+  buildAnnouncement,
+  buildSummary,
+  parseSheet,
+  subjectHashtag,
+} from "../lib/batch.js";
 import type { MappedItem } from "../lib/types.js";
 
 // Builds an in-memory .xlsx buffer from an array-of-arrays (header + rows).
@@ -101,6 +106,27 @@ describe("parseSheet", () => {
   });
 });
 
+describe("subjectHashtag", () => {
+  it("takes the first 4 chars of the class code", () => {
+    expect(subjectHashtag("TOAN.2026.1176")).toBe("#TOAN");
+    expect(subjectHashtag("MOET.2026.0533")).toBe("#MOET");
+    expect(subjectHashtag("KHTN.2026.0746")).toBe("#KHTN");
+  });
+
+  it("handles an underscore-suffixed code (MOET_TH -> #MOET)", () => {
+    expect(subjectHashtag("MOET_TH.2025.0104")).toBe("#MOET");
+  });
+
+  it("uppercases and trims", () => {
+    expect(subjectHashtag("  toan.2026.1 ")).toBe("#TOAN");
+  });
+
+  it("returns '' when there is no usable leading code", () => {
+    expect(subjectHashtag("")).toBe("");
+    expect(subjectHashtag(".123")).toBe("");
+  });
+});
+
 describe("buildAnnouncement", () => {
   const base: MappedItem = {
     tenHS: "Vũ Xuân Kỳ (SID: 189064)",
@@ -113,7 +139,7 @@ describe("buildAnnouncement", () => {
   it("builds the full form when Lịch học is present", () => {
     expect(buildAnnouncement(base)).toBe(
       [
-        "✅ Thông tin học của con",
+        "✅ Thông tin học của con #KHTN",
         "Học sinh: Vũ Xuân Kỳ (SID: 189064)",
         "Mã lớp học: KHTN.2026.0913",
         "Lịch học: T5 20:30-21:30",
@@ -134,7 +160,7 @@ describe("buildAnnouncement", () => {
     };
     expect(buildAnnouncement(item)).toBe(
       [
-        "✅ Thông tin học của con",
+        "✅ Thông tin học của con #KHTN",
         "Học sinh: Đặng Mai Vy (SID: 213054)",
         "Mã lớp học: KHTN.2026.1972",
         "Ngày học: 15/10/2026",

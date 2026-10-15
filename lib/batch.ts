@@ -96,11 +96,28 @@ export function parseSheet(buf: Buffer): BatchRow[] {
   return rows;
 }
 
+// subjectHashtag(maLop): the subject hashtag derived from the first 4 chars of
+// the class code (e.g. "TOAN.2026.1176" -> "#TOAN", "MOET_TH.2025.0104" ->
+// "#MOET", "KHTN.2026.0746" -> "#KHTN"). Returns "" when the code is too short
+// or has no usable leading letters/digits, so no stray "#" is added.
+export function subjectHashtag(maLop: string): string {
+  // Take the leading run of letters/digits, then its first 4 chars uppercased.
+  const head = maLop.trim().replace(/[^A-Za-z0-9].*$/, "").slice(0, 4).toUpperCase();
+  return head === "" ? "" : `#${head}`;
+}
+
 // buildAnnouncement(item): the exact group message form. The whole "Lịch học"
-// line is omitted (no leftover blank line) when lichHoc is blank.
+// line is omitted (no leftover blank line) when lichHoc is blank. The subject
+// hashtag (from the first 4 chars of the class code) is appended to the title
+// line, e.g. "✅ Thông tin học của con #TOAN".
 export function buildAnnouncement(item: MappedItem): string {
+  const hashtag = subjectHashtag(item.maLop);
+  const title =
+    hashtag === ""
+      ? "✅ Thông tin học của con"
+      : `✅ Thông tin học của con ${hashtag}`;
   const lines = [
-    "✅ Thông tin học của con",
+    title,
     `Học sinh: ${item.tenHS}`,
     `Mã lớp học: ${item.maLop}`,
   ];

@@ -106,7 +106,7 @@ báo cáo (không bao giờ tag nhầm người).
 ## 7. Thông báo bot bắn vào nhóm (mẫu)
 
 ```
-✅ Thông tin học của con
+✅ Thông tin học của con #KHTN
 Học sinh: Hoàng Đắc Anh Khoa (SID: 194448)
 Mã lớp học: KHTN.2026.0746
 Lịch học: T5 19:15-20:15
@@ -115,7 +115,9 @@ Ngày học: 15/10/2026
 HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_TrangNTQ8
 ```
 
-(Dòng "Lịch học" được bỏ nếu để trống. Câu cuối đổi theo caption nếu có.)
+- Hashtag môn (`#KHTN`, `#TOAN`, `#MOET`...) lấy từ **4 ký tự đầu của mã lớp**,
+  gắn vào cuối dòng tiêu đề.
+- Dòng "Lịch học" được bỏ nếu để trống. Câu cuối đổi theo caption nếu có.
 
 ---
 
