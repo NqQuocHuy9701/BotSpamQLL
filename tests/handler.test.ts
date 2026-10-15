@@ -1022,12 +1022,12 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     const [rowX, rowY] = enqueued;
     expect(rowX.chat_id).toBe(TARGET_GROUP);
     // The shared-username row lists BOTH students and tags @SA_X once.
-    expect(rowX.message_text).toContain("• HS Một");
-    expect(rowX.message_text).toContain("• HS Hai");
+    expect(rowX.message_text).toContain("1. HS Một");
+    expect(rowX.message_text).toContain("2. HS Hai");
     expect(rowX.message_text.match(/@SA_X/g)).toHaveLength(1);
     expect(rowX.message_text).toContain("#KHTN #TOAN");
     // The other QLL is its own row with a single student.
-    expect(rowY.message_text).toContain("• HS Ba");
+    expect(rowY.message_text).toContain("1. HS Ba");
     expect(rowY.message_text.match(/@SA_Y/g)).toHaveLength(1);
 
     // Grouped confirmation: 2 tin cho 2 QLL.

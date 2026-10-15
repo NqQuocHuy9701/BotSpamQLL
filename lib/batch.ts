@@ -182,17 +182,31 @@ export function buildGroupedAnnouncement(
       ? "✅ Thông tin học của con"
       : `✅ Thông tin học của con ${hashtags.join(" ")}`;
 
-  const lines = [title];
+  // De-duplicate identical rows: the source sheet can repeat the exact same
+  // (HS + mã lớp + lịch + ngày) line, which would otherwise show as duplicate
+  // bullets. Two DIFFERENT subjects/classes for the same student are kept (the
+  // key includes maLop), so a student with two classes still lists both.
+  const seen = new Set<string>();
+  const uniqueStudents: MappedItem[] = [];
   for (const s of students) {
-    let bullet = `• ${s.tenHS} — Mã lớp: ${s.maLop}`;
-    if (s.lichHoc !== "") {
-      bullet += ` — Lịch học: ${s.lichHoc}`;
+    const key = `${s.tenHS}|${s.maLop}|${s.lichHoc}|${s.ngayHoc}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueStudents.push(s);
     }
-    bullet += ` — Ngày học: ${s.ngayHoc}`;
-    lines.push(bullet);
   }
 
-  lines.push("");
+  const lines = [title, ""];
+  uniqueStudents.forEach((s, i) => {
+    lines.push(`${i + 1}. ${s.tenHS}`);
+    lines.push(`   • Mã lớp: ${s.maLop}`);
+    if (s.lichHoc !== "") {
+      lines.push(`   • Lịch học: ${s.lichHoc}`);
+    }
+    lines.push(`   • Ngày học: ${s.ngayHoc}`);
+    lines.push("");
+  });
+
   const closing =
     cauNhan && cauNhan.trim() !== "" ? cauNhan.trim() : DEFAULT_CLOSING;
   lines.push(`${closing} @${username}`);

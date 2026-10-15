@@ -131,14 +131,23 @@ Mỗi QLL nhận **một thông báo gộp** liệt kê tất cả HS của họ
 
 ```
 ✅ Thông tin học của con #KHTN #TOAN
-• Hoàng Đắc Anh Khoa (SID: 194448) — Mã lớp: KHTN.2026.0746 — Lịch học: T5 19:15-20:15 — Ngày học: 15/10/2026
-• Vũ Xuân Kỳ (SID: 189064) — Mã lớp: TOAN.2026.0913 — Ngày học: 15/10/2026
+
+1. Hoàng Đắc Anh Khoa (SID: 194448)
+   • Mã lớp: KHTN.2026.0746
+   • Lịch học: T5 19:15-20:15
+   • Ngày học: 15/10/2026
+
+2. Vũ Xuân Kỳ (SID: 189064)
+   • Mã lớp: TOAN.2026.0913
+   • Ngày học: 15/10/2026
 
 HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_TrangNTQ8
 ```
 
-- Các HS **chung một QLL** được gộp chung vào một tin, mỗi HS một dòng `•` kèm Mã
-  lớp / Lịch học / Ngày học riêng.
+- Các HS **chung một QLL** được gộp chung vào một tin, mỗi HS được đánh số với Mã
+  lớp / Lịch học (bỏ nếu trống) / Ngày học trên các dòng riêng.
+- Các dòng HS **trùng khít** (cùng tên + mã lớp + lịch + ngày) được **khử trùng**,
+  chỉ hiện 1 lần. Hai mã lớp khác nhau của cùng HS vẫn giữ cả hai.
 - Hashtag môn (`#KHTN`, `#TOAN`, `#MOET`...) lấy từ **4 ký tự đầu của mã lớp**,
   gắn vào dòng tiêu đề. Nhiều môn khác nhau trong cùng QLL → liệt kê các hashtag
   khác nhau (không trùng lặp) theo thứ tự xuất hiện.

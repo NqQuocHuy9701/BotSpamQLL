@@ -252,20 +252,31 @@ describe("buildGroupedAnnouncement", () => {
     expect(buildGroupedAnnouncement("SA_X", [s1])).toBe(
       [
         "✅ Thông tin học của con #KHTN",
-        "• Vũ Xuân Kỳ — Mã lớp: KHTN.2026.0913 — Lịch học: T5 20:30-21:30 — Ngày học: 15/10/2026",
+        "",
+        "1. Vũ Xuân Kỳ",
+        "   • Mã lớp: KHTN.2026.0913",
+        "   • Lịch học: T5 20:30-21:30",
+        "   • Ngày học: 15/10/2026",
         "",
         "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_X",
       ].join("\n")
     );
   });
 
-  it("lists multiple students with distinct hashtags deduped in order and a single @tag", () => {
+  it("lists multiple students numbered, distinct hashtags deduped, single @tag", () => {
     const out = buildGroupedAnnouncement("SA_X", [s1, s2]);
     expect(out).toBe(
       [
         "✅ Thông tin học của con #KHTN #TOAN",
-        "• Vũ Xuân Kỳ — Mã lớp: KHTN.2026.0913 — Lịch học: T5 20:30-21:30 — Ngày học: 15/10/2026",
-        "• Đặng Mai Vy — Mã lớp: TOAN.2026.1972 — Ngày học: 16/10/2026",
+        "",
+        "1. Vũ Xuân Kỳ",
+        "   • Mã lớp: KHTN.2026.0913",
+        "   • Lịch học: T5 20:30-21:30",
+        "   • Ngày học: 15/10/2026",
+        "",
+        "2. Đặng Mai Vy",
+        "   • Mã lớp: TOAN.2026.1972",
+        "   • Ngày học: 16/10/2026",
         "",
         "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_X",
       ].join("\n")
@@ -274,10 +285,30 @@ describe("buildGroupedAnnouncement", () => {
     expect(out.match(/@SA_X/g)).toHaveLength(1);
   });
 
-  it("omits only the blank student's Lịch học segment", () => {
+  it("omits only the blank student's Lịch học line", () => {
     const out = buildGroupedAnnouncement("SA_X", [s1, s2]);
-    expect(out).toContain("• Đặng Mai Vy — Mã lớp: TOAN.2026.1972 — Ngày học: 16/10/2026");
-    expect(out).not.toContain("• Đặng Mai Vy — Mã lớp: TOAN.2026.1972 — Lịch học:");
+    // Đặng Mai Vy has no lịch học -> that line is absent for them.
+    expect(out).toContain("2. Đặng Mai Vy");
+    const vyBlock = out.slice(out.indexOf("2. Đặng Mai Vy"));
+    expect(vyBlock).not.toContain("Lịch học:");
+  });
+
+  it("de-duplicates identical student rows (same HS + mã lớp + ngày)", () => {
+    // The same row repeated in the source sheet must appear only ONCE.
+    const out = buildGroupedAnnouncement("SA_X", [s1, { ...s1 }]);
+    expect(out.match(/Vũ Xuân Kỳ/g)).toHaveLength(1);
+    expect(out).toContain("1. Vũ Xuân Kỳ");
+    expect(out).not.toContain("2. Vũ Xuân Kỳ");
+  });
+
+  it("keeps two DIFFERENT classes of the same student (not treated as dup)", () => {
+    const kyToan: MappedItem = { ...s1, maLop: "TOAN.2026.5555", lichHoc: "" };
+    const out = buildGroupedAnnouncement("SA_X", [s1, kyToan]);
+    // Same name twice, but two distinct class lines -> both kept, numbered 1 & 2.
+    expect(out).toContain("1. Vũ Xuân Kỳ");
+    expect(out).toContain("2. Vũ Xuân Kỳ");
+    expect(out).toContain("   • Mã lớp: KHTN.2026.0913");
+    expect(out).toContain("   • Mã lớp: TOAN.2026.5555");
   });
 
   it("collapses a single repeated subject into one hashtag", () => {
