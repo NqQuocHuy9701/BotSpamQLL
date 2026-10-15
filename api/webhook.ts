@@ -30,6 +30,7 @@ export default async function handler(
   const deps: Deps = {
     telegram: createTelegramClient(config.botToken),
     supabase: getClient(config.supabaseUrl, config.supabaseKey),
+    relayEnabled: config.relayEnabled,
   };
 
   // Always return HTTP 200 for handled message-processing outcomes so Telegram

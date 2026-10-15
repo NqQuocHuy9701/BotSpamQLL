@@ -46,8 +46,28 @@ Set these on Vercel (Project → Settings → Environment Variables) and locally
 | `BOT_TOKEN`    | Telegram Bot API token from BotFather                   |
 | `SUPABASE_URL` | Supabase project URL (`https://<project>.supabase.co`)  |
 | `SUPABASE_KEY` | Supabase key with insert rights on `bot_account_logs`   |
+| `RELAY_ENABLED` | Optional. `true` enables the credential relay flow (delete + inbox + reply). Any other value, or unset, keeps relay OFF — the bot then only passively collects users into `telegram_users_qll`. |
 
-If any variable is missing at runtime, the webhook returns HTTP 500.
+`BOT_TOKEN`, `SUPABASE_URL`, and `SUPABASE_KEY` are required; if any is missing at runtime, the webhook returns HTTP 500. `RELAY_ENABLED` is optional and defaults to OFF.
+
+## Modes
+
+- **Passive user-collection mode (default, `RELAY_ENABLED` unset or not `true`):** the bot does NOT delete messages, send to inboxes, or reply to anyone. On every group update it records the message sender and any newly-joined members (`new_chat_members`) into the `telegram_users_qll` table (upsert by `telegram_id`). Note: Telegram only exposes users who are active (post a message) or who join while the bot is present — a bot cannot enumerate a group's full member list.
+
+  Table (create it yourself in Supabase):
+
+  ```sql
+  CREATE TABLE telegram_users_qll (
+    telegram_id  bigint PRIMARY KEY,
+    username     text,
+    full_name    text,
+    chat_id      bigint,
+    chat_title   text,
+    updated_at   timestamptz DEFAULT now()
+  );
+  ```
+
+- **Relay mode (`RELAY_ENABLED=true`):** in addition to collecting users, the bot runs the full credential relay flow described below.
 
 ## Operational setup (one-time)
 

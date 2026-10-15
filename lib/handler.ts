@@ -2,15 +2,19 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isSensitive } from "./detector.js";
-import { buildLogRecord, displayName } from "./mapping.js";
-import { insertLog } from "./supabase.js";
+import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
+import { insertLog, upsertUser } from "./supabase.js";
 import {
   deleteWithRetry,
   TimeoutError,
   withTimeout,
   type TelegramClient,
 } from "./telegram.js";
-import type { TelegramMessage, TelegramUpdate } from "./types.js";
+import type {
+  TelegramMessage,
+  TelegramUpdate,
+  TelegramUser,
+} from "./types.js";
 
 // User-facing Vietnamese strings — kept byte-for-byte exact.
 const WARNING_NOT_STARTED =
@@ -44,6 +48,9 @@ const SEND_TIMEOUT_MS = 10_000;
 export interface Deps {
   telegram: TelegramClient;
   supabase: SupabaseClient;
+  // When false, the credential relay flow is fully disabled: the bot never
+  // deletes, sends to inbox, or replies. It only passively collects users.
+  relayEnabled: boolean;
 }
 
 export async function handleUpdate(
@@ -52,6 +59,16 @@ export async function handleUpdate(
 ): Promise<void> {
   const message = update.message;
   if (!message) {
+    return;
+  }
+
+  // Passive user collection runs on EVERY group update, regardless of the
+  // relay switch: capture the sender and any newly-joined members.
+  await collectUsers(message, deps);
+
+  // HARD STOP when relay is disabled. The bot must not delete, send to inbox,
+  // or reply to anyone while collecting users. This is the "nằm vùng" mode.
+  if (!deps.relayEnabled) {
     return;
   }
 
@@ -78,6 +95,40 @@ export async function handleUpdate(
 
   // Branch (b): sensitive group reply -> relay flow.
   await relay(message, replyTo, deps);
+}
+
+// Passively records users seen in a group chat into telegram_users_qll.
+// Captures the message sender and any newly-joined members. Never touches
+// private chats, and skips bot accounts and the "sender" of a join event
+// (the message.from on a join event is whoever added them / the joiner).
+async function collectUsers(
+  message: TelegramMessage,
+  deps: Deps
+): Promise<void> {
+  const chat = message.chat;
+  if (chat.type !== "group" && chat.type !== "supergroup") {
+    return;
+  }
+
+  // De-duplicate within this single update by telegram_id.
+  const seen = new Map<number, TelegramUser>();
+
+  if (message.from && !isBot(message.from)) {
+    seen.set(message.from.id, message.from);
+  }
+  for (const member of message.new_chat_members ?? []) {
+    if (!isBot(member)) {
+      seen.set(member.id, member);
+    }
+  }
+
+  for (const user of seen.values()) {
+    await upsertUser(deps.supabase, buildUserRecord(user, chat));
+  }
+}
+
+function isBot(user: TelegramUser): boolean {
+  return user.is_bot === true;
 }
 
 async function relay(

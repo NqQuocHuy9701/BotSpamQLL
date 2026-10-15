@@ -19,12 +19,14 @@ function makeDeps(options: {
   // (used with fake timers to drive the real 10s withTimeout boundary)
   sendPending?: boolean[];
   deleteResults?: DeleteResult[];
+  relayEnabled?: boolean;
 }): {
   deps: Deps;
   trace: string[];
   sendMessage: ReturnType<typeof vi.fn>;
   deleteMessage: ReturnType<typeof vi.fn>;
   insert: ReturnType<typeof vi.fn>;
+  upsert: ReturnType<typeof vi.fn>;
   from: ReturnType<typeof vi.fn>;
 } {
   const trace: string[] = [];
@@ -64,12 +66,35 @@ function makeDeps(options: {
     trace.push(`log:${record.status}`);
     return { error: null };
   });
-  const from = vi.fn(() => ({ insert }));
+  // User upserts (passive collection) are asserted via the `upsert` spy, not
+  // via the ordered `trace`, so relay-ordering assertions stay focused.
+  const upsert = vi.fn(async (_record: { telegram_id: number }) => {
+    return { error: null };
+  });
+  // Route .from(table) to the right query-builder stub by table name.
+  const from = vi.fn((table: string) => {
+    if (table === "telegram_users_qll") {
+      return { upsert };
+    }
+    return { insert };
+  });
   const supabase = {
     from,
   } as unknown as SupabaseClient;
 
-  return { deps: { telegram, supabase }, trace, sendMessage, deleteMessage, insert, from };
+  return {
+    deps: {
+      telegram,
+      supabase,
+      relayEnabled: options.relayEnabled ?? true,
+    },
+    trace,
+    sendMessage,
+    deleteMessage,
+    insert,
+    upsert,
+    from,
+  };
 }
 
 const GROUP_ID = -1001;
@@ -337,9 +362,15 @@ describe("handleUpdate — removal timing contract (send-before-delete)", () => 
       trace.push(`log:${record.status}`);
       return { error: null };
     });
+    const upsert = vi.fn(async () => ({ error: null }));
     const deps: Deps = {
       telegram: { sendMessage, deleteMessage },
-      supabase: { from: vi.fn(() => ({ insert })) } as unknown as SupabaseClient,
+      supabase: {
+        from: vi.fn((table: string) =>
+          table === "telegram_users_qll" ? { upsert } : { insert }
+        ),
+      } as unknown as SupabaseClient,
+      relayEnabled: true,
     };
 
     const done = handleUpdate(sensitiveReply(), deps);
@@ -367,8 +398,8 @@ describe("handleUpdate — removal timing contract (send-before-delete)", () => 
 });
 
 describe("handleUpdate — ignore branches", () => {
-  it("ignores a group message that is not a reply (zero calls)", async () => {
-    const { deps, sendMessage, deleteMessage, insert, from } = makeDeps({});
+  it("ignores a group message that is not a reply (no relay side effects)", async () => {
+    const { deps, sendMessage, deleteMessage, insert, upsert } = makeDeps({});
     await handleUpdate(
       {
         update_id: 2,
@@ -382,22 +413,24 @@ describe("handleUpdate — ignore branches", () => {
       },
       deps
     );
+    // No relay actions on a non-reply message...
     expect(sendMessage).not.toHaveBeenCalled();
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
-    // The Supabase query builder must not even be consulted for an ignored update.
-    expect(from).not.toHaveBeenCalled();
+    // ...but the sender is still collected into telegram_users_qll.
+    expect(upsert).toHaveBeenCalledTimes(1);
   });
 
-  it("ignores a group reply that is not sensitive (zero calls)", async () => {
-    const { deps, sendMessage, deleteMessage, insert, from } = makeDeps({});
+  it("ignores a group reply that is not sensitive (no relay side effects)", async () => {
+    const { deps, sendMessage, deleteMessage, insert, upsert } = makeDeps({});
     const update = sensitiveReply("Chào bạn nhé");
     await handleUpdate(update, deps);
+    // No relay actions on a non-sensitive reply...
     expect(sendMessage).not.toHaveBeenCalled();
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
-    // The Supabase query builder must not even be consulted for an ignored update.
-    expect(from).not.toHaveBeenCalled();
+    // ...but the replier is still collected.
+    expect(upsert).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -422,6 +455,80 @@ describe("handleUpdate — private /start", () => {
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
     expect(from).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleUpdate — passive collection mode (relay disabled)", () => {
+  it("collects the sender but performs NO relay action when relay is off", async () => {
+    // Even a sensitive reply must not be deleted, relayed, or replied to while
+    // relay is disabled — only the user is collected.
+    const { deps, sendMessage, deleteMessage, insert, upsert } = makeDeps({
+      relayEnabled: false,
+    });
+
+    await handleUpdate(sensitiveReply("TK: 0988573647 / MK: 0938347328"), deps);
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    // The CTV (message sender) is upserted into telegram_users_qll.
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert.mock.calls[0][0]).toMatchObject({
+      telegram_id: 222,
+      username: null,
+      full_name: "Minh CTV",
+      chat_id: GROUP_ID,
+    });
+  });
+
+  it("collects newly-joined members from new_chat_members", async () => {
+    const { deps, upsert } = makeDeps({ relayEnabled: false });
+
+    await handleUpdate(
+      {
+        update_id: 9,
+        message: {
+          message_id: 1,
+          date: 1_700_000_000,
+          chat: { id: GROUP_ID, type: "supergroup", title: "Nhóm QLL" },
+          from: { id: 500, first_name: "Admin" },
+          new_chat_members: [
+            { id: 601, first_name: "An", username: "an_qll" },
+            { id: 602, first_name: "Bình", last_name: "Trần" },
+            { id: 999, is_bot: true, first_name: "SomeBot" },
+          ],
+        },
+      },
+      deps
+    );
+
+    // Admin (sender) + An + Bình are collected; the bot member is skipped.
+    const ids = upsert.mock.calls.map((c) => (c[0] as { telegram_id: number }).telegram_id);
+    expect(ids.sort()).toEqual([500, 601, 602]);
+    // Chat title is captured.
+    expect(upsert.mock.calls[0][0]).toMatchObject({ chat_title: "Nhóm QLL" });
+  });
+
+  it("does NOT collect users from a private chat", async () => {
+    const { deps, upsert, sendMessage } = makeDeps({ relayEnabled: false });
+
+    await handleUpdate(
+      {
+        update_id: 10,
+        message: {
+          message_id: 1,
+          date: 1_700_000_000,
+          chat: { id: QLL_ID, type: "private" },
+          from: { id: QLL_ID, first_name: "Boss" },
+          text: "/start",
+        },
+      },
+      deps
+    );
+
+    // Private chat is out of scope for collection, and relay is off so no ack.
+    expect(upsert).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 

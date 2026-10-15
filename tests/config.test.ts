@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../lib/config.js";
 
-const KEYS = ["BOT_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"] as const;
+const KEYS = [
+  "BOT_TOKEN",
+  "SUPABASE_URL",
+  "SUPABASE_KEY",
+  "RELAY_ENABLED",
+] as const;
 
 describe("loadConfig", () => {
   const saved: Record<string, string | undefined> = {};
@@ -13,6 +18,7 @@ describe("loadConfig", () => {
     process.env.BOT_TOKEN = "token-value";
     process.env.SUPABASE_URL = "https://example.supabase.co";
     process.env.SUPABASE_KEY = "key-value";
+    delete process.env.RELAY_ENABLED;
   });
 
   afterEach(() => {
@@ -25,12 +31,29 @@ describe("loadConfig", () => {
     }
   });
 
-  it("returns a Config when all vars are present", () => {
+  it("returns a Config when all vars are present (relay off by default)", () => {
     expect(loadConfig()).toEqual({
       botToken: "token-value",
       supabaseUrl: "https://example.supabase.co",
       supabaseKey: "key-value",
+      relayEnabled: false,
     });
+  });
+
+  it("defaults relayEnabled to false when RELAY_ENABLED is unset", () => {
+    expect(loadConfig().relayEnabled).toBe(false);
+  });
+
+  it("sets relayEnabled true only for exactly 'true' (case/space-insensitive)", () => {
+    process.env.RELAY_ENABLED = "  TRUE  ";
+    expect(loadConfig().relayEnabled).toBe(true);
+  });
+
+  it("keeps relayEnabled false for any non-'true' value", () => {
+    for (const v of ["false", "0", "yes", "1", "on", ""]) {
+      process.env.RELAY_ENABLED = v;
+      expect(loadConfig().relayEnabled).toBe(false);
+    }
   });
 
   it("throws naming BOT_TOKEN when it is missing", () => {

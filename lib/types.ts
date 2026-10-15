@@ -3,6 +3,7 @@
 
 export interface TelegramUser {
   id: number;
+  is_bot?: boolean;
   first_name?: string;
   last_name?: string;
   username?: string;
@@ -11,6 +12,7 @@ export interface TelegramUser {
 export interface TelegramChat {
   id: number;
   type: "private" | "group" | "supergroup" | "channel";
+  title?: string;
 }
 
 export interface TelegramMessage {
@@ -20,6 +22,9 @@ export interface TelegramMessage {
   from?: TelegramUser;
   text?: string;
   reply_to_message?: TelegramMessage;
+  // Present when one or more users join the group. Used by the passive
+  // user-collection mode to capture newly-joined members.
+  new_chat_members?: TelegramUser[];
 }
 
 export interface TelegramUpdate {
@@ -29,6 +34,15 @@ export interface TelegramUpdate {
 
 // The three enumerated glossary statuses — Vietnamese strings kept exact.
 export type LogStatus = "Đã gửi Inbox" | "Lỗi chưa start bot" | "Đã thu hồi";
+
+// One row in the telegram_users_qll table (passive user-collection mode).
+export interface UserRecord {
+  telegram_id: number;
+  username: string | null;
+  full_name: string;
+  chat_id: number;
+  chat_title: string | null;
+}
 
 export interface LogRecord {
   created_at: string; // ISO UTC

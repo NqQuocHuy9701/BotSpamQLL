@@ -4,6 +4,11 @@ export interface Config {
   botToken: string;
   supabaseUrl: string;
   supabaseKey: string;
+  // Master switch for the credential relay flow (delete + inbox + reply).
+  // Defaults to FALSE so the bot never mutates the group unless RELAY_ENABLED
+  // is explicitly set to "true". While false the bot only passively collects
+  // users into telegram_users_qll.
+  relayEnabled: boolean;
 }
 
 // Throws an Error naming the FIRST missing/empty variable.
@@ -23,5 +28,10 @@ export function loadConfig(): Config {
     throw new Error("Missing required environment variable: SUPABASE_KEY");
   }
 
-  return { botToken, supabaseUrl, supabaseKey };
+  // Relay is OFF unless RELAY_ENABLED is exactly "true" (case-insensitive,
+  // trimmed). Any other value — including unset — keeps the relay disabled.
+  const relayEnabled =
+    (process.env.RELAY_ENABLED ?? "").trim().toLowerCase() === "true";
+
+  return { botToken, supabaseUrl, supabaseKey, relayEnabled };
 }

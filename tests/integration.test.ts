@@ -4,7 +4,10 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 // Mock only the external edges: Supabase client and native fetch. The webhook,
 // handler, detector, telegram wrapper, config, and mapping all run for real.
 const insert = vi.fn(async (_record: { status: string }) => ({ error: null }));
-const supabaseFrom = vi.fn(() => ({ insert }));
+const upsert = vi.fn(async (_record: { telegram_id: number }) => ({ error: null }));
+const supabaseFrom = vi.fn((table: string) =>
+  table === "telegram_users_qll" ? { upsert } : { insert }
+);
 vi.mock("../lib/supabase.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/supabase.js")>();
   return {
@@ -75,6 +78,8 @@ describe("integration: api/webhook end-to-end", () => {
     process.env.BOT_TOKEN = "test-token";
     process.env.SUPABASE_URL = "https://example.supabase.co";
     process.env.SUPABASE_KEY = "test-key";
+    // These end-to-end cases exercise the relay flow, so enable it explicitly.
+    process.env.RELAY_ENABLED = "true";
   });
 
   afterEach(() => {
@@ -83,6 +88,7 @@ describe("integration: api/webhook end-to-end", () => {
     delete process.env.BOT_TOKEN;
     delete process.env.SUPABASE_URL;
     delete process.env.SUPABASE_KEY;
+    delete process.env.RELAY_ENABLED;
   });
 
   it("happy path: relays, deletes, logs, confirms and returns 200", async () => {

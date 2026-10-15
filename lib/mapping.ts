@@ -1,6 +1,12 @@
 // Display-name and LogRecord field-mapping helpers.
 
-import type { LogRecord, TelegramMessage, TelegramUser } from "./types.js";
+import type {
+  LogRecord,
+  TelegramChat,
+  TelegramMessage,
+  TelegramUser,
+  UserRecord,
+} from "./types.js";
 
 // first + " " + last when last present, else first, else username, else "".
 export function displayName(user: TelegramUser): string {
@@ -9,6 +15,22 @@ export function displayName(user: TelegramUser): string {
     return parts.join(" ");
   }
   return user.username ?? "";
+}
+
+// Builds a telegram_users_qll row from a seen user and the chat they were seen
+// in. username is null when the user has not set one; full_name uses the same
+// first/last/username fallback as displayName.
+export function buildUserRecord(
+  user: TelegramUser,
+  chat: TelegramChat
+): UserRecord {
+  return {
+    telegram_id: user.id,
+    username: user.username ?? null,
+    full_name: displayName(user),
+    chat_id: chat.id,
+    chat_title: chat.title ?? null,
+  };
 }
 
 // Derives a LogRecord from the sensitive reply (`message`) and the request it
