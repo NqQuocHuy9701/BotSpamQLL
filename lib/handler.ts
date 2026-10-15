@@ -280,6 +280,10 @@ async function maybeHandleBatch(
     const known = await listUsernames(deps.supabase);
     const knownUsernames = known.usernames;
 
+    // The file caption (if any) becomes the custom closing line for this batch.
+    // An empty caption means "use the default closing line".
+    const cauNhan = message.caption?.trim() ?? "";
+
     const items: MappedItem[] = [];
     const mappedSummary: { tenHS: string; username: string }[] = [];
     const unmapped: string[] = [];
@@ -293,6 +297,7 @@ async function maybeHandleBatch(
           ngayHoc: row.ngayHoc,
           lichHoc: row.lichHoc,
           username: match.username,
+          cauNhan: cauNhan === "" ? undefined : cauNhan,
         });
         mappedSummary.push({ tenHS: row.tenHS, username: match.username });
       } else {

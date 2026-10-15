@@ -6,6 +6,11 @@
 import * as XLSX from "xlsx";
 import type { BatchRow, MappedItem } from "./types.js";
 
+// Default closing line used when the admin did not supply a custom one via the
+// file caption.
+export const DEFAULT_CLOSING =
+  "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ !";
+
 // Canonical header labels (trimmed, lowercased) for the five known columns.
 const HEADER_TEN = "tên";
 const HEADER_MA_LOP = "mã lớp";
@@ -104,9 +109,14 @@ export function buildAnnouncement(item: MappedItem): string {
   }
   lines.push(`Ngày học: ${item.ngayHoc}`);
   lines.push("");
-  lines.push(
-    `HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @${item.username}`
-  );
+  // Use the admin's custom closing line (from caption) when present and
+  // non-empty; otherwise fall back to the default. The @username tag is always
+  // appended at the end.
+  const closing =
+    item.cauNhan && item.cauNhan.trim() !== ""
+      ? item.cauNhan.trim()
+      : DEFAULT_CLOSING;
+  lines.push(`${closing} @${item.username}`);
   return lines.join("\n");
 }
 

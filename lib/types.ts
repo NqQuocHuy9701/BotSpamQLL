@@ -74,6 +74,9 @@ export interface MappedItem {
   ngayHoc: string;
   lichHoc: string;
   username: string;
+  // Optional custom closing line (from the file's caption). When absent, the
+  // announcement uses the default closing line.
+  cauNhan?: string;
 }
 
 // One row in the pending_batches table, keyed by the admin's telegram_id.

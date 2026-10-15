@@ -145,6 +145,26 @@ describe("buildAnnouncement", () => {
     // No leftover blank "Lịch học:" line.
     expect(buildAnnouncement(item)).not.toContain("Lịch học:");
   });
+
+  it("uses a custom closing line (cauNhan) when provided, keeping the @tag", () => {
+    const item: MappedItem = {
+      ...base,
+      cauNhan: "HS hôm nay có lịch học, QLL trao đổi với PHHS giúp em nhé ạ!",
+    };
+    const out = buildAnnouncement(item);
+    expect(out).toContain(
+      "HS hôm nay có lịch học, QLL trao đổi với PHHS giúp em nhé ạ! @SA_LanNT18"
+    );
+    // The default closing line is NOT used.
+    expect(out).not.toContain("HS nay có ca học QLL nắm thêm thông tin");
+  });
+
+  it("falls back to the default closing when cauNhan is empty/whitespace", () => {
+    const item: MappedItem = { ...base, cauNhan: "   " };
+    expect(buildAnnouncement(item)).toContain(
+      "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_LanNT18"
+    );
+  });
 });
 
 describe("buildSummary", () => {
