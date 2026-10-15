@@ -2,7 +2,12 @@
 // pre-existing bot_account_logs table. Never runs schema migrations.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { LogRecord, MappedItem, UserRecord } from "./types.js";
+import type {
+  LogRecord,
+  MappedItem,
+  SendQueueRow,
+  UserRecord,
+} from "./types.js";
 
 export function getClient(url: string, key: string): SupabaseClient {
   return createClient(url, key);
@@ -116,6 +121,108 @@ export async function listUsernames(
     return {
       ok: false,
       usernames: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// --- Slow drip-send queue (table: send_queue) -------------------------------
+// Pre-created by the operator; the bot never migrates it:
+//   send_queue ( id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+//                admin_id bigint, chat_id bigint, message_text text,
+//                sent boolean DEFAULT false, created_at timestamptz DEFAULT now(),
+//                sent_at timestamptz )
+// All helpers below are non-throwing like insertLog/upsertUser.
+
+// Inserts many queue rows in one call. An empty rows array is a no-op success
+// (no insert issued) so /ok with zero mapped items is safe.
+export async function enqueueMessages(
+  client: SupabaseClient,
+  rows: { admin_id: number; chat_id: number; message_text: string }[]
+): Promise<{ ok: boolean; error?: string }> {
+  if (rows.length === 0) {
+    return { ok: true };
+  }
+  try {
+    const { error } = await client.from("send_queue").insert(rows);
+    if (error) {
+      return { ok: false, error: error.message };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Returns the oldest `limit` unsent rows (created_at ascending). On error
+// returns an empty list so the cron simply does nothing this run.
+export async function fetchNextUnsent(
+  client: SupabaseClient,
+  limit: number
+): Promise<{ ok: boolean; rows: SendQueueRow[]; error?: string }> {
+  try {
+    const { data, error } = await client
+      .from("send_queue")
+      .select("id, admin_id, chat_id, message_text")
+      .eq("sent", false)
+      .order("created_at", { ascending: true })
+      .limit(limit);
+    if (error) {
+      return { ok: false, rows: [], error: error.message };
+    }
+    const rows = (data as SendQueueRow[] | null) ?? [];
+    return { ok: true, rows };
+  } catch (err) {
+    return {
+      ok: false,
+      rows: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// Marks a single queue row as sent, stamping sent_at with the current time.
+export async function markSent(
+  client: SupabaseClient,
+  id: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await client
+      .from("send_queue")
+      .update({ sent: true, sent_at: new Date().toISOString() })
+      .eq("id", id);
+    if (error) {
+      return { ok: false, error: error.message };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Counts the remaining unsent rows, optionally scoped to one admin. A null
+// count (nothing matched) is coalesced to 0. On error returns count 0.
+export async function countUnsent(
+  client: SupabaseClient,
+  adminId?: number
+): Promise<{ ok: boolean; count: number; error?: string }> {
+  try {
+    let query = client
+      .from("send_queue")
+      .select("id", { count: "exact", head: true })
+      .eq("sent", false);
+    if (adminId !== undefined) {
+      query = query.eq("admin_id", adminId);
+    }
+    const { count, error } = await query;
+    if (error) {
+      return { ok: false, count: 0, error: error.message };
+    }
+    return { ok: true, count: count ?? 0 };
+  } catch (err) {
+    return {
+      ok: false,
+      count: 0,
       error: err instanceof Error ? err.message : String(err),
     };
   }

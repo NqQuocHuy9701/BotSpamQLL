@@ -7,6 +7,7 @@ import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
 import { mapQll } from "./qllmap.js";
 import {
   deletePendingBatch,
+  enqueueMessages,
   insertLog,
   listUsernames,
   loadPendingBatch,
@@ -63,15 +64,11 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
 
-// Batch-announcement commands (admin private DM only) and the inter-send delay
-// used when posting the confirmed batch into the target group.
+// Batch-announcement commands (admin private DM only). On /ok the confirmed
+// batch is enqueued into send_queue and drip-sent later by the Vercel cron
+// (see api/cron.ts) rather than posted synchronously here.
 const BATCH_OK_COMMAND = "/ok";
 const BATCH_CANCEL_COMMAND = "/huy";
-const SEND_DELAY_MS = 400;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 // The sample announcement form, tagging the fixed target @SA_AnhMTK.
 const SPAMTEST_MESSAGE = [
@@ -242,8 +239,10 @@ function isAdminPrivate(message: TelegramMessage): boolean {
 //   1. a document (any caption that is not /ok): download + parse + map, save
 //      the ready-to-send items to pending_batches, reply with a summary. Posts
 //      NOTHING to the group.
-//   2. /ok: load the pending batch and post one announcement per mapped item
-//      into the target group, delete the pending row, confirm.
+//   2. /ok: load the pending batch and enqueue one send_queue row per mapped
+//      item (fully-formatted announcement text), delete the pending row, and
+//      confirm. Posts NOTHING to the group synchronously — the Vercel cron
+//      (api/cron.ts) drip-sends the queued rows ~15-20s apart.
 //   3. /huy: delete the pending row and confirm.
 async function maybeHandleBatch(
   message: TelegramMessage,
@@ -309,7 +308,7 @@ async function maybeHandleBatch(
     return true;
   }
 
-  // Case 2: /ok -> post the pending batch into the target group.
+  // Case 2: /ok -> enqueue the pending batch for slow drip-sending by the cron.
   if (text === BATCH_OK_COMMAND) {
     const pending = await loadPendingBatch(deps.supabase, adminId);
     const items = pending.items ?? [];
@@ -321,24 +320,18 @@ async function maybeHandleBatch(
       return true;
     }
 
-    let sent = 0;
-    for (let i = 0; i < items.length; i++) {
-      const result = await deps.telegram.sendMessage(
-        SPAMTEST_TARGET_CHAT_ID,
-        buildAnnouncement(items[i])
-      );
-      if (result.ok) {
-        sent++;
-      }
-      if (i < items.length - 1) {
-        await sleep(SEND_DELAY_MS);
-      }
-    }
-
+    // Store the fully-formatted announcement text (incl. the @username tag) so
+    // the cron sends message_text verbatim with no re-formatting.
+    const rows = items.map((item) => ({
+      admin_id: adminId,
+      chat_id: SPAMTEST_TARGET_CHAT_ID,
+      message_text: buildAnnouncement(item),
+    }));
+    await enqueueMessages(deps.supabase, rows);
     await deletePendingBatch(deps.supabase, adminId);
     await deps.telegram.sendMessage(
       message.chat.id,
-      `✅ Đã gửi ${sent}/${items.length} HS vào nhóm.`
+      `✅ Đã xếp ${items.length} HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`
     );
     return true;
   }

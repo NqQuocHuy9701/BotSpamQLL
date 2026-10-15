@@ -38,6 +38,7 @@ function makeDeps(options: {
   upsert: ReturnType<typeof vi.fn>;
   pendingUpsert: ReturnType<typeof vi.fn>;
   pendingDeleteEq: ReturnType<typeof vi.fn>;
+  sendQueueInsert: ReturnType<typeof vi.fn>;
   from: ReturnType<typeof vi.fn>;
 } {
   const trace: string[] = [];
@@ -114,6 +115,13 @@ function makeDeps(options: {
     error: null,
   }));
 
+  // send_queue: /ok uses .insert(rows); the other chainable methods are stubbed
+  // so the queue helpers never throw even though /ok only exercises insert.
+  const sendQueueInsert = vi.fn(async () => {
+    trace.push("enqueue");
+    return { error: null };
+  });
+
   // Route .from(table) to the right query-builder stub by table name.
   const from = vi.fn((table: string) => {
     if (table === "telegram_users_qll") {
@@ -127,6 +135,17 @@ function makeDeps(options: {
           eq: () => ({ maybeSingle: pendingSelectMaybeSingle }),
         }),
         delete: () => ({ eq: pendingDeleteEq }),
+      };
+    }
+    if (table === "send_queue") {
+      return {
+        insert: sendQueueInsert,
+        select: () => ({
+          eq: () => ({
+            order: () => ({ limit: async () => ({ data: [], error: null }) }),
+          }),
+        }),
+        update: () => ({ eq: async () => ({ error: null }) }),
       };
     }
     return { insert };
@@ -149,6 +168,7 @@ function makeDeps(options: {
     upsert,
     pendingUpsert,
     pendingDeleteEq,
+    sendQueueInsert,
     from,
   };
 }
@@ -772,8 +792,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(postedToGroup).toBe(false);
   });
 
-  it("/ok posts one announcement per item to the target group, deletes pending, confirms", async () => {
-    vi.useFakeTimers();
+  it("/ok enqueues one row per item, deletes pending, confirms, and posts NOTHING to the group", async () => {
     const items: MappedItem[] = [
       {
         tenHS: "Vũ Xuân Kỳ (SID: 189064)",
@@ -790,34 +809,48 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
         username: "SAAnhPTH5",
       },
     ];
-    const { deps, sendMessage, pendingDeleteEq } = makeDeps({
+    const { deps, sendMessage, sendQueueInsert, pendingDeleteEq } = makeDeps({
       relayEnabled: false,
       pendingItems: items,
     });
 
-    const done = handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
-    // Drive the ~400ms inter-send delay without waiting in real time.
-    await vi.advanceTimersByTimeAsync(500);
-    await done;
-    vi.useRealTimers();
+    await handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
 
-    // One announcement per item into the target group, then the confirmation.
-    expect(sendMessage).toHaveBeenNthCalledWith(
-      1,
-      TARGET_GROUP,
-      buildAnnouncement(items[0])
-    );
-    expect(sendMessage).toHaveBeenNthCalledWith(
-      2,
-      TARGET_GROUP,
-      buildAnnouncement(items[1])
-    );
-    expect(sendMessage).toHaveBeenNthCalledWith(
-      3,
-      ADMIN_ID,
-      "✅ Đã gửi 2/2 HS vào nhóm."
-    );
+    // Enqueued exactly once with one row per item: fixed target group chat_id,
+    // and message_text identical to buildAnnouncement(item) verbatim.
+    expect(sendQueueInsert).toHaveBeenCalledTimes(1);
+    const enqueued = sendQueueInsert.mock.calls[0][0] as {
+      admin_id: number;
+      chat_id: number;
+      message_text: string;
+    }[];
+    expect(enqueued).toEqual([
+      {
+        admin_id: ADMIN_ID,
+        chat_id: TARGET_GROUP,
+        message_text: buildAnnouncement(items[0]),
+      },
+      {
+        admin_id: ADMIN_ID,
+        chat_id: TARGET_GROUP,
+        message_text: buildAnnouncement(items[1]),
+      },
+    ]);
+
+    // Pending batch cleared.
     expect(pendingDeleteEq).toHaveBeenCalledTimes(1);
+
+    // Exactly one message back to the admin: the "đã xếp hàng" confirmation.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "✅ Đã xếp 2 HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+    );
+    // Nothing is posted synchronously to the target group.
+    const postedToGroup = sendMessage.mock.calls.some(
+      (c) => c[0] === TARGET_GROUP
+    );
+    expect(postedToGroup).toBe(false);
   });
 
   it("/ok with no pending batch replies 'Không có danh sách nào đang chờ.' and posts nothing", async () => {

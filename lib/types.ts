@@ -82,6 +82,16 @@ export interface PendingBatch {
   items: MappedItem[];
 }
 
+// One unsent row read from the send_queue table by the drip-send cron. Only the
+// columns the cron needs are selected; `sent`/`created_at`/`sent_at` are managed
+// server-side.
+export interface SendQueueRow {
+  id: string;
+  admin_id: number;
+  chat_id: number;
+  message_text: string;
+}
+
 export interface LogRecord {
   created_at: string; // ISO UTC
   qll_telegram_id: string;
