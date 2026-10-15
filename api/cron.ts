@@ -7,10 +7,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { loadConfig } from "../lib/config.js";
 import {
+  claimRow,
   countUnsent,
   fetchNextUnsent,
   getClient,
-  markSent,
+  releaseRow,
 } from "../lib/supabase.js";
 import { createTelegramClient, type TelegramClient } from "../lib/telegram.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -54,30 +55,55 @@ export async function runCron(deps: CronDeps): Promise<void> {
     return; // empty queue: nothing to send
   }
 
+  // Track which admins actually had a message sent THIS run, so the completion
+  // DM is only considered for them (never fired by a run that sent nothing).
+  const sentForAdmin = new Set<number>();
+  let sentCount = 0;
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     try {
+      // CLAIM first: atomically flip this row to sent. If another overlapping
+      // cron run already claimed it, we lose the claim and skip (no double
+      // send). This closes the read-then-send race that caused duplicates.
+      const claim = await claimRow(deps.supabase, row.id);
+      if (!claim.ok || !claim.claimed) {
+        continue; // someone else owns this row; do not send it again
+      }
+
       const result = await deps.telegram.sendMessage(
         row.chat_id,
         row.message_text
       );
       if (result.ok) {
-        // Only mark sent on a confirmed send; a failure retries next run.
-        await markSent(deps.supabase, row.id);
+        sentForAdmin.add(row.admin_id);
+        sentCount++;
+        // Space out ONLY real sends; skipped/claimed-away rows add no delay.
+        if (i < rows.length - 1) {
+          await sleep(delayMs);
+        }
+      } else {
+        // Send failed after claiming -> release so the next run retries it.
+        await releaseRow(deps.supabase, row.id);
       }
     } catch {
-      // Swallow a single send/mark failure so the rest of the batch proceeds;
-      // the row stays unsent and is retried on the next cron run.
-    }
-    // Wait between sends only — not after the last row.
-    if (i < rows.length - 1) {
-      await sleep(delayMs);
+      // Any unexpected failure: try to release the row so it is retried, and
+      // continue with the rest of the batch.
+      try {
+        await releaseRow(deps.supabase, row.id);
+      } catch {
+        // ignore
+      }
     }
   }
 
-  // Notify each distinct admin whose queue is now fully drained.
-  const adminIds = [...new Set(rows.map((r) => r.admin_id))];
-  for (const adminId of adminIds) {
+  // Only consider completion when this run actually sent something, and only
+  // for admins we sent for — so the "Đã gửi xong" DM fires exactly once, when
+  // the final message drains that admin's queue (not on empty/no-op runs).
+  if (sentCount === 0) {
+    return;
+  }
+  for (const adminId of sentForAdmin) {
     try {
       const { count } = await countUnsent(deps.supabase, adminId);
       if (count === 0) {

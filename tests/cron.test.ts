@@ -11,7 +11,13 @@ import type { SendQueueRow } from "../lib/types.js";
 // test. getClient is stubbed too (used only by the HTTP handler path).
 const fetchNextUnsent =
   vi.fn<(client: unknown, limit: number) => Promise<unknown>>();
-const markSent =
+// claimRow atomically claims a row before sending; by default the claim wins.
+const claimRow =
+  vi.fn<(client: unknown, id: string) => Promise<{ ok: boolean; claimed: boolean }>>(
+    async () => ({ ok: true, claimed: true })
+  );
+// releaseRow reverts a claimed row to unsent when the send fails.
+const releaseRow =
   vi.fn<(client: unknown, id: string) => Promise<{ ok: boolean }>>(
     async () => ({ ok: true })
   );
@@ -25,7 +31,8 @@ const createTelegramClient = vi.fn(() => ({}) as unknown as TelegramClient);
 
 vi.mock("../lib/supabase.js", () => ({
   fetchNextUnsent,
-  markSent,
+  claimRow,
+  releaseRow,
   countUnsent,
   getClient,
 }));
@@ -90,11 +97,13 @@ describe("runCron — drip send", () => {
     expect(sendMessage).toHaveBeenNthCalledWith(2, TARGET_GROUP, "B");
     expect(sendMessage).toHaveBeenNthCalledWith(3, TARGET_GROUP, "C");
 
-    // Each successful send is marked sent.
-    expect(markSent).toHaveBeenCalledTimes(3);
-    expect(markSent).toHaveBeenNthCalledWith(1, expect.anything(), "1");
-    expect(markSent).toHaveBeenNthCalledWith(2, expect.anything(), "2");
-    expect(markSent).toHaveBeenNthCalledWith(3, expect.anything(), "3");
+    // Each row is claimed (atomically) before its send.
+    expect(claimRow).toHaveBeenCalledTimes(3);
+    expect(claimRow).toHaveBeenNthCalledWith(1, expect.anything(), "1");
+    expect(claimRow).toHaveBeenNthCalledWith(2, expect.anything(), "2");
+    expect(claimRow).toHaveBeenNthCalledWith(3, expect.anything(), "3");
+    // Successful sends are never released.
+    expect(releaseRow).not.toHaveBeenCalled();
 
     // Sleep fires between sends only (2 times for 3 rows), at CRON_DELAY_MS.
     expect(sleep).toHaveBeenCalledTimes(2);
@@ -168,7 +177,7 @@ describe("runCron — empty queue", () => {
     await runCron({ telegram, supabase: {} as unknown as SupabaseClient, sleep });
 
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(markSent).not.toHaveBeenCalled();
+    expect(claimRow).not.toHaveBeenCalled();
     expect(sleep).not.toHaveBeenCalled();
     expect(countUnsent).not.toHaveBeenCalled();
   });
@@ -192,14 +201,14 @@ describe("runCron — a failed send stays unsent", () => {
       batchSize: 3,
     });
 
-    // All three were attempted.
+    // All three were claimed then attempted.
     expect(sendMessage).toHaveBeenCalledTimes(3);
-    // markSent called for the two successes (ids 1 and 3), NOT the failed id 2.
-    const markedIds = markSent.mock.calls.map((c) => c[1]);
-    expect(markedIds).toEqual(["1", "3"]);
+    // The failed row (id 2) is released back to unsent; successes are not.
+    const releasedIds = releaseRow.mock.calls.map((c) => c[1]);
+    expect(releasedIds).toEqual(["2"]);
   });
 
-  it("does not mark a row whose send throws, and keeps going", async () => {
+  it("releases a row whose send throws, and keeps going", async () => {
     const rows = [row("1", "A"), row("2", "B")];
     fetchNextUnsent.mockResolvedValue({ ok: true, rows });
     countUnsent.mockResolvedValue({ ok: true, count: 1 });
@@ -222,8 +231,31 @@ describe("runCron — a failed send stays unsent", () => {
     });
 
     expect(sendMessage).toHaveBeenCalledTimes(2);
-    const markedIds = markSent.mock.calls.map((c) => c[1]);
-    expect(markedIds).toEqual(["2"]);
+    // The throwing row (id 1) is released; id 2 succeeded and is not released.
+    const releasedIds = releaseRow.mock.calls.map((c) => c[1]);
+    expect(releasedIds).toEqual(["1"]);
+  });
+
+  it("skips a row it loses the claim on (another cron already took it)", async () => {
+    const rows = [row("1", "A"), row("2", "B")];
+    fetchNextUnsent.mockResolvedValue({ ok: true, rows });
+    countUnsent.mockResolvedValue({ ok: true, count: 1 });
+    // Lose the claim on the first row, win the second.
+    claimRow
+      .mockResolvedValueOnce({ ok: true, claimed: false })
+      .mockResolvedValueOnce({ ok: true, claimed: true });
+    const { telegram, sendMessage } = fakeTelegram();
+
+    await runCron({
+      telegram,
+      supabase: {} as unknown as SupabaseClient,
+      sleep: vi.fn(async () => {}),
+      batchSize: 2,
+    });
+
+    // Only the row we claimed is sent; the lost-claim row is skipped entirely.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(TARGET_GROUP, "B");
   });
 });
 

@@ -209,6 +209,57 @@ export async function markSent(
   }
 }
 
+// Atomically CLAIMS a queue row before sending: flips sent=false -> true only
+// if it is still unsent, and reports whether THIS caller won the claim. This
+// prevents double-sends when two overlapping cron runs both fetch the same
+// row: only the winner (claimed=true) sends it; the loser skips. The .eq on
+// both id AND sent=false makes the update a no-op for an already-claimed row.
+export async function claimRow(
+  client: SupabaseClient,
+  id: string
+): Promise<{ ok: boolean; claimed: boolean; error?: string }> {
+  try {
+    const { data, error } = await client
+      .from("send_queue")
+      .update({ sent: true, sent_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("sent", false)
+      .select("id");
+    if (error) {
+      return { ok: false, claimed: false, error: error.message };
+    }
+    // data holds the rows actually updated; length 1 == we won the claim.
+    const claimed = Array.isArray(data) && data.length === 1;
+    return { ok: true, claimed };
+  } catch (err) {
+    return {
+      ok: false,
+      claimed: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// Reverts a claimed row back to unsent (used when the actual Telegram send
+// FAILS after a successful claim), so the next cron run retries it.
+export async function releaseRow(
+  client: SupabaseClient,
+  id: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await client
+      .from("send_queue")
+      .update({ sent: false, sent_at: null })
+      .eq("id", id);
+    if (error) {
+      return { ok: false, error: error.message };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // Counts the remaining unsent rows, optionally scoped to one admin. A null
 // count (nothing matched) is coalesced to 0. On error returns count 0.
 export async function countUnsent(
