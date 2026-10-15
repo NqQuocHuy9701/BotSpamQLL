@@ -38,11 +38,20 @@ function buildInboxText(requestText: string, credentialText: string): string {
 const START_ACK =
   "✅ Inbox đã sẵn sàng. Bot sẽ gửi thông tin Tài khoản / Mật khẩu vào đây.";
 
-// --- /spamtest: one-off proof-of-concept for tagging a QLL in the group. ---
-// Locked to a single admin telegram_id; anyone else is ignored. Independent of
-// RELAY_ENABLED (the credential relay stays off). Posts exactly ONE message.
-const SPAMTEST_COMMAND = "/spamtest";
-const SPAMTEST_ADMIN_ID = 6532155675; // Quốc Huy 🐾 (OP_HuyNQ5)
+// --- /spam: operator triggers an announcement from the bot's PRIVATE chat. ---
+// The operator DMs the bot "/spam"; the bot posts ONE announcement into the
+// fixed target group below, tagging the QLL. Locked to an allow-list of admin
+// telegram_ids; anyone else is ignored. Independent of RELAY_ENABLED.
+const SPAMTEST_COMMAND = "/spam";
+
+// Allow-list of operators permitted to trigger /spam from their private chat.
+// Add more telegram_ids here as other managers are authorized.
+const SPAMTEST_ADMIN_IDS: number[] = [
+  6532155675, // Quốc Huy 🐾 (OP_HuyNQ5)
+];
+
+// The single target group the announcement is posted into (Kiểu 1: pinned).
+const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
 
 // The sample announcement form, tagging the fixed target @SA_AnhMTK.
 const SPAMTEST_MESSAGE = [
@@ -154,9 +163,12 @@ function isBot(user: TelegramUser): boolean {
   return user.is_bot === true;
 }
 
-// Handles the admin-only /spamtest command. Returns true if the update WAS a
-// /spamtest attempt (so the caller stops further processing), false otherwise.
-// Only SPAMTEST_ADMIN_ID may trigger it; anyone else is a silent no-op.
+// Handles the operator-only /spam command issued from the bot's PRIVATE chat.
+// Returns true if the update WAS a /spam attempt (so the caller stops further
+// processing), false otherwise. Only an allow-listed admin in a private chat
+// may trigger it; anyone/anywhere else is a silent no-op. On success it posts
+// exactly ONE announcement into the fixed target group and sends the operator
+// a short confirmation in their private chat.
 async function maybeHandleSpamTest(
   message: TelegramMessage,
   deps: Deps
@@ -165,12 +177,22 @@ async function maybeHandleSpamTest(
   if (text !== SPAMTEST_COMMAND) {
     return false;
   }
-  const isGroup =
-    message.chat.type === "group" || message.chat.type === "supergroup";
-  if (!isGroup || message.from?.id !== SPAMTEST_ADMIN_ID) {
+  // Must be a PRIVATE chat with an allow-listed operator.
+  const fromId = message.from?.id;
+  const authorized =
+    message.chat.type === "private" &&
+    fromId !== undefined &&
+    SPAMTEST_ADMIN_IDS.includes(fromId);
+  if (!authorized) {
     return true; // swallow: not authorized / wrong chat, post nothing
   }
-  await deps.telegram.sendMessage(message.chat.id, SPAMTEST_MESSAGE);
+  // Post exactly one announcement into the fixed target group.
+  await deps.telegram.sendMessage(SPAMTEST_TARGET_CHAT_ID, SPAMTEST_MESSAGE);
+  // Confirm back to the operator privately.
+  await deps.telegram.sendMessage(
+    message.chat.id,
+    "✅ Đã gửi thông báo vào nhóm."
+  );
   return true;
 }
 

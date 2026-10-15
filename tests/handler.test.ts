@@ -458,8 +458,9 @@ describe("handleUpdate — private /start", () => {
   });
 });
 
-describe("handleUpdate — /spamtest (admin-only PoC)", () => {
+describe("handleUpdate — /spam (operator DM -> post to fixed group)", () => {
   const ADMIN_ID = 6532155675;
+  const TARGET_GROUP = -1002273179613;
   const EXPECTED_MESSAGE = [
     "✅ Thông tin học của con",
     "Học sinh: Nguyễn Đức Minh",
@@ -471,37 +472,62 @@ describe("handleUpdate — /spamtest (admin-only PoC)", () => {
     "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_AnhMTK",
   ].join("\n");
 
-  function spamTestUpdate(fromId: number, text = "/spamtest"): TelegramUpdate {
+  // A private-chat /spam from the given user (chat.id == user id for DMs).
+  function spamDm(fromId: number, text = "/spam"): TelegramUpdate {
     return {
       update_id: 50,
       message: {
         message_id: 1,
         date: 1_700_000_000,
-        chat: { id: GROUP_ID, type: "supergroup", title: "Nhóm QLL" },
-        from: { id: fromId, first_name: "Tester" },
+        chat: { id: fromId, type: "private" },
+        from: { id: fromId, first_name: "Operator" },
         text,
       },
     };
   }
 
-  it("posts the announcement form tagging @SA_AnhMTK when the admin runs it", async () => {
-    // relay stays OFF — /spamtest is independent of the relay switch.
+  it("posts to the fixed target group and confirms privately when an operator DMs /spam", async () => {
+    // relay stays OFF — /spam is independent of the relay switch.
     const { deps, sendMessage, deleteMessage, insert } = makeDeps({
       relayEnabled: false,
     });
 
-    await handleUpdate(spamTestUpdate(ADMIN_ID), deps);
+    await handleUpdate(spamDm(ADMIN_ID), deps);
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith(GROUP_ID, EXPECTED_MESSAGE);
+    // 1) announcement into the fixed group, 2) private confirmation.
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenNthCalledWith(1, TARGET_GROUP, EXPECTED_MESSAGE);
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      ADMIN_ID,
+      "✅ Đã gửi thông báo vào nhóm."
+    );
     // Pure announcement: no deletes, no credential logging.
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
   });
 
-  it("ignores /spamtest from a non-admin (posts nothing)", async () => {
+  it("ignores /spam from a non-authorized user (posts nothing)", async () => {
     const { deps, sendMessage } = makeDeps({ relayEnabled: false });
-    await handleUpdate(spamTestUpdate(999999), deps);
+    await handleUpdate(spamDm(999999), deps);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores /spam sent inside a group (must be a private DM)", async () => {
+    const { deps, sendMessage } = makeDeps({ relayEnabled: false });
+    await handleUpdate(
+      {
+        update_id: 51,
+        message: {
+          message_id: 1,
+          date: 1_700_000_000,
+          chat: { id: GROUP_ID, type: "supergroup", title: "Nhóm QLL" },
+          from: { id: ADMIN_ID, first_name: "Operator" },
+          text: "/spam",
+        },
+      },
+      deps
+    );
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -509,9 +535,8 @@ describe("handleUpdate — /spamtest (admin-only PoC)", () => {
     const { deps, sendMessage, deleteMessage } = makeDeps({
       relayEnabled: true,
     });
-    await handleUpdate(spamTestUpdate(ADMIN_ID), deps);
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith(GROUP_ID, EXPECTED_MESSAGE);
+    await handleUpdate(spamDm(ADMIN_ID), deps);
+    expect(sendMessage).toHaveBeenNthCalledWith(1, TARGET_GROUP, EXPECTED_MESSAGE);
     expect(deleteMessage).not.toHaveBeenCalled();
   });
 });
