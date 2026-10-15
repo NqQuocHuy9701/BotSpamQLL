@@ -823,17 +823,20 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
       admin_id: number;
       chat_id: number;
       message_text: string;
+      send_after: string | null;
     }[];
     expect(enqueued).toEqual([
       {
         admin_id: ADMIN_ID,
         chat_id: TARGET_GROUP,
         message_text: buildAnnouncement(items[0]),
+        send_after: null,
       },
       {
         admin_id: ADMIN_ID,
         chat_id: TARGET_GROUP,
         message_text: buildAnnouncement(items[1]),
+        send_after: null,
       },
     ]);
 
@@ -853,6 +856,106 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(postedToGroup).toBe(false);
   });
 
+  it("/ok 21:00 schedules: every row carries a non-null send_after and the reply confirms the VN time", async () => {
+    const items: MappedItem[] = [
+      {
+        tenHS: "Vũ Xuân Kỳ (SID: 189064)",
+        maLop: "KHTN.2026.0913",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T5 20:30-21:30",
+        username: "SA_LanNT18",
+      },
+      {
+        tenHS: "Đặng Mai Vy (SID: 213054)",
+        maLop: "KHTN.2026.1972",
+        ngayHoc: "15/10/2026",
+        lichHoc: "",
+        username: "SAAnhPTH5",
+      },
+    ];
+    const { deps, sendMessage, sendQueueInsert, pendingDeleteEq } = makeDeps({
+      relayEnabled: false,
+      pendingItems: items,
+    });
+
+    await handleUpdate(textDm(ADMIN_ID, "/ok 21:00"), deps);
+
+    // Enqueued once; every row has a non-null ISO send_after, all identical.
+    expect(sendQueueInsert).toHaveBeenCalledTimes(1);
+    const enqueued = sendQueueInsert.mock.calls[0][0] as {
+      send_after: string | null;
+    }[];
+    expect(enqueued).toHaveLength(2);
+    for (const r of enqueued) {
+      expect(typeof r.send_after).toBe("string");
+    }
+    expect(enqueued[0].send_after).toBe(enqueued[1].send_after);
+
+    // Pending cleared, nothing posted to the group synchronously.
+    expect(pendingDeleteEq).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls.some((c) => c[0] === TARGET_GROUP)).toBe(false);
+
+    // Exactly one scheduled-confirmation reply to the admin.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const reply = sendMessage.mock.calls[0][1] as string;
+    expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
+    expect(reply).toContain("Đã lên lịch gửi 2 HS");
+    expect(reply).toContain("(giờ VN)");
+  });
+
+  it("/ok with an invalid time replies the parser reason and does NOT enqueue or delete", async () => {
+    const items: MappedItem[] = [
+      {
+        tenHS: "Vũ Xuân Kỳ (SID: 189064)",
+        maLop: "KHTN.2026.0913",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T5 20:30-21:30",
+        username: "SA_LanNT18",
+      },
+    ];
+    const { deps, sendMessage, sendQueueInsert, pendingDeleteEq } = makeDeps({
+      relayEnabled: false,
+      pendingItems: items,
+    });
+
+    await handleUpdate(textDm(ADMIN_ID, "/ok 99:99"), deps);
+
+    expect(sendQueueInsert).not.toHaveBeenCalled();
+    expect(pendingDeleteEq).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const reply = sendMessage.mock.calls[0][1] as string;
+    expect(reply).toContain("không hợp lệ");
+  });
+
+  it("/OK (uppercase, no arg) behaves as an immediate send (send_after null)", async () => {
+    const items: MappedItem[] = [
+      {
+        tenHS: "Vũ Xuân Kỳ (SID: 189064)",
+        maLop: "KHTN.2026.0913",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T5 20:30-21:30",
+        username: "SA_LanNT18",
+      },
+    ];
+    const { deps, sendMessage, sendQueueInsert } = makeDeps({
+      relayEnabled: false,
+      pendingItems: items,
+    });
+
+    await handleUpdate(textDm(ADMIN_ID, "/OK"), deps);
+
+    expect(sendQueueInsert).toHaveBeenCalledTimes(1);
+    const enqueued = sendQueueInsert.mock.calls[0][0] as {
+      send_after: string | null;
+    }[];
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0].send_after).toBeNull();
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "✅ Đã xếp 1 HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+    );
+  });
+
   it("/ok with no pending batch replies 'Không có danh sách nào đang chờ.' and posts nothing", async () => {
     const { deps, sendMessage } = makeDeps({
       relayEnabled: false,
@@ -866,12 +969,13 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     );
   });
 
-  it("/huy deletes the pending batch and confirms", async () => {
-    const { deps, sendMessage, pendingDeleteEq } = makeDeps({
+  it("/huy deletes the pending batch and confirms (not swallowed by the /ok branch)", async () => {
+    const { deps, sendMessage, pendingDeleteEq, sendQueueInsert } = makeDeps({
       relayEnabled: false,
     });
     await handleUpdate(textDm(ADMIN_ID, "/huy"), deps);
     expect(pendingDeleteEq).toHaveBeenCalledTimes(1);
+    expect(sendQueueInsert).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledWith(
       ADMIN_ID,
       "Đã huỷ danh sách đang chờ."

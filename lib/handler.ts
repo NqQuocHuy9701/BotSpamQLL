@@ -5,6 +5,7 @@ import { buildAnnouncement, buildSummary, parseSheet } from "./batch.js";
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
 import { mapQll } from "./qllmap.js";
+import { formatVnDateTime, parseOkCommand } from "./schedule.js";
 import {
   deletePendingBatch,
   enqueueMessages,
@@ -313,8 +314,18 @@ async function maybeHandleBatch(
     return true;
   }
 
-  // Case 2: /ok -> enqueue the pending batch for slow drip-sending by the cron.
-  if (text === BATCH_OK_COMMAND) {
+  // Case 2: /ok [HH:MM | dd/mm HH:MM] -> enqueue the pending batch for slow
+  // drip-sending by the cron. A bare /ok sends immediately (send_after=null); a
+  // time/date-time schedules the batch (send_after=ISO on every row). Matched
+  // by prefix so the optional time argument is recognised; /huy never starts
+  // with /ok so it is unaffected.
+  if (text.toLowerCase().startsWith(BATCH_OK_COMMAND)) {
+    const parsed = parseOkCommand(text);
+    if (parsed.kind === "invalid") {
+      await deps.telegram.sendMessage(message.chat.id, parsed.reason);
+      return true;
+    }
+
     const pending = await loadPendingBatch(deps.supabase, adminId);
     const items = pending.items ?? [];
     if (!pending.ok || items.length === 0) {
@@ -325,19 +336,27 @@ async function maybeHandleBatch(
       return true;
     }
 
+    const sendAfter = parsed.kind === "at" ? parsed.sendAfterIso : null;
+
     // Store the fully-formatted announcement text (incl. the @username tag) so
-    // the cron sends message_text verbatim with no re-formatting.
+    // the cron sends message_text verbatim with no re-formatting. send_after is
+    // null for immediate sends and the scheduled ISO for a hẹn-giờ batch.
     const rows = items.map((item) => ({
       admin_id: adminId,
       chat_id: SPAMTEST_TARGET_CHAT_ID,
       message_text: buildAnnouncement(item),
+      send_after: sendAfter,
     }));
     await enqueueMessages(deps.supabase, rows);
     await deletePendingBatch(deps.supabase, adminId);
-    await deps.telegram.sendMessage(
-      message.chat.id,
-      `✅ Đã xếp ${items.length} HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`
-    );
+
+    const confirmation =
+      parsed.kind === "at"
+        ? `✅ Đã lên lịch gửi ${items.length} HS lúc ${formatVnDateTime(
+            parsed.sendAfterIso
+          )} (giờ VN). Bot sẽ tự gửi khi tới giờ.`
+        : `✅ Đã xếp ${items.length} HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`;
+    await deps.telegram.sendMessage(message.chat.id, confirmation);
     return true;
   }
 

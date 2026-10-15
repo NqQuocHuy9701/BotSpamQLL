@@ -51,10 +51,12 @@ describe("enqueueMessages", () => {
 });
 
 describe("fetchNextUnsent", () => {
+  // Chain: select -> eq(sent,false) -> or(due-filter) -> order -> limit.
   function buildClient(result: { data: unknown; error: unknown }) {
     const limit = vi.fn(async () => result);
     const order = vi.fn(() => ({ limit }));
-    const eq = vi.fn(() => ({ order }));
+    const or = vi.fn((_filter: string) => ({ order }));
+    const eq = vi.fn(() => ({ or }));
     const select = vi.fn(() => ({ eq }));
     const from = vi.fn(() => ({ select }));
     return {
@@ -62,17 +64,18 @@ describe("fetchNextUnsent", () => {
       from,
       select,
       eq,
+      or,
       order,
       limit,
     };
   }
 
-  it("selects unsent rows ordered by created_at ascending with the limit", async () => {
+  it("selects due unsent rows ordered by created_at ascending with the limit", async () => {
     const rows: SendQueueRow[] = [
       { id: "1", admin_id: ADMIN_ID, chat_id: TARGET_GROUP, message_text: "A" },
       { id: "2", admin_id: ADMIN_ID, chat_id: TARGET_GROUP, message_text: "B" },
     ];
-    const { client, from, select, eq, order, limit } = buildClient({
+    const { client, from, select, eq, or, order, limit } = buildClient({
       data: rows,
       error: null,
     });
@@ -82,6 +85,10 @@ describe("fetchNextUnsent", () => {
     expect(from).toHaveBeenCalledWith("send_queue");
     expect(select).toHaveBeenCalledWith("id, admin_id, chat_id, message_text");
     expect(eq).toHaveBeenCalledWith("sent", false);
+    // Due filter: no schedule OR the scheduled time already arrived.
+    expect(or).toHaveBeenCalledTimes(1);
+    const orArg = or.mock.calls[0][0];
+    expect(orArg.startsWith("send_after.is.null,send_after.lte.")).toBe(true);
     expect(order).toHaveBeenCalledWith("created_at", { ascending: true });
     expect(limit).toHaveBeenCalledWith(3);
   });

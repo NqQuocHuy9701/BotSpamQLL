@@ -93,6 +93,10 @@ export interface SendQueueRow {
   admin_id: number;
   chat_id: number;
   message_text: string;
+  // When set, the row is only due at/after this UTC ISO instant (hẹn giờ).
+  // null/absent means "send immediately". Optional so the cron's narrowed
+  // select still satisfies the type.
+  send_after?: string | null;
 }
 
 export interface LogRecord {

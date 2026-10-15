@@ -118,6 +118,47 @@ describe("runCron — drip send", () => {
   });
 });
 
+describe("runCron — scheduled (hẹn giờ) due-filter contract", () => {
+  it("sends exactly the DUE rows fetchNextUnsent returns and no others", async () => {
+    // The DB applies the send_after due-filter (asserted in supabase-queue
+    // tests); at the cron level, runCron must send precisely what it is given.
+    const dueRows = [row("1", "A"), row("2", "B")];
+    fetchNextUnsent.mockResolvedValue({ ok: true, rows: dueRows });
+    countUnsent.mockResolvedValue({ ok: true, count: 1 });
+    const { telegram, sendMessage } = fakeTelegram();
+
+    await runCron({
+      telegram,
+      supabase: {} as unknown as SupabaseClient,
+      sleep: vi.fn(async () => {}),
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenNthCalledWith(1, TARGET_GROUP, "A");
+    expect(sendMessage).toHaveBeenNthCalledWith(2, TARGET_GROUP, "B");
+  });
+
+  it("gates the completion DM on countUnsent for the admin (ignores scheduling)", async () => {
+    // countUnsent counts ALL of an admin's unsent rows regardless of
+    // send_after, so a still-pending scheduled row keeps count > 0 and the
+    // completion DM is withheld.
+    fetchNextUnsent.mockResolvedValue({ ok: true, rows: [row("1", "A")] });
+    countUnsent.mockResolvedValue({ ok: true, count: 3 });
+    const { telegram, sendMessage } = fakeTelegram();
+
+    await runCron({
+      telegram,
+      supabase: {} as unknown as SupabaseClient,
+      sleep: vi.fn(async () => {}),
+    });
+
+    expect(countUnsent).toHaveBeenCalledWith(expect.anything(), ADMIN_ID);
+    // Only the group send; no premature completion DM while rows remain.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(TARGET_GROUP, "A");
+  });
+});
+
 describe("runCron — empty queue", () => {
   it("sends nothing, marks nothing, and does not sleep or notify", async () => {
     fetchNextUnsent.mockResolvedValue({ ok: true, rows: [] });

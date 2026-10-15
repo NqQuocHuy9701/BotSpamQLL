@@ -138,7 +138,12 @@ export async function listUsernames(
 // (no insert issued) so /ok with zero mapped items is safe.
 export async function enqueueMessages(
   client: SupabaseClient,
-  rows: { admin_id: number; chat_id: number; message_text: string }[]
+  rows: {
+    admin_id: number;
+    chat_id: number;
+    message_text: string;
+    send_after?: string | null;
+  }[]
 ): Promise<{ ok: boolean; error?: string }> {
   if (rows.length === 0) {
     return { ok: true };
@@ -161,10 +166,14 @@ export async function fetchNextUnsent(
   limit: number
 ): Promise<{ ok: boolean; rows: SendQueueRow[]; error?: string }> {
   try {
+    // Due = not sent AND (no schedule OR the scheduled time has arrived).
+    // Evaluated server-side against "now" so scheduled rows stay invisible
+    // until their send_after instant passes.
     const { data, error } = await client
       .from("send_queue")
       .select("id, admin_id, chat_id, message_text")
       .eq("sent", false)
+      .or("send_after.is.null,send_after.lte." + new Date().toISOString())
       .order("created_at", { ascending: true })
       .limit(limit);
     if (error) {
