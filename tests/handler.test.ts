@@ -28,6 +28,9 @@ function makeDeps(options: {
   downloadResult?: DownloadResult;
   pendingItems?: MappedItem[] | null;
   knownUsernames?: string[];
+  // When set, a username lookup (findUserByUsername / dedup) returns this as an
+  // already-existing QLL row, so /adduser reports "đã có".
+  existingUser?: { username: string; fullName: string };
 }): {
   deps: Deps;
   trace: string[];
@@ -109,11 +112,29 @@ function makeDeps(options: {
     error: null,
   }));
 
-  // telegram_users_qll .select("username") returns the injected known list.
-  const usernameSelect = vi.fn(async () => ({
-    data: (options.knownUsernames ?? []).map((username) => ({ username })),
-    error: null,
-  }));
+  // telegram_users_qll .select(...) is used two ways:
+  //  - listUsernames: `await select("username")` -> the injected known list.
+  //  - findUserByUsername / upsertUser dedup: `select(...).ilike(...).limit(...)`
+  //    -> rows matching an existing username (empty unless options.existingUser
+  //    is set, so by default a /adduser is treated as NEW).
+  const existingRows =
+    options.existingUser === undefined
+      ? []
+      : [{ username: options.existingUser.username, full_name: options.existingUser.fullName, telegram_id: 1 }];
+  const usernameSelect = vi.fn(() => {
+    const listResult = {
+      data: (options.knownUsernames ?? []).map((username) => ({ username })),
+      error: null,
+    };
+    // Thenable so `await select("username")` resolves to the known list.
+    const chain = {
+      ilike: () => ({ limit: async () => ({ data: existingRows, error: null }) }),
+      then: (resolve: (v: typeof listResult) => unknown) => resolve(listResult),
+    };
+    return chain;
+  });
+  // upsertUser's UPDATE-when-exists path: .update(...).ilike(...)
+  const userUpdate = vi.fn(() => ({ ilike: async () => ({ error: null }) }));
 
   // send_queue: /ok uses .insert(rows); the other chainable methods are stubbed
   // so the queue helpers never throw even though /ok only exercises insert.
@@ -125,8 +146,9 @@ function makeDeps(options: {
   // Route .from(table) to the right query-builder stub by table name.
   const from = vi.fn((table: string) => {
     if (table === "telegram_users_qll") {
-      // Passive collection uses .upsert; batch mapping uses .select("username").
-      return { upsert, select: usernameSelect };
+      // Passive collection + manual add use .upsert/.update; batch mapping and
+      // dedup use .select (chainable with .ilike().limit()).
+      return { upsert, select: usernameSelect, update: userUpdate };
     }
     if (table === "pending_batches") {
       return {
@@ -1132,6 +1154,22 @@ describe("handleUpdate — manual QLL commands (admin DM)", () => {
     expect(pendingUpsert).not.toHaveBeenCalled();
     expect(sendQueueInsert).not.toHaveBeenCalled();
     expect(sendMessage.mock.calls.some((c) => c[0] === TARGET_GROUP)).toBe(false);
+  });
+
+  it("/adduser reports 'đã có' and does NOT upsert when the username already exists", async () => {
+    const { deps, sendMessage, upsert } = makeDeps({
+      relayEnabled: false,
+      existingUser: { username: "SA_HaNH3", fullName: "Nguyễn Hải Hà 3" },
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/adduser @SA_HaNH3 Người Khác"), deps);
+
+    // No new row written; the admin is told it already exists.
+    expect(upsert).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const reply = sendMessage.mock.calls[0] as [number, string];
+    expect(reply[0]).toBe(ADMIN_ID);
+    expect(reply[1]).toContain("@SA_HaNH3");
+    expect(reply[1]).toContain("đã có");
   });
 
   it("/adduser without the leading @ still upserts the bare username", async () => {

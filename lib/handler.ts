@@ -13,6 +13,7 @@ import { mapQll } from "./qllmap.js";
 import { formatVnDateTime, parseOkCommand } from "./schedule.js";
 import {
   addUserManual,
+  findUserByUsername,
   deletePendingBatch,
   enqueueMessages,
   insertLog,
@@ -288,6 +289,16 @@ async function maybeHandleQllCommands(
       await deps.telegram.sendMessage(
         message.chat.id,
         "Cú pháp: /adduser @username Họ Tên"
+      );
+      return true;
+    }
+    // Reject duplicates: one username = one QLL row. If it already exists
+    // (added manually OR auto-collected from the group), do NOT add again.
+    const existing = await findUserByUsername(deps.supabase, username);
+    if (existing.exists) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        `⚠️ QLL @${username} đã có trong hệ thống (${existing.fullName || "?"}). Không thêm trùng.`
       );
       return true;
     }

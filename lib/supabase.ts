@@ -126,6 +126,37 @@ export async function listUsernames(
   }
 }
 
+// Returns whether a username already exists in telegram_users_qll
+// (case-insensitive), and the stored full_name if found. Used by /adduser to
+// avoid creating a duplicate QLL row and to report "đã có".
+export async function findUserByUsername(
+  client: SupabaseClient,
+  username: string
+): Promise<{ ok: boolean; exists: boolean; fullName?: string; error?: string }> {
+  const stripped = username.trim().replace(/^@/, "");
+  try {
+    const { data, error } = await client
+      .from("telegram_users_qll")
+      .select("username, full_name")
+      .ilike("username", stripped)
+      .limit(1);
+    if (error) {
+      return { ok: false, exists: false, error: error.message };
+    }
+    const row = (data as { full_name: string | null }[] | null)?.[0];
+    if (row) {
+      return { ok: true, exists: true, fullName: row.full_name ?? "" };
+    }
+    return { ok: true, exists: false };
+  } catch (err) {
+    return {
+      ok: false,
+      exists: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // --- Slow drip-send queue (table: send_queue) -------------------------------
 // Pre-created by the operator; the bot never migrates it:
 //   send_queue ( id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -338,6 +369,34 @@ export async function upsertUser(
   record: UserRecord
 ): Promise<{ ok: boolean; error?: string }> {
   try {
+    // Enforce one-row-per-username. If this username already exists (added
+    // manually or previously auto-collected), UPDATE that row's info instead of
+    // inserting a second row (which the DB's unique username index would reject
+    // anyway). Only when the username is new do we insert a fresh row.
+    const uname = (record.username ?? "").trim();
+    if (uname !== "") {
+      const { data: existing, error: findErr } = await client
+        .from("telegram_users_qll")
+        .select("telegram_id")
+        .ilike("username", uname)
+        .limit(1);
+      if (!findErr && Array.isArray(existing) && existing.length === 1) {
+        const { error: updErr } = await client
+          .from("telegram_users_qll")
+          .update({
+            full_name: record.full_name,
+            chat_id: record.chat_id,
+            chat_title: record.chat_title,
+            updated_at: new Date().toISOString(),
+          })
+          .ilike("username", uname);
+        if (updErr) {
+          return { ok: false, error: updErr.message };
+        }
+        return { ok: true };
+      }
+    }
+
     const { error } = await client
       .from("telegram_users_qll")
       .upsert({ ...record, updated_at: new Date().toISOString() }, {

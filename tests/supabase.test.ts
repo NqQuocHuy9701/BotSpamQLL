@@ -226,9 +226,15 @@ describe("manualUserId", () => {
 });
 
 describe("addUserManual", () => {
+  // upsertUser now first SELECTs by username (ilike) to enforce one row per
+  // username; buildClient returns an empty select (username not found) so the
+  // code takes the INSERT/upsert path, then applies `result` to that upsert.
   function buildClient(result: { error: unknown }) {
     const upsert = vi.fn(async (_record: unknown, _opts: unknown) => result);
-    const from = vi.fn(() => ({ upsert }));
+    const limit = vi.fn(async () => ({ data: [], error: null }));
+    const ilike = vi.fn(() => ({ limit }));
+    const select = vi.fn(() => ({ ilike }));
+    const from = vi.fn(() => ({ select, upsert }));
     return { client: { from } as unknown as SupabaseClient, from, upsert };
   }
 
