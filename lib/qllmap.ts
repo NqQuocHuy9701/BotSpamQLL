@@ -53,6 +53,36 @@ export type QllMatch =
   | { kind: "ambiguous"; candidates: string[] }
   | { kind: "notFound" };
 
+// A known QLL as stored: its Telegram username plus the full name on record
+// (from auto-collection or a manual /adduser).
+export interface KnownUser {
+  username: string;
+  full_name: string;
+}
+
+// mapQllByUser(name, users): the preferred mapper when full names are known.
+// It FIRST tries an exact normalized full-name match (so a manually-added QLL
+// like "Nguyễn Khánh Uyên" -> @SA_Uyennk86 resolves even though the username
+// carries a trailing number the name does not). Only if no full-name matches
+// does it fall back to the derived-core rule (mapQll). This makes /adduser
+// authoritative: whatever name you registered maps to its username verbatim.
+export function mapQllByUser(name: string, users: KnownUser[]): QllMatch {
+  const wanted = normalize(name);
+  if (wanted !== "") {
+    const byName = users.filter((u) => normalize(u.full_name) === wanted);
+    if (byName.length === 1) {
+      return { kind: "found", username: byName[0].username };
+    }
+    if (byName.length >= 2) {
+      // Same registered name on multiple usernames: let the caller disambiguate
+      // rather than guess.
+      return { kind: "ambiguous", candidates: byName.map((u) => u.username) };
+    }
+  }
+  // No exact full-name hit -> fall back to the derived-core rule.
+  return mapQll(name, users.map((u) => u.username));
+}
+
 // mapQll(name, knownUsernames): compute the name's core and collect every known
 // username whose core matches exactly. 0 -> notFound, 1 -> found, >=2 ->
 // ambiguous. Exact-core equality only (no fuzzy matching, per spec).

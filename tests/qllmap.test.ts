@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   mapQll,
+  mapQllByUser,
   nameToCore,
   normalize,
   usernameToCore,
+  type KnownUser,
 } from "../lib/qllmap.js";
 
 // The fixed known-username list used across the mapping assertions. Mirrors a
@@ -113,5 +115,41 @@ describe("mapQll — negative and ambiguous", () => {
       kind: "ambiguous",
       candidates: ["SA_HaNH3", "HaNH3"],
     });
+  });
+});
+
+describe("mapQllByUser — full-name match takes priority over the core rule", () => {
+  const USERS: KnownUser[] = [
+    // Registered manually: the username carries a trailing number ("86") the
+    // name does not, so the derived-core rule alone would MISS this.
+    { username: "SA_Uyennk86", full_name: "Nguyễn Khánh Uyên" },
+    { username: "SA_HaNH3", full_name: "Ha Nguyen" },
+  ];
+
+  it("maps a registered full name to its username even when the core rule misses", () => {
+    expect(mapQllByUser("Nguyễn Khánh Uyên", USERS)).toEqual({
+      kind: "found",
+      username: "SA_Uyennk86",
+    });
+  });
+
+  it("matches the full name case- and diacritic-insensitively", () => {
+    expect(mapQllByUser("nguyen khanh uyen", USERS)).toEqual({
+      kind: "found",
+      username: "SA_Uyennk86",
+    });
+  });
+
+  it("falls back to the derived-core rule when no full name matches", () => {
+    // "Nguyễn Hải Hà 3" has no full_name hit here (stored as "Ha Nguyen"),
+    // so the core rule resolves it to SA_HaNH3 (core "hanh3").
+    expect(mapQllByUser("Nguyễn Hải Hà 3", USERS)).toEqual({
+      kind: "found",
+      username: "SA_HaNH3",
+    });
+  });
+
+  it("returns notFound when neither full name nor core matches", () => {
+    expect(mapQllByUser("Trần Văn Lạ 9", USERS)).toEqual({ kind: "notFound" });
   });
 });

@@ -9,7 +9,7 @@ import {
 } from "./batch.js";
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
-import { mapQll } from "./qllmap.js";
+import { mapQllByUser } from "./qllmap.js";
 import { formatVnDateTime, parseOkCommand } from "./schedule.js";
 import {
   addUserManual,
@@ -17,6 +17,7 @@ import {
   deletePendingBatch,
   enqueueMessages,
   insertLog,
+  listKnownUsers,
   listUsernames,
   loadPendingBatch,
   savePendingBatch,
@@ -325,8 +326,8 @@ async function maybeHandleQllCommands(
       );
       return true;
     }
-    const { usernames } = await listUsernames(deps.supabase);
-    const result = mapQll(name, usernames);
+    const { users } = await listKnownUsers(deps.supabase);
+    const result = mapQllByUser(name, users);
     if (result.kind === "found") {
       await deps.telegram.sendMessage(
         message.chat.id,
@@ -403,8 +404,7 @@ async function maybeHandleBatch(
       return true;
     }
 
-    const known = await listUsernames(deps.supabase);
-    const knownUsernames = known.usernames;
+    const { users: knownUsers } = await listKnownUsers(deps.supabase);
 
     // The file caption (if any) becomes the custom closing line for this batch.
     // An empty caption means "use the default closing line".
@@ -415,7 +415,7 @@ async function maybeHandleBatch(
     const unmapped: string[] = [];
 
     for (const row of rows) {
-      const match = mapQll(row.qll, knownUsernames);
+      const match = mapQllByUser(row.qll, knownUsers);
       if (match.kind === "found") {
         items.push({
           tenHS: row.tenHS,

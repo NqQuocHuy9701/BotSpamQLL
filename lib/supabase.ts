@@ -126,6 +126,36 @@ export async function listUsernames(
   }
 }
 
+// Lists all known QLL as {username, full_name}, dropping rows with no username.
+// Used to feed mapQllByUser so a registered full name maps to its username even
+// when the derived-core rule would miss (e.g. username has a trailing number).
+export async function listKnownUsers(
+  client: SupabaseClient
+): Promise<{
+  ok: boolean;
+  users: { username: string; full_name: string }[];
+  error?: string;
+}> {
+  try {
+    const { data, error } = await client
+      .from("telegram_users_qll")
+      .select("username, full_name");
+    if (error) {
+      return { ok: false, users: [], error: error.message };
+    }
+    const users = ((data as { username: string | null; full_name: string | null }[] | null) ?? [])
+      .filter((r) => typeof r.username === "string" && r.username.trim() !== "")
+      .map((r) => ({ username: r.username as string, full_name: r.full_name ?? "" }));
+    return { ok: true, users };
+  } catch (err) {
+    return {
+      ok: false,
+      users: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // Returns whether a username already exists in telegram_users_qll
 // (case-insensitive), and the stored full_name if found. Used by /adduser to
 // avoid creating a duplicate QLL row and to report "đã có".
