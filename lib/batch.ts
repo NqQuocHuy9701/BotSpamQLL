@@ -42,7 +42,23 @@ export function parseSheet(buf: Buffer): BatchRow[] {
     return [];
   }
 
-  const header = grid[0];
+  // Find the REAL header row: some exports prepend junk rows (e.g. repeated
+  // "Column1".."Column5" placeholders) before the actual "Tên / Mã lớp / Ngày
+  // học / QLL / Lịch học" header. Scan for the first row that contains both the
+  // "tên" and "qll" header labels, and treat that as the header row.
+  let headerRow = -1;
+  for (let r = 0; r < grid.length; r++) {
+    const keys = grid[r].map(headerKey);
+    if (keys.includes(HEADER_TEN) && keys.includes(HEADER_QLL)) {
+      headerRow = r;
+      break;
+    }
+  }
+  if (headerRow === -1) {
+    return []; // no recognizable header -> nothing to parse
+  }
+
+  const header = grid[headerRow];
   const idx: Record<string, number> = {};
   header.forEach((cell, i) => {
     idx[headerKey(cell)] = i;
@@ -58,7 +74,7 @@ export function parseSheet(buf: Buffer): BatchRow[] {
     col === undefined ? "" : cellText(row[col]);
 
   const rows: BatchRow[] = [];
-  for (let r = 1; r < grid.length; r++) {
+  for (let r = headerRow + 1; r < grid.length; r++) {
     const row = grid[r];
     const qll = at(row, colQll);
     if (qll === "") {

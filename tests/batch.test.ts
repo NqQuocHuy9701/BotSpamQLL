@@ -78,6 +78,27 @@ describe("parseSheet", () => {
     const buf = makeXlsx([[]]);
     expect(parseSheet(buf)).toEqual([]);
   });
+
+  it("finds the real header row when junk rows precede it (Column1.. placeholders)", () => {
+    // Mirrors the real export: two junk rows, THEN the actual header, THEN data.
+    const buf = makeXlsx([
+      ["Column1", "Column2", "Column3", "Column4", "Column5"],
+      ["Column1", "Column2", "Column3", "Column4", "Column5"],
+      ["Tên ", "Mã lớp", "Ngày học", "QLL", "Lịch học"],
+      ["Hoàng Đắc Anh Khoa (SID: 194448)", "KHTN.2026.0746", "15/10/2026", "Nguyễn Thị Quỳnh Trang 8", "T5 19:15-20:15"],
+      ["Đặng Mai Vy (SID: 213054)", "KHTN.2026.1972", "15/10/2026", "Phạm Thị Hải Anh 5", ""],
+    ]);
+    const rows = parseSheet(buf);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({
+      tenHS: "Hoàng Đắc Anh Khoa (SID: 194448)",
+      maLop: "KHTN.2026.0746",
+      ngayHoc: "15/10/2026",
+      qll: "Nguyễn Thị Quỳnh Trang 8",
+      lichHoc: "T5 19:15-20:15",
+    });
+    expect(rows[1].lichHoc).toBe(""); // blank Lịch học preserved
+  });
 });
 
 describe("buildAnnouncement", () => {
