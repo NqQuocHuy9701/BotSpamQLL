@@ -9,7 +9,7 @@ import type {
   TelegramClient,
 } from "../lib/telegram.js";
 import type { MappedItem, TelegramUpdate } from "../lib/types.js";
-import { buildAnnouncement } from "../lib/batch.js";
+import { buildGroupedAnnouncement } from "../lib/batch.js";
 
 const WARNING =
   "⚠️ Đã ẩn thông tin! QLL cần bấm /start ở khung chat riêng với Bot để nhận Inbox.";
@@ -816,8 +816,9 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
 
     await handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
 
-    // Enqueued exactly once with one row per item: fixed target group chat_id,
-    // and message_text identical to buildAnnouncement(item) verbatim.
+    // The two items map to two DISTINCT usernames, so grouping yields one row
+    // per QLL: fixed target group chat_id, message_text identical to the
+    // grouped announcement for that QLL's single student.
     expect(sendQueueInsert).toHaveBeenCalledTimes(1);
     const enqueued = sendQueueInsert.mock.calls[0][0] as {
       admin_id: number;
@@ -829,13 +830,13 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
       {
         admin_id: ADMIN_ID,
         chat_id: TARGET_GROUP,
-        message_text: buildAnnouncement(items[0]),
+        message_text: buildGroupedAnnouncement("SA_LanNT18", [items[0]]),
         send_after: null,
       },
       {
         admin_id: ADMIN_ID,
         chat_id: TARGET_GROUP,
-        message_text: buildAnnouncement(items[1]),
+        message_text: buildGroupedAnnouncement("SAAnhPTH5", [items[1]]),
         send_after: null,
       },
     ]);
@@ -847,7 +848,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledWith(
       ADMIN_ID,
-      "✅ Đã xếp 2 HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+      "✅ Đã xếp 2 tin cho 2 QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
     );
     // Nothing is posted synchronously to the target group.
     const postedToGroup = sendMessage.mock.calls.some(
@@ -899,7 +900,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const reply = sendMessage.mock.calls[0][1] as string;
     expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
-    expect(reply).toContain("Đã lên lịch gửi 2 HS");
+    expect(reply).toContain("Đã lên lịch gửi 2 tin cho 2 QLL");
     expect(reply).toContain("(giờ VN)");
   });
 
@@ -952,7 +953,65 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(enqueued[0].send_after).toBeNull();
     expect(sendMessage).toHaveBeenCalledWith(
       ADMIN_ID,
-      "✅ Đã xếp 1 HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+      "✅ Đã xếp 1 tin cho 1 QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+    );
+  });
+
+  it("/ok groups students sharing a QLL into one row with a single @tag", async () => {
+    const items: MappedItem[] = [
+      {
+        tenHS: "HS Một",
+        maLop: "KHTN.2026.0001",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T5 20:30-21:30",
+        username: "SA_X",
+      },
+      {
+        tenHS: "HS Hai",
+        maLop: "TOAN.2026.0002",
+        ngayHoc: "16/10/2026",
+        lichHoc: "",
+        username: "SA_X",
+      },
+      {
+        tenHS: "HS Ba",
+        maLop: "MOET.2026.0003",
+        ngayHoc: "17/10/2026",
+        lichHoc: "T6",
+        username: "SA_Y",
+      },
+    ];
+    const { deps, sendMessage, sendQueueInsert } = makeDeps({
+      relayEnabled: false,
+      pendingItems: items,
+    });
+
+    await handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
+
+    // Exactly two rows: one per QLL (two students collapse into @SA_X).
+    expect(sendQueueInsert).toHaveBeenCalledTimes(1);
+    const enqueued = sendQueueInsert.mock.calls[0][0] as {
+      chat_id: number;
+      message_text: string;
+      send_after: string | null;
+    }[];
+    expect(enqueued).toHaveLength(2);
+
+    const [rowX, rowY] = enqueued;
+    expect(rowX.chat_id).toBe(TARGET_GROUP);
+    // The shared-username row lists BOTH students and tags @SA_X once.
+    expect(rowX.message_text).toContain("• HS Một");
+    expect(rowX.message_text).toContain("• HS Hai");
+    expect(rowX.message_text.match(/@SA_X/g)).toHaveLength(1);
+    expect(rowX.message_text).toContain("#KHTN #TOAN");
+    // The other QLL is its own row with a single student.
+    expect(rowY.message_text).toContain("• HS Ba");
+    expect(rowY.message_text.match(/@SA_Y/g)).toHaveLength(1);
+
+    // Grouped confirmation: 2 tin cho 2 QLL.
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "✅ Đã xếp 2 tin cho 2 QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
     );
   });
 
@@ -1025,6 +1084,133 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
     expect(pendingUpsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleUpdate — manual QLL commands (admin DM)", () => {
+  const ADMIN_ID = 6532155675;
+  const TARGET_GROUP = -1002273179613;
+
+  function textDm(fromId: number, text: string): TelegramUpdate {
+    return {
+      update_id: 80,
+      message: {
+        message_id: 9,
+        date: 1_700_000_000,
+        chat: { id: fromId, type: "private" },
+        from: { id: fromId, first_name: "Operator" },
+        text,
+      },
+    };
+  }
+
+  it("/adduser @SA_HaNH3 Nguyễn Hải Hà 3 upserts and confirms", async () => {
+    const { deps, sendMessage, upsert, pendingUpsert, sendQueueInsert } =
+      makeDeps({ relayEnabled: false });
+    await handleUpdate(textDm(ADMIN_ID, "/adduser @SA_HaNH3 Nguyễn Hải Hà 3"), deps);
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const record = upsert.mock.calls[0][0] as {
+      telegram_id: number;
+      username: string;
+      full_name: string;
+      chat_title: string;
+      chat_id: number;
+    };
+    expect(record.username).toBe("SA_HaNH3");
+    expect(record.full_name).toBe("Nguyễn Hải Hà 3");
+    expect(record.chat_title).toBe("manual");
+    expect(record.chat_id).toBe(TARGET_GROUP);
+    expect(record.telegram_id).toBeLessThan(0);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "✅ Đã thêm QLL: @SA_HaNH3 (Nguyễn Hải Hà 3)."
+    );
+    // Never touches the pending/send queue, never posts to the group.
+    expect(pendingUpsert).not.toHaveBeenCalled();
+    expect(sendQueueInsert).not.toHaveBeenCalled();
+    expect(sendMessage.mock.calls.some((c) => c[0] === TARGET_GROUP)).toBe(false);
+  });
+
+  it("/adduser without the leading @ still upserts the bare username", async () => {
+    const { deps, sendMessage, upsert } = makeDeps({ relayEnabled: false });
+    await handleUpdate(textDm(ADMIN_ID, "/adduser SA_HaNH3 Nguyễn Hải Hà 3"), deps);
+    expect((upsert.mock.calls[0][0] as { username: string }).username).toBe(
+      "SA_HaNH3"
+    );
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "✅ Đã thêm QLL: @SA_HaNH3 (Nguyễn Hải Hà 3)."
+    );
+  });
+
+  it("/adduser with a missing name replies the usage hint and does NOT upsert", async () => {
+    const { deps, sendMessage, upsert } = makeDeps({ relayEnabled: false });
+    await handleUpdate(textDm(ADMIN_ID, "/adduser SA_HaNH3"), deps);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "Cú pháp: /adduser @username Họ Tên"
+    );
+  });
+
+  it("/finduser replies the mapped username when found", async () => {
+    const { deps, sendMessage } = makeDeps({
+      relayEnabled: false,
+      knownUsernames: ["SA_LanNT18"],
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/finduser Nông Thị Lan 18"), deps);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "🔎 Nông Thị Lan 18 -> @SA_LanNT18"
+    );
+  });
+
+  it("/finduser replies not-found when no username matches", async () => {
+    const { deps, sendMessage } = makeDeps({
+      relayEnabled: false,
+      knownUsernames: ["SA_LanNT18"],
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/finduser Không Có Ai"), deps);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "❌ Không tìm thấy username cho: Không Có Ai"
+    );
+  });
+
+  it("/finduser replies ambiguous when 2+ usernames match", async () => {
+    // Two usernames with the same core -> ambiguous.
+    const { deps, sendMessage } = makeDeps({
+      relayEnabled: false,
+      knownUsernames: ["SA_LanNT18", "OP_LanNT18"],
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/finduser Nông Thị Lan 18"), deps);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID,
+      "⚠️ Có nhiều username khớp cho: Nông Thị Lan 18"
+    );
+  });
+
+  it("/listusers replies the count and lists the known usernames", async () => {
+    const { deps, sendMessage } = makeDeps({
+      relayEnabled: false,
+      knownUsernames: ["SA_LanNT18", "SAAnhPTH5"],
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/listusers"), deps);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const reply = sendMessage.mock.calls[0][1] as string;
+    expect(reply).toContain("📋 Đang có 2 QLL:");
+    expect(reply).toContain("@SA_LanNT18");
+    expect(reply).toContain("@SAAnhPTH5");
+  });
+
+  it("ignores /adduser from a non-admin (no upsert, no reply)", async () => {
+    const { deps, sendMessage, upsert } = makeDeps({ relayEnabled: false });
+    await handleUpdate(textDm(999999, "/adduser @SA_X Nguyễn Văn A"), deps);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 

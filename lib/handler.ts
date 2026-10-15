@@ -1,12 +1,18 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { buildAnnouncement, buildSummary, parseSheet } from "./batch.js";
+import {
+  buildGroupedAnnouncement,
+  buildSummary,
+  groupByUsername,
+  parseSheet,
+} from "./batch.js";
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
 import { mapQll } from "./qllmap.js";
 import { formatVnDateTime, parseOkCommand } from "./schedule.js";
 import {
+  addUserManual,
   deletePendingBatch,
   enqueueMessages,
   insertLog,
@@ -70,6 +76,15 @@ const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Suppo
 // (see api/cron.ts) rather than posted synchronously here.
 const BATCH_OK_COMMAND = "/ok";
 const BATCH_CANCEL_COMMAND = "/huy";
+
+// Manual QLL-management commands (admin private DM only). Recognized BEFORE the
+// document / /ok / /huy logic so they can never be mis-eaten by those branches.
+const ADD_USER_COMMAND = "/adduser";
+const FIND_USER_COMMAND = "/finduser";
+const LIST_USERS_COMMAND = "/listusers";
+
+// How many usernames to preview in the /listusers reply before truncating.
+const LIST_USERS_PREVIEW_CAP = 50;
 
 // The sample announcement form, tagging the fixed target @SA_AnhMTK.
 const SPAMTEST_MESSAGE = [
@@ -245,6 +260,98 @@ function isAdminPrivate(message: TelegramMessage): boolean {
 //      confirm. Posts NOTHING to the group synchronously — the Vercel cron
 //      (api/cron.ts) drip-sends the queued rows ~15-20s apart.
 //   3. /huy: delete the pending row and confirm.
+// Manual QLL-management commands, admin-private only (the caller already gated
+// on isAdminPrivate). Returns true when the message WAS one of /adduser,
+// /finduser, /listusers (so the batch dispatcher stops), false otherwise. Every
+// reply goes privately to message.chat.id; nothing is posted to the group.
+async function maybeHandleQllCommands(
+  message: TelegramMessage,
+  deps: Deps,
+  text: string
+): Promise<boolean> {
+  const lower = text.toLowerCase();
+
+  // /adduser <username> <full name...>
+  if (lower.startsWith(ADD_USER_COMMAND)) {
+    const rest = text.slice(ADD_USER_COMMAND.length).trim();
+    const match = rest.match(/^(\S+)\s+(.+)$/);
+    if (!match) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Cú pháp: /adduser @username Họ Tên"
+      );
+      return true;
+    }
+    const username = match[1].replace(/^@/, "");
+    const fullName = match[2].trim();
+    if (username === "" || fullName === "") {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Cú pháp: /adduser @username Họ Tên"
+      );
+      return true;
+    }
+    await addUserManual(
+      deps.supabase,
+      username,
+      fullName,
+      SPAMTEST_TARGET_CHAT_ID
+    );
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      `✅ Đã thêm QLL: @${username} (${fullName}).`
+    );
+    return true;
+  }
+
+  // /finduser <full name...>
+  if (lower.startsWith(FIND_USER_COMMAND)) {
+    const name = text.slice(FIND_USER_COMMAND.length).trim();
+    if (name === "") {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Cú pháp: /finduser Họ Tên"
+      );
+      return true;
+    }
+    const { usernames } = await listUsernames(deps.supabase);
+    const result = mapQll(name, usernames);
+    if (result.kind === "found") {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        `🔎 ${name} -> @${result.username}`
+      );
+    } else if (result.kind === "ambiguous") {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        `⚠️ Có nhiều username khớp cho: ${name}`
+      );
+    } else {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        `❌ Không tìm thấy username cho: ${name}`
+      );
+    }
+    return true;
+  }
+
+  // /listusers
+  if (lower.startsWith(LIST_USERS_COMMAND)) {
+    const { usernames } = await listUsernames(deps.supabase);
+    const total = usernames.length;
+    const preview = usernames.slice(0, LIST_USERS_PREVIEW_CAP);
+    const tagged = preview.map((u) => `@${u}`).join(", ");
+    const suffix = total > LIST_USERS_PREVIEW_CAP ? ", …" : "";
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      `📋 Đang có ${total} QLL: ${tagged}${suffix}`
+    );
+    return true;
+  }
+
+  return false;
+}
+
 async function maybeHandleBatch(
   message: TelegramMessage,
   deps: Deps
@@ -254,6 +361,13 @@ async function maybeHandleBatch(
   }
   const adminId = message.from!.id;
   const text = message.text?.trim() ?? "";
+
+  // Manual QLL-management commands come FIRST so they can never be mis-eaten by
+  // the document / /ok / /huy branches. None of them share a prefix with /ok,
+  // /huy, or /spam, so ordering them first is safe.
+  if (await maybeHandleQllCommands(message, deps, text)) {
+    return true;
+  }
 
   // Case 1: a document upload (unless the caption is exactly /ok, which we let
   // the /ok text path own — in practice /ok arrives as text, not a caption).
@@ -338,24 +452,31 @@ async function maybeHandleBatch(
 
     const sendAfter = parsed.kind === "at" ? parsed.sendAfterIso : null;
 
-    // Store the fully-formatted announcement text (incl. the @username tag) so
-    // the cron sends message_text verbatim with no re-formatting. send_after is
+    // Group all students sharing a QLL into ONE announcement per QLL so each
+    // QLL is tagged exactly once. Store the fully-formatted text (incl. the
+    // @username tag) so the cron sends message_text verbatim. send_after is
     // null for immediate sends and the scheduled ISO for a hẹn-giờ batch.
-    const rows = items.map((item) => ({
+    const groups = groupByUsername(items);
+    const rows = Array.from(groups.entries()).map(([username, students]) => ({
       admin_id: adminId,
       chat_id: SPAMTEST_TARGET_CHAT_ID,
-      message_text: buildAnnouncement(item),
+      message_text: buildGroupedAnnouncement(
+        username,
+        students,
+        students[0]?.cauNhan
+      ),
       send_after: sendAfter,
     }));
     await enqueueMessages(deps.supabase, rows);
     await deletePendingBatch(deps.supabase, adminId);
 
+    const groupCount = groups.size;
     const confirmation =
       parsed.kind === "at"
-        ? `✅ Đã lên lịch gửi ${items.length} HS lúc ${formatVnDateTime(
+        ? `✅ Đã lên lịch gửi ${groupCount} tin cho ${groupCount} QLL lúc ${formatVnDateTime(
             parsed.sendAfterIso
           )} (giờ VN). Bot sẽ tự gửi khi tới giờ.`
-        : `✅ Đã xếp ${items.length} HS vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`;
+        : `✅ Đã xếp ${groupCount} tin cho ${groupCount} QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`;
     await deps.telegram.sendMessage(message.chat.id, confirmation);
     return true;
   }

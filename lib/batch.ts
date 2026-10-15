@@ -137,6 +137,68 @@ export function buildAnnouncement(item: MappedItem): string {
   return lines.join("\n");
 }
 
+// groupByUsername(items): buckets mapped items by their QLL username into an
+// insertion-ordered Map, preserving the first-seen order of usernames AND the
+// first-seen order of students within each bucket. Used by /ok to combine all
+// students sharing one QLL into a single tagged announcement.
+export function groupByUsername(
+  items: MappedItem[]
+): Map<string, MappedItem[]> {
+  const groups = new Map<string, MappedItem[]>();
+  for (const item of items) {
+    const bucket = groups.get(item.username);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      groups.set(item.username, [item]);
+    }
+  }
+  return groups;
+}
+
+// buildGroupedAnnouncement(username, students, cauNhan): combines every student
+// sharing ONE QLL into a single announcement that tags that QLL exactly once.
+// The title lists the DISTINCT subject hashtags across the group's students
+// (first-seen order, space-separated); the hashtag part is omitted entirely
+// when none is derivable. Each student is a "•" bullet carrying its own Mã lớp,
+// Lịch học (omitted when blank), and Ngày học. The closing line (cauNhan when
+// provided and non-blank, else DEFAULT_CLOSING) ends with " @<username>".
+export function buildGroupedAnnouncement(
+  username: string,
+  students: MappedItem[],
+  cauNhan?: string
+): string {
+  // Distinct subject hashtags, first-seen order, blanks dropped.
+  const hashtags: string[] = [];
+  for (const s of students) {
+    const tag = subjectHashtag(s.maLop);
+    if (tag !== "" && !hashtags.includes(tag)) {
+      hashtags.push(tag);
+    }
+  }
+
+  const title =
+    hashtags.length === 0
+      ? "✅ Thông tin học của con"
+      : `✅ Thông tin học của con ${hashtags.join(" ")}`;
+
+  const lines = [title];
+  for (const s of students) {
+    let bullet = `• ${s.tenHS} — Mã lớp: ${s.maLop}`;
+    if (s.lichHoc !== "") {
+      bullet += ` — Lịch học: ${s.lichHoc}`;
+    }
+    bullet += ` — Ngày học: ${s.ngayHoc}`;
+    lines.push(bullet);
+  }
+
+  lines.push("");
+  const closing =
+    cauNhan && cauNhan.trim() !== "" ? cauNhan.trim() : DEFAULT_CLOSING;
+  lines.push(`${closing} @${username}`);
+  return lines.join("\n");
+}
+
 // buildSummary(total, mapped, unmapped): the private report the admin sees
 // before confirming. Lists the mapped students ("Tên HS -> @username") and the
 // unmapped QLL names, and ends with the fixed confirmation instruction.

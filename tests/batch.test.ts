@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx";
 import {
   buildAnnouncement,
+  buildGroupedAnnouncement,
   buildSummary,
+  groupByUsername,
   parseSheet,
   subjectHashtag,
 } from "../lib/batch.js";
@@ -189,6 +191,122 @@ describe("buildAnnouncement", () => {
     const item: MappedItem = { ...base, cauNhan: "   " };
     expect(buildAnnouncement(item)).toContain(
       "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_LanNT18"
+    );
+  });
+});
+
+describe("groupByUsername", () => {
+  const a1: MappedItem = {
+    tenHS: "A1",
+    maLop: "TOAN.2026.0001",
+    ngayHoc: "15/10/2026",
+    lichHoc: "T2",
+    username: "SA_X",
+  };
+  const a2: MappedItem = {
+    tenHS: "A2",
+    maLop: "KHTN.2026.0002",
+    ngayHoc: "16/10/2026",
+    lichHoc: "",
+    username: "SA_X",
+  };
+  const b1: MappedItem = {
+    tenHS: "B1",
+    maLop: "MOET.2026.0003",
+    ngayHoc: "17/10/2026",
+    lichHoc: "T4",
+    username: "SA_Y",
+  };
+
+  it("groups multiple students sharing a username into one bucket, order preserved", () => {
+    const groups = groupByUsername([a1, a2]);
+    expect([...groups.keys()]).toEqual(["SA_X"]);
+    expect(groups.get("SA_X")).toEqual([a1, a2]);
+  });
+
+  it("keeps different usernames in separate buckets, first-seen order preserved", () => {
+    const groups = groupByUsername([b1, a1, a2]);
+    expect([...groups.keys()]).toEqual(["SA_Y", "SA_X"]);
+    expect(groups.get("SA_Y")).toEqual([b1]);
+    expect(groups.get("SA_X")).toEqual([a1, a2]);
+  });
+});
+
+describe("buildGroupedAnnouncement", () => {
+  const s1: MappedItem = {
+    tenHS: "Vũ Xuân Kỳ",
+    maLop: "KHTN.2026.0913",
+    ngayHoc: "15/10/2026",
+    lichHoc: "T5 20:30-21:30",
+    username: "SA_X",
+  };
+  const s2: MappedItem = {
+    tenHS: "Đặng Mai Vy",
+    maLop: "TOAN.2026.1972",
+    ngayHoc: "16/10/2026",
+    lichHoc: "",
+    username: "SA_X",
+  };
+
+  it("builds a single-student message with one @tag at the end", () => {
+    expect(buildGroupedAnnouncement("SA_X", [s1])).toBe(
+      [
+        "✅ Thông tin học của con #KHTN",
+        "• Vũ Xuân Kỳ — Mã lớp: KHTN.2026.0913 — Lịch học: T5 20:30-21:30 — Ngày học: 15/10/2026",
+        "",
+        "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_X",
+      ].join("\n")
+    );
+  });
+
+  it("lists multiple students with distinct hashtags deduped in order and a single @tag", () => {
+    const out = buildGroupedAnnouncement("SA_X", [s1, s2]);
+    expect(out).toBe(
+      [
+        "✅ Thông tin học của con #KHTN #TOAN",
+        "• Vũ Xuân Kỳ — Mã lớp: KHTN.2026.0913 — Lịch học: T5 20:30-21:30 — Ngày học: 15/10/2026",
+        "• Đặng Mai Vy — Mã lớp: TOAN.2026.1972 — Ngày học: 16/10/2026",
+        "",
+        "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_X",
+      ].join("\n")
+    );
+    // @tag appears exactly once.
+    expect(out.match(/@SA_X/g)).toHaveLength(1);
+  });
+
+  it("omits only the blank student's Lịch học segment", () => {
+    const out = buildGroupedAnnouncement("SA_X", [s1, s2]);
+    expect(out).toContain("• Đặng Mai Vy — Mã lớp: TOAN.2026.1972 — Ngày học: 16/10/2026");
+    expect(out).not.toContain("• Đặng Mai Vy — Mã lớp: TOAN.2026.1972 — Lịch học:");
+  });
+
+  it("collapses a single repeated subject into one hashtag", () => {
+    const same: MappedItem = { ...s2, maLop: "KHTN.2026.1111" };
+    const out = buildGroupedAnnouncement("SA_X", [s1, same]);
+    expect(out.split("\n")[0]).toBe("✅ Thông tin học của con #KHTN");
+  });
+
+  it("omits the hashtag part (no trailing space) when none is derivable", () => {
+    const noCode: MappedItem = { ...s1, maLop: "" };
+    const out = buildGroupedAnnouncement("SA_X", [noCode]);
+    expect(out.split("\n")[0]).toBe("✅ Thông tin học của con");
+  });
+
+  it("uses a custom cauNhan and keeps the @tag exactly once", () => {
+    const out = buildGroupedAnnouncement(
+      "SA_X",
+      [s1],
+      "QLL trao đổi với PHHS giúp em nhé ạ!"
+    );
+    expect(out).toContain("QLL trao đổi với PHHS giúp em nhé ạ! @SA_X");
+    expect(out).not.toContain("HS nay có ca học QLL nắm thêm thông tin");
+    expect(out.match(/@SA_X/g)).toHaveLength(1);
+  });
+
+  it("falls back to the default closing when cauNhan is blank/whitespace", () => {
+    const out = buildGroupedAnnouncement("SA_X", [s1], "   ");
+    expect(out).toContain(
+      "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_X"
     );
   });
 });

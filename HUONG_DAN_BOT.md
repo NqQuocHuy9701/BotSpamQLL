@@ -56,12 +56,24 @@ riêng và thao tác trong nhóm QLL. Nó có **3 nhóm chức năng**:
 | `/ok 21:00` | Hẹn: đúng **21h hôm nay (giờ VN)** mới bắt đầu bắn. Nếu 21h đã qua → tự dời sang **21h ngày mai**. |
 | `/ok 16/10 21:00` | Hẹn: đúng **21h ngày 16/10 (giờ VN)** năm nay. Nếu mốc đã qua → tự dời sang **năm sau**. |
 | `/huy` | Huỷ danh sách đang chờ duyệt. |
+| `/adduser @username Họ Tên` | Thêm QLL **thủ công** vào cơ sở dữ liệu (vd `/adduser @SA_HaNH3 Nguyễn Hải Hà 3`). Dùng khi QLL chưa từng nhắn trong nhóm. |
+| `/finduser Họ Tên` | Tra cứu nhanh: tên này map ra username nào (dùng đúng quy tắc map ở mục 6). |
+| `/listusers` | Liệt kê số QLL bot đang biết + danh sách username. |
+
+> `/adduser` chấp nhận username có hoặc không có `@`; phần còn lại của dòng là họ
+> tên đầy đủ (có dấu, có khoảng trắng). QLL thêm thủ công được lưu bằng một `id`
+> tổng hợp (âm, suy ra từ username) nên thêm lại cùng username sẽ **cập nhật**
+> đúng dòng đó thay vì tạo trùng, và **sống song song** với dòng do bot tự gom
+> được sau này (khi QLL thật sự nhắn trong nhóm). Thiếu username hoặc họ tên →
+> bot báo cú pháp và không ghi gì.
 
 > Lệnh `/ok` nhận cả chữ hoa/thường và dư khoảng trắng (vd `/OK  21:00`).
 > Giờ theo định dạng 24h `HH:MM`, ngày theo `dd/mm` (ngày/tháng). Nhập sai (vd
 > `/ok 25:00`, `/ok 32/13 10:00`, `/ok abc`) → bot báo lỗi và **không** xếp hàng.
 > Khi hẹn giờ, bot trả lời xác nhận kèm mốc giờ VN, vd:
-> "✅ Đã lên lịch gửi N HS lúc 21:00 16/10 (giờ VN). Bot sẽ tự gửi khi tới giờ."
+> "✅ Đã lên lịch gửi N tin cho M QLL lúc 21:00 16/10 (giờ VN). Bot sẽ tự gửi khi tới giờ."
+> Các HS **chung một QLL** được **gộp vào một thông báo** (tag QLL đó một lần),
+> nên số tin xếp hàng bằng số QLL chứ không phải số HS.
 
 > Câu nhắn cuối: nếu không nhập caption, bot dùng câu mặc định
 > "HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ !".
@@ -105,26 +117,31 @@ báo cáo (không bao giờ tag nhầm người).
 
 ## 7. Thông báo bot bắn vào nhóm (mẫu)
 
+Mỗi QLL nhận **một thông báo gộp** liệt kê tất cả HS của họ, tag QLL **một lần**
+ở cuối:
+
 ```
-✅ Thông tin học của con #KHTN
-Học sinh: Hoàng Đắc Anh Khoa (SID: 194448)
-Mã lớp học: KHTN.2026.0746
-Lịch học: T5 19:15-20:15
-Ngày học: 15/10/2026
+✅ Thông tin học của con #KHTN #TOAN
+• Hoàng Đắc Anh Khoa (SID: 194448) — Mã lớp: KHTN.2026.0746 — Lịch học: T5 19:15-20:15 — Ngày học: 15/10/2026
+• Vũ Xuân Kỳ (SID: 189064) — Mã lớp: TOAN.2026.0913 — Ngày học: 15/10/2026
 
 HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_TrangNTQ8
 ```
 
+- Các HS **chung một QLL** được gộp chung vào một tin, mỗi HS một dòng `•` kèm Mã
+  lớp / Lịch học / Ngày học riêng.
 - Hashtag môn (`#KHTN`, `#TOAN`, `#MOET`...) lấy từ **4 ký tự đầu của mã lớp**,
-  gắn vào cuối dòng tiêu đề.
-- Dòng "Lịch học" được bỏ nếu để trống. Câu cuối đổi theo caption nếu có.
+  gắn vào dòng tiêu đề. Nhiều môn khác nhau trong cùng QLL → liệt kê các hashtag
+  khác nhau (không trùng lặp) theo thứ tự xuất hiện.
+- Dòng "Lịch học" của một HS được bỏ nếu HS đó để trống. Câu cuối đổi theo
+  caption nếu có; `@username` của QLL luôn ở cuối, đúng một lần.
 
 ---
 
 ## 8. Cơ chế gửi rải + hẹn giờ
 
-- Khi admin `/ok`, bot **không bắn ngay một loạt**. Nó xếp từng HS vào hàng đợi
-  (bảng `send_queue`).
+- Khi admin `/ok`, bot **không bắn ngay một loạt**. Nó xếp **mỗi QLL một tin**
+  (đã gộp các HS chung QLL) vào hàng đợi (bảng `send_queue`).
 - Một **cron bên ngoài** (cron-job.org) gọi bot mỗi phút. Mỗi lần bot lấy vài tin
   trong hàng đợi và gửi **cách nhau ~15-20 giây** → nhóm không bị dội.
 - **Hẹn giờ**: nếu `/ok 21:00`, các tin được gắn mốc "chỉ gửi sau 21h". Cron vẫn

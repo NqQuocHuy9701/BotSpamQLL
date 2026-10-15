@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  addUserManual,
   deletePendingBatch,
   insertLog,
   listUsernames,
   loadPendingBatch,
+  manualUserId,
   savePendingBatch,
 } from "../lib/supabase.js";
 import type { LogRecord, MappedItem } from "../lib/types.js";
@@ -199,5 +201,73 @@ describe("listUsernames", () => {
       usernames: [],
       error: "select failed",
     });
+  });
+});
+
+describe("manualUserId", () => {
+  it("is deterministic for the same username regardless of case/@ prefix", () => {
+    const a = manualUserId("SA_HaNH3");
+    expect(manualUserId("SA_HaNH3")).toBe(a);
+    expect(manualUserId("sa_hanh3")).toBe(a);
+    expect(manualUserId("@SA_HaNH3")).toBe(a);
+    expect(manualUserId("  @sa_hanh3  ")).toBe(a);
+  });
+
+  it("is always a negative integer", () => {
+    expect(manualUserId("SA_HaNH3")).toBeLessThanOrEqual(-1);
+    expect(manualUserId("")).toBeLessThanOrEqual(-1);
+    expect(Number.isInteger(manualUserId("SA_LanNT18"))).toBe(true);
+    expect(Number.isSafeInteger(manualUserId("SA_LanNT18"))).toBe(true);
+  });
+
+  it("differs for different usernames", () => {
+    expect(manualUserId("SA_HaNH3")).not.toBe(manualUserId("SA_LanNT18"));
+  });
+});
+
+describe("addUserManual", () => {
+  function buildClient(result: { error: unknown }) {
+    const upsert = vi.fn(async (_record: unknown, _opts: unknown) => result);
+    const from = vi.fn(() => ({ upsert }));
+    return { client: { from } as unknown as SupabaseClient, from, upsert };
+  }
+
+  const TARGET_CHAT_ID = -1002273179613;
+
+  it("strips @, trims the name, sets chat_title 'manual' and a negative id", async () => {
+    const { client, from, upsert } = buildClient({ error: null });
+    const result = await addUserManual(
+      client,
+      "@SA_HaNH3",
+      "  Nguyễn Hải Hà 3  ",
+      TARGET_CHAT_ID
+    );
+    expect(result).toEqual({ ok: true });
+    expect(from).toHaveBeenCalledWith("telegram_users_qll");
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const record = upsert.mock.calls[0][0] as {
+      telegram_id: number;
+      username: string;
+      full_name: string;
+      chat_id: number;
+      chat_title: string;
+    };
+    const opts = upsert.mock.calls[0][1];
+    expect(opts).toEqual({ onConflict: "telegram_id" });
+    expect(record).toMatchObject({
+      username: "SA_HaNH3",
+      full_name: "Nguyễn Hải Hà 3",
+      chat_id: TARGET_CHAT_ID,
+      chat_title: "manual",
+      telegram_id: manualUserId("SA_HaNH3"),
+    });
+    expect(record.telegram_id).toBeLessThan(0);
+  });
+
+  it("returns { ok: false } on a reported error without throwing", async () => {
+    const { client } = buildClient({ error: { message: "upsert failed" } });
+    expect(
+      await addUserManual(client, "SA_HaNH3", "Nguyễn Hải Hà 3", TARGET_CHAT_ID)
+    ).toEqual({ ok: false, error: "upsert failed" });
   });
 });

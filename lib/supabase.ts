@@ -288,6 +288,48 @@ export async function countUnsent(
   }
 }
 
+// Derives a DETERMINISTIC NEGATIVE synthetic telegram_id from a username, used
+// for manually-added QLL rows that have no real Telegram id. The username is
+// normalized (leading '@' stripped, trimmed, lowercased) so the same person
+// always maps to the same row (re-adding updates instead of duplicating). The
+// value is a 32-bit FNV-1a hash forced strictly negative (≤ -1) so it never
+// collides with Telegram's positive user ids — a later real auto-collection of
+// the same person creates a separate positive-id row and both coexist.
+export function manualUserId(username: string): number {
+  const normalized = username.trim().replace(/^@/, "").toLowerCase();
+  // FNV-1a 32-bit hash of the normalized string.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < normalized.length; i++) {
+    hash ^= normalized.charCodeAt(i);
+    // 32-bit FNV prime multiply, kept in uint32 range via Math.imul.
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const positive = hash >>> 0; // force uint32 (0 .. 4294967295)
+  return -(positive) - 1; // always ≤ -1, within JS safe-integer range
+}
+
+// Upserts one MANUALLY-added QLL into telegram_users_qll. Strips a leading '@'
+// from the username, trims the full name, and uses a deterministic negative
+// synthetic telegram_id (see manualUserId) so re-adding the same username
+// updates the same row. chat_title is fixed to "manual" so these rows are
+// distinguishable from auto-collected ones. Non-throwing like its neighbors.
+export async function addUserManual(
+  client: SupabaseClient,
+  username: string,
+  fullName: string,
+  chatId: number
+): Promise<{ ok: boolean; error?: string }> {
+  const stripped = username.trim().replace(/^@/, "");
+  const record: UserRecord = {
+    telegram_id: manualUserId(stripped),
+    username: stripped,
+    full_name: fullName.trim(),
+    chat_id: chatId,
+    chat_title: "manual",
+  };
+  return upsertUser(client, record);
+}
+
 // Upserts one row into telegram_users_qll keyed by telegram_id, so each user
 // is stored exactly once and re-seeing them updates their latest info. Resolves
 // { ok: false, error } on failure instead of throwing. Never runs migrations.
