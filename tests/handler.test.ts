@@ -577,6 +577,84 @@ describe("handleUpdate — private /start", () => {
   });
 });
 
+describe("handleUpdate — auto-ack reply to an HS announcement", () => {
+  const ACK = "Dạ em ghi nhận chuyển anh/chị bên em kiểm tra nha ạ.";
+
+  function replyToBot(opts: {
+    repliedText: string;
+    repliedIsBot: boolean;
+    replierIsBot?: boolean;
+    chatType?: "supergroup" | "private";
+  }): TelegramUpdate {
+    return {
+      update_id: 70,
+      message: {
+        message_id: 777,
+        date: 1_700_000_000,
+        chat: { id: GROUP_ID, type: opts.chatType ?? "supergroup" },
+        from: { id: 555, first_name: "QLL", is_bot: opts.replierIsBot ?? false },
+        text: "ok em",
+        reply_to_message: {
+          message_id: 400,
+          date: 1_700_000_000,
+          chat: { id: GROUP_ID, type: opts.chatType ?? "supergroup" },
+          from: { id: 999, first_name: "Bot", is_bot: opts.repliedIsBot },
+          text: opts.repliedText,
+        },
+      },
+    };
+  }
+
+  it("acks when a user replies to a bot HS announcement", async () => {
+    const { deps, sendMessage } = makeDeps({ relayEnabled: false });
+    await handleUpdate(
+      replyToBot({
+        repliedText:
+          "✅ Thông tin học của con #KHTN\n\n1. HS A\n   • Mã lớp: KHTN.2026.0001",
+        repliedIsBot: true,
+      }),
+      deps
+    );
+    // Replies as a reply (3rd arg = replier's message_id) with the exact ack.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(GROUP_ID, ACK, 777);
+  });
+
+  it("does NOT ack a reply to a non-announcement bot message", async () => {
+    const { deps, sendMessage } = makeDeps({ relayEnabled: false });
+    await handleUpdate(
+      replyToBot({ repliedText: "✅ Đã gửi xong toàn bộ danh sách.", repliedIsBot: true }),
+      deps
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT ack a reply to a human message (not a bot)", async () => {
+    const { deps, sendMessage } = makeDeps({ relayEnabled: false });
+    await handleUpdate(
+      replyToBot({
+        repliedText: "✅ Thông tin học của con #KHTN",
+        repliedIsBot: false,
+      }),
+      deps
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT ack in a private chat", async () => {
+    const { deps, sendMessage } = makeDeps({ relayEnabled: false });
+    await handleUpdate(
+      replyToBot({
+        repliedText: "✅ Thông tin học của con #KHTN",
+        repliedIsBot: true,
+        chatType: "private",
+      }),
+      deps
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("handleUpdate — /spam (operator DM -> post to fixed group)", () => {
   const ADMIN_ID = 6532155675;
   const TARGET_GROUP = -1002273179613;

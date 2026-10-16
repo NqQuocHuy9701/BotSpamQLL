@@ -131,6 +131,12 @@ export async function handleUpdate(
   // relay switch: capture the sender and any newly-joined members.
   await collectUsers(message, deps);
 
+  // Auto-acknowledge: when someone REPLIES in the group to one of the bot's HS
+  // announcements, reply back a short ack. Independent of the relay switch.
+  if (await maybeAckAnnouncementReply(message, deps)) {
+    return;
+  }
+
   // /spamtest: admin-only, one message, independent of the relay switch.
   if (await maybeHandleSpamTest(message, deps)) {
     return;
@@ -205,6 +211,42 @@ async function collectUsers(
 
 function isBot(user: TelegramUser): boolean {
   return user.is_bot === true;
+}
+
+// Marker that identifies one of the bot's HS announcements (grouped or single).
+const ANNOUNCEMENT_MARKER = "✅ Thông tin học của con";
+// The ack the bot posts when a QLL replies to an announcement.
+const ACK_REPLY = "Dạ em ghi nhận chuyển anh/chị bên em kiểm tra nha ạ.";
+
+// If a group message is a REPLY to one of the bot's HS announcements, post a
+// short acknowledgement as a reply to the replier. Returns true when handled.
+// Independent of the relay switch. We require the replied-to message to be
+// authored by a bot AND to contain the announcement marker, so ordinary chat
+// and replies to other messages are never answered.
+async function maybeAckAnnouncementReply(
+  message: TelegramMessage,
+  deps: Deps
+): Promise<boolean> {
+  const chat = message.chat;
+  if (chat.type !== "group" && chat.type !== "supergroup") {
+    return false;
+  }
+  const repliedTo = message.reply_to_message;
+  if (!repliedTo) {
+    return false;
+  }
+  const repliedIsBotAnnouncement =
+    repliedTo.from?.is_bot === true &&
+    (repliedTo.text ?? "").includes(ANNOUNCEMENT_MARKER);
+  if (!repliedIsBotAnnouncement) {
+    return false;
+  }
+  // Don't answer the bot replying to itself.
+  if (message.from?.is_bot === true) {
+    return true;
+  }
+  await deps.telegram.sendMessage(chat.id, ACK_REPLY, message.message_id);
+  return true;
 }
 
 // Handles the operator-only /spam command issued from the bot's PRIVATE chat.
