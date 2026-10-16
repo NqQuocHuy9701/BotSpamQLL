@@ -579,6 +579,7 @@ describe("handleUpdate — private /start", () => {
 
 describe("handleUpdate — auto-ack reply to an HS announcement", () => {
   const ACK = "Dạ em ghi nhận chuyển anh/chị bên em kiểm tra nha ạ.";
+  const ADMIN_ID = 6532155675;
 
   function replyToBot(opts: {
     repliedText: string;
@@ -615,9 +616,13 @@ describe("handleUpdate — auto-ack reply to an HS announcement", () => {
       }),
       deps
     );
-    // Replies as a reply (3rd arg = replier's message_id) with the exact ack.
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith(GROUP_ID, ACK, 777);
+    // 1) Public ack to the group as a reply (3rd arg = replier's message_id).
+    expect(sendMessage).toHaveBeenNthCalledWith(1, GROUP_ID, ACK, 777);
+    // 2) Private notice to the admin with who/what/excerpt.
+    const adminCall = sendMessage.mock.calls.find((c) => c[0] === ADMIN_ID);
+    expect(adminCall).toBeDefined();
+    expect(adminCall![1]).toContain("QLL phản hồi thông báo");
+    expect(adminCall![1]).toContain("ok em"); // the replier's text
   });
 
   it("does NOT ack a reply to a non-announcement bot message", async () => {

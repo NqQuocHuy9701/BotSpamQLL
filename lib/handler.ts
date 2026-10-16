@@ -245,7 +245,29 @@ async function maybeAckAnnouncementReply(
   if (message.from?.is_bot === true) {
     return true;
   }
+  // 1) Public ack to the QLL in the group.
   await deps.telegram.sendMessage(chat.id, ACK_REPLY, message.message_id);
+
+  // 2) Private notice to every admin so they can follow up. Includes who
+  // replied, what they said, and a short excerpt of the announcement they
+  // replied to (so the admin knows which HS/QLL it concerns).
+  const who = message.from ? displayName(message.from) : "QLL";
+  const uname = message.from?.username ? ` (@${message.from.username})` : "";
+  const said = (message.text ?? "").trim() || "(không có nội dung)";
+  const excerptSource = (repliedTo.text ?? "").split("\n").slice(0, 2).join(" ").trim();
+  const excerpt =
+    excerptSource.length > 160
+      ? `${excerptSource.slice(0, 160)}…`
+      : excerptSource;
+  const notice = [
+    "🔔 QLL phản hồi thông báo:",
+    `👤 ${who}${uname}`,
+    `💬 ${said}`,
+    `📋 ${excerpt}`,
+  ].join("\n");
+  for (const adminId of SPAMTEST_ADMIN_IDS) {
+    await deps.telegram.sendMessage(adminId, notice);
+  }
   return true;
 }
 

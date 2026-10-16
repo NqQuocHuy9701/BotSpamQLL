@@ -20,11 +20,13 @@ riêng và thao tác trong nhóm QLL. Nó có **3 nhóm chức năng**:
    admin duyệt (`/ok`) → bot bắn từng thông báo vào nhóm, **rải chậm** để không
    làm trôi nhóm, và có thể **hẹn giờ** gửi.
 
-3. **Tự phản hồi khi QLL reply thông báo.** Khi có người **reply (trả lời)**
-   trong nhóm vào một tin thông báo HS của bot (tin chứa "✅ Thông tin học của
-   con"), bot tự nhắn lại người đó: *"Dạ em ghi nhận chuyển anh/chị bên em kiểm
-   tra nha ạ."*. Chỉ áp dụng cho reply vào đúng tin thông báo — reply vào tin
-   khác hoặc chat thường thì bot không đáp.
+3. **Tự phản hồi khi QLL reply thông báo + báo admin.** Khi có người **reply
+   (trả lời)** trong nhóm vào một tin thông báo HS của bot (tin chứa "✅ Thông
+   tin học của con"), bot tự nhắn lại người đó: *"Dạ em ghi nhận chuyển anh/chị
+   bên em kiểm tra nha ạ."*, **đồng thời nhắn riêng cho admin** biết ai vừa phản
+   hồi, nội dung gì, và thuộc thông báo nào — để admin theo dõi/xử lý. Chỉ áp
+   dụng cho reply vào đúng tin thông báo; reply tin khác hoặc chat thường thì
+   bot không đáp.
 
 4. **(Tạm tắt) Luồng thu hồi tài khoản TK/MK.** Khi bật, bot tự xoá tin chứa
    TK/MK trong nhóm và chuyển vào inbox QLL. Hiện **đang TẮT** (`RELAY_ENABLED`
