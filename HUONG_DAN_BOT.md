@@ -126,28 +126,31 @@ báo cáo (không bao giờ tag nhầm người).
 
 ## 7. Thông báo bot bắn vào nhóm (mẫu)
 
-Mỗi QLL nhận **một thông báo gộp** liệt kê tất cả HS của họ, tag QLL **một lần**
-ở cuối:
+Gộp theo **QLL + MÔN**: các HS **cùng một QLL và cùng một môn** được gộp vào một
+tin, tag QLL **một lần**. Nếu một QLL phụ trách HS ở **nhiều môn khác nhau**, bot
+**tách thành nhiều tin — mỗi môn một tin** (một QLL không bao giờ bị tag cho 2
+môn trong cùng một tin). Vì vậy mỗi tin chỉ có **một hashtag môn**.
 
 ```
-✅ Thông tin học của con #KHTN #TOAN
+✅ Thông tin học của con #KHTN
 
 1. Hoàng Đắc Anh Khoa (SID: 194448)
    • Mã lớp: KHTN.2026.0746
    • Lịch học: T5 19:15-20:15
    • Ngày học: 15/10/2026
 
-2. Vũ Xuân Kỳ (SID: 189064)
-   • Mã lớp: TOAN.2026.0913
+2. Nguyễn Lan Phương (SID: 149975)
+   • Mã lớp: KHTN.2026.1973
    • Ngày học: 15/10/2026
 
 HS nay có ca học QLL nắm thêm thông tin trao đổi với PHHS lịch nữa nhé ạ ! @SA_TrangNTQ8
 ```
 
-- Các HS **chung một QLL** được gộp chung vào một tin, mỗi HS được đánh số với Mã
-  lớp / Lịch học (bỏ nếu trống) / Ngày học trên các dòng riêng.
+- Mỗi tin chỉ gồm HS **cùng một QLL và cùng một môn**, đánh số với Mã lớp / Lịch
+  học (bỏ nếu trống) / Ngày học trên các dòng riêng. Hashtag luôn là **một môn**.
+- Nếu cùng QLL nhưng khác môn → bot tạo **tin riêng cho từng môn**.
 - Các dòng HS **trùng khít** (cùng tên + mã lớp + lịch + ngày) được **khử trùng**,
-  chỉ hiện 1 lần. Hai mã lớp khác nhau của cùng HS vẫn giữ cả hai.
+  chỉ hiện 1 lần.
 - Hashtag môn (`#KHTN`, `#TOAN`, `#MOET`...) lấy từ **4 ký tự đầu của mã lớp**,
   gắn vào dòng tiêu đề. Nhiều môn khác nhau trong cùng QLL → liệt kê các hashtag
   khác nhau (không trùng lặp) theo thứ tự xuất hiện.

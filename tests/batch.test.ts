@@ -218,17 +218,33 @@ describe("groupByUsername", () => {
     username: "SA_Y",
   };
 
-  it("groups multiple students sharing a username into one bucket, order preserved", () => {
-    const groups = groupByUsername([a1, a2]);
-    expect([...groups.keys()]).toEqual(["SA_X"]);
-    expect(groups.get("SA_X")).toEqual([a1, a2]);
+  it("combines same username + same subject into one bucket, order preserved", () => {
+    // Two KHTN students under SA_X -> one bucket.
+    const k1: MappedItem = { ...a2, tenHS: "K1", maLop: "KHTN.2026.0001" };
+    const k2: MappedItem = { ...a2, tenHS: "K2", maLop: "KHTN.2026.0002" };
+    const groups = groupByUsername([k1, k2]);
+    const buckets = [...groups.values()];
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0]).toEqual([k1, k2]);
   });
 
-  it("keeps different usernames in separate buckets, first-seen order preserved", () => {
-    const groups = groupByUsername([b1, a1, a2]);
-    expect([...groups.keys()]).toEqual(["SA_Y", "SA_X"]);
-    expect(groups.get("SA_Y")).toEqual([b1]);
-    expect(groups.get("SA_X")).toEqual([a1, a2]);
+  it("SPLITS one username across DIFFERENT subjects into separate buckets", () => {
+    // a1 = SA_X/TOAN, a2 = SA_X/KHTN -> two buckets (a QLL never owns two
+    // subjects in one message).
+    const groups = groupByUsername([a1, a2]);
+    const buckets = [...groups.values()];
+    expect(buckets).toHaveLength(2);
+    // Each bucket holds exactly its one subject's student.
+    expect(buckets).toContainEqual([a1]);
+    expect(buckets).toContainEqual([a2]);
+  });
+
+  it("keeps different usernames in separate buckets", () => {
+    const groups = groupByUsername([b1, a1]);
+    const buckets = [...groups.values()];
+    expect(buckets).toHaveLength(2);
+    expect(buckets).toContainEqual([b1]);
+    expect(buckets).toContainEqual([a1]);
   });
 });
 

@@ -464,12 +464,16 @@ async function maybeHandleBatch(
     // QLL is tagged exactly once. Store the fully-formatted text (incl. the
     // @username tag) so the cron sends message_text verbatim. send_after is
     // null for immediate sends and the scheduled ISO for a hẹn-giờ batch.
+    // One message per (QLL + subject): same QLL + same subject is combined; a
+    // QLL with students in two subjects gets one message per subject (a QLL is
+    // never tagged for two subjects in one message). The username is taken from
+    // the bucket's items, not the composite key.
     const groups = groupByUsername(items);
-    const rows = Array.from(groups.entries()).map(([username, students]) => ({
+    const rows = Array.from(groups.values()).map((students) => ({
       admin_id: adminId,
       chat_id: SPAMTEST_TARGET_CHAT_ID,
       message_text: buildGroupedAnnouncement(
-        username,
+        students[0].username,
         students,
         students[0]?.cauNhan
       ),
@@ -478,13 +482,13 @@ async function maybeHandleBatch(
     await enqueueMessages(deps.supabase, rows);
     await deletePendingBatch(deps.supabase, adminId);
 
-    const groupCount = groups.size;
+    const msgCount = groups.size;
     const confirmation =
       parsed.kind === "at"
-        ? `✅ Đã lên lịch gửi ${groupCount} tin cho ${groupCount} QLL lúc ${formatVnDateTime(
+        ? `✅ Đã lên lịch gửi ${msgCount} tin lúc ${formatVnDateTime(
             parsed.sendAfterIso
           )} (giờ VN). Bot sẽ tự gửi khi tới giờ.`
-        : `✅ Đã xếp ${groupCount} tin cho ${groupCount} QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`;
+        : `✅ Đã xếp ${msgCount} tin vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`;
     await deps.telegram.sendMessage(message.chat.id, confirmation);
     return true;
   }

@@ -870,7 +870,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledWith(
       ADMIN_ID,
-      "✅ Đã xếp 2 tin cho 2 QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+      "✅ Đã xếp 2 tin vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
     );
     // Nothing is posted synchronously to the target group.
     const postedToGroup = sendMessage.mock.calls.some(
@@ -922,7 +922,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const reply = sendMessage.mock.calls[0][1] as string;
     expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
-    expect(reply).toContain("Đã lên lịch gửi 2 tin cho 2 QLL");
+    expect(reply).toContain("Đã lên lịch gửi 2 tin");
     expect(reply).toContain("(giờ VN)");
   });
 
@@ -975,7 +975,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(enqueued[0].send_after).toBeNull();
     expect(sendMessage).toHaveBeenCalledWith(
       ADMIN_ID,
-      "✅ Đã xếp 1 tin cho 1 QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+      "✅ Đã xếp 1 tin vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
     );
   });
 
@@ -1010,30 +1010,44 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
 
     await handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
 
-    // Exactly two rows: one per QLL (two students collapse into @SA_X).
+    // THREE rows: SA_X splits by subject (KHTN, TOAN) + SA_Y (MOET).
+    // A QLL is NEVER tagged for two subjects in one message.
     expect(sendQueueInsert).toHaveBeenCalledTimes(1);
     const enqueued = sendQueueInsert.mock.calls[0][0] as {
       chat_id: number;
       message_text: string;
       send_after: string | null;
     }[];
-    expect(enqueued).toHaveLength(2);
+    expect(enqueued).toHaveLength(3);
 
-    const [rowX, rowY] = enqueued;
-    expect(rowX.chat_id).toBe(TARGET_GROUP);
-    // The shared-username row lists BOTH students and tags @SA_X once.
-    expect(rowX.message_text).toContain("1. HS Một");
-    expect(rowX.message_text).toContain("2. HS Hai");
-    expect(rowX.message_text.match(/@SA_X/g)).toHaveLength(1);
-    expect(rowX.message_text).toContain("#KHTN #TOAN");
-    // The other QLL is its own row with a single student.
-    expect(rowY.message_text).toContain("1. HS Ba");
-    expect(rowY.message_text.match(/@SA_Y/g)).toHaveLength(1);
+    const texts = enqueued.map((r) => r.message_text);
+    // SA_X has a KHTN-only message (HS Một) and a separate TOAN-only message
+    // (HS Hai) — never both subjects in one message.
+    const khtnX = texts.find((t) => t.includes("1. HS Một"));
+    const toanX = texts.find((t) => t.includes("1. HS Hai"));
+    const moetY = texts.find((t) => t.includes("1. HS Ba"));
+    expect(khtnX).toBeDefined();
+    expect(toanX).toBeDefined();
+    expect(moetY).toBeDefined();
 
-    // Grouped confirmation: 2 tin cho 2 QLL.
+    // Each message is single-subject (one hashtag only) and tags its QLL once.
+    expect(khtnX).toContain("#KHTN");
+    expect(khtnX).not.toContain("#TOAN");
+    expect(khtnX!.match(/@SA_X/g)).toHaveLength(1);
+
+    expect(toanX).toContain("#TOAN");
+    expect(toanX).not.toContain("#KHTN");
+    expect(toanX!.match(/@SA_X/g)).toHaveLength(1);
+
+    expect(moetY).toContain("#MOET");
+    expect(moetY!.match(/@SA_Y/g)).toHaveLength(1);
+
+    // All go to the fixed target group.
+    enqueued.forEach((r) => expect(r.chat_id).toBe(TARGET_GROUP));
+
     expect(sendMessage).toHaveBeenCalledWith(
       ADMIN_ID,
-      "✅ Đã xếp 2 tin cho 2 QLL vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
+      "✅ Đã xếp 3 tin vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong."
     );
   });
 

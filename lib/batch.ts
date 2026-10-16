@@ -144,13 +144,19 @@ export function buildAnnouncement(item: MappedItem): string {
 export function groupByUsername(
   items: MappedItem[]
 ): Map<string, MappedItem[]> {
+  // Group key = username + subject hashtag. One QLL who handles students in two
+  // DIFFERENT subjects gets ONE message PER SUBJECT (a QLL never owns two
+  // subjects in a single message), while same-QLL-same-subject students are
+  // combined. The subject comes from the class code's first 4 chars.
   const groups = new Map<string, MappedItem[]>();
   for (const item of items) {
-    const bucket = groups.get(item.username);
+    const subject = subjectHashtag(item.maLop); // "#KHTN" etc, "" if none
+    const key = `${item.username}\u0000${subject}`;
+    const bucket = groups.get(key);
     if (bucket) {
       bucket.push(item);
     } else {
-      groups.set(item.username, [item]);
+      groups.set(key, [item]);
     }
   }
   return groups;
