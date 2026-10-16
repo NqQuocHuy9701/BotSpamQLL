@@ -39,8 +39,85 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+// Telegram rejects any sendMessage whose text exceeds 4096 characters with a
+// 400 "message is too long". We split well below that so a long batch summary
+// (e.g. 90 students) is delivered as several messages instead of silently
+// failing. Split on line boundaries so a line is never cut in half.
+const TELEGRAM_MAX_CHARS = 4000;
+
+export function splitForTelegram(
+  text: string,
+  limit = TELEGRAM_MAX_CHARS
+): string[] {
+  if (text.length <= limit) {
+    return [text];
+  }
+  const chunks: string[] = [];
+  let current = "";
+  for (const line of text.split("\n")) {
+    // A single over-long line is hard-split as a last resort.
+    if (line.length > limit) {
+      if (current !== "") {
+        chunks.push(current);
+        current = "";
+      }
+      for (let i = 0; i < line.length; i += limit) {
+        chunks.push(line.slice(i, i + limit));
+      }
+      continue;
+    }
+    const candidate = current === "" ? line : `${current}\n${line}`;
+    if (candidate.length > limit) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current !== "") {
+    chunks.push(current);
+  }
+  return chunks;
+}
+
 export function createTelegramClient(botToken: string): TelegramClient {
   const base = `${TELEGRAM_API_BASE}/bot${botToken}`;
+
+  // Posts exactly one message (no splitting). Internal helper.
+  async function sendOne(
+    chatId: number,
+    text: string,
+    replyToMessageId?: number
+  ): Promise<SendResult> {
+    const body: Record<string, unknown> = { chat_id: chatId, text };
+    if (replyToMessageId !== undefined) {
+      body.reply_to_message_id = replyToMessageId;
+      // Don't fail the whole send if the replied-to message was deleted.
+      body.allow_sending_without_reply = true;
+    }
+    const response = await fetch(`${base}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const payload = (await response.json()) as {
+      ok: boolean;
+      result?: { message_id: number };
+      error_code?: number;
+      description?: string;
+    };
+
+    if (payload.ok && payload.result) {
+      return { ok: true, messageId: payload.result.message_id };
+    }
+
+    return {
+      ok: false,
+      forbidden: payload.error_code === 403,
+      description: payload.description ?? "sendMessage failed",
+    };
+  }
 
   async function sendMessage(
     chatId: number,
@@ -48,34 +125,21 @@ export function createTelegramClient(botToken: string): TelegramClient {
     replyToMessageId?: number
   ): Promise<SendResult> {
     try {
-      const body: Record<string, unknown> = { chat_id: chatId, text };
-      if (replyToMessageId !== undefined) {
-        body.reply_to_message_id = replyToMessageId;
-        // Don't fail the whole send if the replied-to message was deleted.
-        body.allow_sending_without_reply = true;
+      const parts = splitForTelegram(text);
+      // Only the FIRST part carries the reply linkage; the rest are plain
+      // continuation messages. Return the first failure, else the last success.
+      let last: SendResult = { ok: true, messageId: 0 };
+      for (let i = 0; i < parts.length; i++) {
+        last = await sendOne(
+          chatId,
+          parts[i],
+          i === 0 ? replyToMessageId : undefined
+        );
+        if (!last.ok) {
+          return last; // stop on first failure
+        }
       }
-      const response = await fetch(`${base}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      const payload = (await response.json()) as {
-        ok: boolean;
-        result?: { message_id: number };
-        error_code?: number;
-        description?: string;
-      };
-
-      if (payload.ok && payload.result) {
-        return { ok: true, messageId: payload.result.message_id };
-      }
-
-      return {
-        ok: false,
-        forbidden: payload.error_code === 403,
-        description: payload.description ?? "sendMessage failed",
-      };
+      return last;
     } catch (error) {
       // Native fetch / JSON parsing rejected (DNS, socket, malformed body).
       // Surface as a non-forbidden transport failure so the handler can take

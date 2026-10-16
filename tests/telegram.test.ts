@@ -2,10 +2,43 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createTelegramClient,
   deleteWithRetry,
+  splitForTelegram,
   withTimeout,
   TimeoutError,
   type TelegramClient,
 } from "../lib/telegram.js";
+
+describe("splitForTelegram", () => {
+  it("returns the text as a single chunk when under the limit", () => {
+    expect(splitForTelegram("short", 100)).toEqual(["short"]);
+  });
+
+  it("splits on line boundaries without cutting a line in half", () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line-${i}`);
+    const text = lines.join("\n");
+    const parts = splitForTelegram(text, 20);
+    // Every chunk is within the limit, and no line is broken.
+    for (const p of parts) {
+      expect(p.length).toBeLessThanOrEqual(20);
+    }
+    // Rejoining all chunks line-wise recovers every original line in order.
+    expect(parts.join("\n").split("\n")).toEqual(lines);
+    expect(parts.length).toBeGreaterThan(1);
+  });
+
+  it("hard-splits a single over-long line as a last resort", () => {
+    const parts = splitForTelegram("x".repeat(50), 20);
+    expect(parts).toEqual(["x".repeat(20), "x".repeat(20), "x".repeat(10)]);
+  });
+
+  it("keeps a long real-world summary under 4096 per chunk", () => {
+    const big = Array.from({ length: 90 }, (_, i) => `- HS ${i} -> @SA_User${i}`).join("\n");
+    const parts = splitForTelegram(big);
+    for (const p of parts) {
+      expect(p.length).toBeLessThanOrEqual(4000);
+    }
+  });
+});
 
 function mockFetchOnce(payload: unknown): void {
   vi.stubGlobal(
