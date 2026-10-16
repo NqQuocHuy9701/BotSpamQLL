@@ -321,6 +321,34 @@ export async function releaseRow(
   }
 }
 
+// Deletes all UNSENT rows for one admin (sent=false), cancelling both a hẹn-giờ
+// schedule and an in-progress drip. Already-sent rows are untouched. Returns
+// the number of rows removed. Non-throwing.
+export async function deleteUnsent(
+  client: SupabaseClient,
+  adminId: number
+): Promise<{ ok: boolean; count: number; error?: string }> {
+  try {
+    const { data, error } = await client
+      .from("send_queue")
+      .delete()
+      .eq("admin_id", adminId)
+      .eq("sent", false)
+      .select("id");
+    if (error) {
+      return { ok: false, count: 0, error: error.message };
+    }
+    const count = Array.isArray(data) ? data.length : 0;
+    return { ok: true, count };
+  } catch (err) {
+    return {
+      ok: false,
+      count: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // Counts the remaining unsent rows, optionally scoped to one admin. A null
 // count (nothing matched) is coalesced to 0. On error returns count 0.
 export async function countUnsent(

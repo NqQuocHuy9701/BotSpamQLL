@@ -15,6 +15,7 @@ import {
   addUserManual,
   findUserByUsername,
   deletePendingBatch,
+  deleteUnsent,
   enqueueMessages,
   insertLog,
   listKnownUsers,
@@ -78,6 +79,8 @@ const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Suppo
 // (see api/cron.ts) rather than posted synchronously here.
 const BATCH_OK_COMMAND = "/ok";
 const BATCH_CANCEL_COMMAND = "/huy";
+// Stops a scheduled or in-progress send by clearing all not-yet-sent rows.
+const BATCH_STOP_COMMAND = "/cancel";
 
 // Manual QLL-management commands (admin private DM only). Recognized BEFORE the
 // document / /ok / /huy logic so they can never be mis-eaten by those branches.
@@ -499,6 +502,21 @@ async function maybeHandleBatch(
     await deps.telegram.sendMessage(
       message.chat.id,
       "Đã huỷ danh sách đang chờ."
+    );
+    return true;
+  }
+
+  // Case 4: /cancel -> stop a scheduled (hẹn giờ) batch AND an in-progress
+  // drip by deleting every not-yet-sent row for this admin from send_queue.
+  // Already-sent messages are not affected. Also clears any pending draft.
+  if (text.toLowerCase() === BATCH_STOP_COMMAND) {
+    await deletePendingBatch(deps.supabase, adminId);
+    const res = await deleteUnsent(deps.supabase, adminId);
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      res.ok
+        ? `🛑 Đã huỷ ${res.count} tin chưa gửi trong hàng đợi (gồm cả tin đã hẹn giờ). Các tin đã gửi không bị ảnh hưởng.`
+        : "Không huỷ được hàng đợi, thử lại sau nhé."
     );
     return true;
   }

@@ -28,6 +28,8 @@ function makeDeps(options: {
   downloadResult?: DownloadResult;
   pendingItems?: MappedItem[] | null;
   knownUsernames?: string[];
+  // Rows that deleteUnsent (/cancel) should report as removed.
+  unsentRows?: { id: string }[];
   // When set, a username lookup (findUserByUsername / dedup) returns this as an
   // already-existing QLL row, so /adduser reports "đã có".
   existingUser?: { username: string; fullName: string };
@@ -42,6 +44,7 @@ function makeDeps(options: {
   pendingUpsert: ReturnType<typeof vi.fn>;
   pendingDeleteEq: ReturnType<typeof vi.fn>;
   sendQueueInsert: ReturnType<typeof vi.fn>;
+  sendQueueDelete: ReturnType<typeof vi.fn>;
   from: ReturnType<typeof vi.fn>;
 } {
   const trace: string[] = [];
@@ -142,6 +145,8 @@ function makeDeps(options: {
     trace.push("enqueue");
     return { error: null };
   });
+  // Records a /cancel delete-unsent call.
+  const sendQueueDelete = vi.fn(() => {});
 
   // Route .from(table) to the right query-builder stub by table name.
   const from = vi.fn((table: string) => {
@@ -168,6 +173,20 @@ function makeDeps(options: {
           }),
         }),
         update: () => ({ eq: async () => ({ error: null }) }),
+        // deleteUnsent: .delete().eq(admin).eq(sent=false).select("id")
+        delete: () => ({
+          eq: () => ({
+            eq: () => ({
+              select: async () => {
+                sendQueueDelete();
+                return {
+                  data: options.unsentRows ?? [],
+                  error: null,
+                };
+              },
+            }),
+          }),
+        }),
       };
     }
     return { insert };
@@ -191,6 +210,7 @@ function makeDeps(options: {
     pendingUpsert,
     pendingDeleteEq,
     sendQueueInsert,
+    sendQueueDelete,
     from,
   };
 }
@@ -1075,6 +1095,29 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
       ADMIN_ID,
       "Đã huỷ danh sách đang chờ."
     );
+  });
+
+  it("/cancel deletes all unsent queued rows (scheduled + in-progress) and reports the count", async () => {
+    const { deps, sendMessage, sendQueueDelete } = makeDeps({
+      relayEnabled: false,
+      unsentRows: [{ id: "a" }, { id: "b" }, { id: "c" }],
+    });
+    await handleUpdate(textDm(ADMIN_ID, "/cancel"), deps);
+
+    // The queue's unsent rows were deleted.
+    expect(sendQueueDelete).toHaveBeenCalledTimes(1);
+    const reply = sendMessage.mock.calls[0] as [number, string];
+    expect(reply[0]).toBe(ADMIN_ID);
+    expect(reply[1]).toContain("Đã huỷ 3 tin");
+  });
+
+  it("/cancel from a non-admin is ignored", async () => {
+    const { deps, sendMessage, sendQueueDelete } = makeDeps({
+      relayEnabled: false,
+    });
+    await handleUpdate(textDm(999999, "/cancel"), deps);
+    expect(sendQueueDelete).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("ignores a document from a non-admin private chat", async () => {

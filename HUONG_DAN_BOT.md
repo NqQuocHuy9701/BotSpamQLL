@@ -55,7 +55,8 @@ riêng và thao tác trong nhóm QLL. Nó có **3 nhóm chức năng**:
 | `/ok` | Duyệt: bắn **ngay**, rải chậm vào nhóm. |
 | `/ok 21:00` | Hẹn: đúng **21h hôm nay (giờ VN)** mới bắt đầu bắn. Nếu 21h đã qua → tự dời sang **21h ngày mai**. |
 | `/ok 16/10 21:00` | Hẹn: đúng **21h ngày 16/10 (giờ VN)** năm nay. Nếu mốc đã qua → tự dời sang **năm sau**. |
-| `/huy` | Huỷ danh sách đang chờ duyệt. |
+| `/huy` | Huỷ danh sách **đang chờ duyệt** (chưa `/ok`). |
+| `/cancel` | **Dừng gửi**: xoá mọi tin **chưa gửi** trong hàng đợi — huỷ cả lịch đã hẹn giờ lẫn đợt đang bắn dở. Tin **đã gửi** không bị ảnh hưởng. |
 | `/adduser @username Họ Tên` | Thêm QLL **thủ công** vào cơ sở dữ liệu (vd `/adduser @SA_HaNH3 Nguyễn Hải Hà 3`). Dùng khi QLL chưa từng nhắn trong nhóm. |
 | `/finduser Họ Tên` | Tra cứu nhanh: tên này map ra username nào (dùng đúng quy tắc map ở mục 6). |
 | `/listusers` | Liệt kê số QLL bot đang biết + danh sách username. |
