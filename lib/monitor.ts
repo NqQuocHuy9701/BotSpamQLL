@@ -456,3 +456,31 @@ export async function checkUnansweredMessages(
     await saveWatchedMessages(supabase, remaining);
   }
 }
+// Hàm lưu cấu hình chung (ví dụ: trạng thái bật/tắt SLA) vào dòng ID -9001
+export async function updateConfig(supabase: SupabaseClient, newConfig: Record<string, any>): Promise<void> {
+  const CONFIG_ROW_ID = -9001;
+  
+  // Đọc dữ liệu cũ đang có ở dòng -9001
+  const { data } = await supabase
+    .from('pending_batches')
+    .select('items')
+    .eq('admin_id', CONFIG_ROW_ID)
+    .single();
+
+  let existingItems = data?.items || {};
+  if (typeof existingItems !== 'object') {
+    existingItems = {};
+  }
+
+  // Trộn cấu hình mới vào cấu hình cũ
+  const updatedItems = { ...existingItems, ...newConfig };
+
+  // Ghi đè ngược lại vào bảng pending_batches
+  await supabase
+    .from('pending_batches')
+    .upsert({
+      admin_id: CONFIG_ROW_ID,
+      items: updatedItems,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'admin_id' });
+}
