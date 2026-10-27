@@ -25,11 +25,18 @@ import {
   upsertUser,
 } from "./supabase.js";
 import {
+  handleGroupQllMessage,
+  handleGroupReaction,
+  maybeHandleCoordinatorCommands,
+} from "./monitor.js";
+
+import {
   deleteWithRetry,
   TimeoutError,
   withTimeout,
   type TelegramClient,
 } from "./telegram.js";
+
 import type {
   MappedItem,
   TelegramMessage,
@@ -122,39 +129,58 @@ export async function handleUpdate(
   update: TelegramUpdate,
   deps: Deps
 ): Promise<void> {
+  // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
+  if (update.message_reaction) {
+    await handleGroupReaction(
+      update.message_reaction,
+      deps.supabase,
+      SPAMTEST_TARGET_CHAT_ID
+    );
+    return;
+  }
+
   const message = update.message;
   if (!message) {
     return;
   }
 
-  // Passive user collection runs on EVERY group update, regardless of the
+  // 1. Passive user collection runs on EVERY group update, regardless of the
   // relay switch: capture the sender and any newly-joined members.
   await collectUsers(message, deps);
 
-  // Auto-acknowledge: when someone REPLIES in the group to one of the bot's HS
+  // 2. Theo dõi tin nhắn trong nhóm QLL (Rule 1: Bắt từ khóa khẩn cấp tag ngay | Rule 2: Đưa vào hàng đợi 5 phút)
+  await handleGroupQllMessage(
+    message,
+    deps.telegram,
+    deps.supabase,
+    SPAMTEST_TARGET_CHAT_ID,
+    SPAMTEST_ADMIN_IDS
+  );
+
+  // 3. Auto-acknowledge: when someone REPLIES in the group to one of the bot's HS
   // announcements, reply back a short ack. Independent of the relay switch.
   if (await maybeAckAnnouncementReply(message, deps)) {
     return;
   }
 
-  // /spamtest: admin-only, one message, independent of the relay switch.
+  // 4. /spamtest: admin-only, one message, independent of the relay switch.
   if (await maybeHandleSpamTest(message, deps)) {
     return;
   }
 
-  // Batch announcement from an .xlsx file (admin private DM only). Independent
+  // 5. Batch announcement from an .xlsx file (admin private DM only). Independent
   // of the relay switch, exactly like /spam.
   if (await maybeHandleBatch(message, deps)) {
     return;
   }
 
-  // HARD STOP when relay is disabled. The bot must not delete, send to inbox,
+  // 6. HARD STOP when relay is disabled. The bot must not delete, send to inbox,
   // or reply to anyone while collecting users. This is the "nằm vùng" mode.
   if (!deps.relayEnabled) {
     return;
   }
 
-  // Branch (a): private-chat /start -> acknowledge inbox is open.
+  // 7. Branch (a): private-chat /start -> acknowledge inbox is open.
   if (message.chat.type === "private") {
     if (message.text && message.text.startsWith("/start")) {
       await deps.telegram.sendMessage(message.chat.id, START_ACK);
@@ -162,7 +188,7 @@ export async function handleUpdate(
     return;
   }
 
-  // Branch (d): group message that is NOT a reply -> ignore.
+  // 8. Branch (d): group message that is NOT a reply -> ignore.
   const replyTo = message.reply_to_message;
   if (!replyTo) {
     return;
@@ -170,15 +196,14 @@ export async function handleUpdate(
 
   const sensitiveText = message.text ?? "";
 
-  // Branch (c): group reply that is NOT sensitive -> ignore.
+  // 9. Branch (c): group reply that is NOT sensitive -> ignore.
   if (!isSensitive(sensitiveText)) {
     return;
   }
 
-  // Branch (b): sensitive group reply -> relay flow.
+  // 10. Branch (b): sensitive group reply -> relay flow.
   await relay(message, replyTo, deps);
 }
-
 // Passively records users seen in a group chat into telegram_users_qll.
 // Captures the message sender and any newly-joined members. Never touches
 // private chats, and skips bot accounts and the "sender" of a join event
@@ -437,6 +462,18 @@ async function maybeHandleBatch(
   }
   const adminId = message.from!.id;
   const text = message.text?.trim() ?? "";
+
+  // 0. Nhận các lệnh quản lý ca trực (/dp, /đp) và CTV vận hành (/addctv, /delctv)
+  if (
+    await maybeHandleCoordinatorCommands(
+      message,
+      deps.telegram,
+      deps.supabase,
+      text
+    )
+  ) {
+    return true;
+  }
 
   // Manual QLL-management commands come FIRST so they can never be mis-eaten by
   // the document / /ok / /huy branches. None of them share a prefix with /ok,

@@ -3,7 +3,7 @@
 // ~15s apart so the group is never flooded. The HTTP boundary only builds the
 // real deps and enforces the cron auth guard; the testable work lives in the
 // exported runCron() so tests can inject a fake sleep (no real 15s wait).
-
+import { checkUnansweredMessages } from "../lib/monitor.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { loadConfig } from "../lib/config.js";
 import {
@@ -51,7 +51,10 @@ export async function runCron(deps: CronDeps): Promise<void> {
   const delayMs = deps.delayMs ?? CRON_DELAY_MS;
 
   const { rows } = await fetchNextUnsent(deps.supabase, batchSize);
+  
+  // NẾU HÀNG ĐỢI RẢI TIN EXCEL TRỐNG, VẪN PHẢI GỌI QUÉT SLA 5 PHÚT
   if (rows.length === 0) {
+    await checkUnansweredMessages(deps.telegram, deps.supabase);
     return; // empty queue: nothing to send
   }
 
@@ -100,19 +103,21 @@ export async function runCron(deps: CronDeps): Promise<void> {
   // Only consider completion when this run actually sent something, and only
   // for admins we sent for — so the "Đã gửi xong" DM fires exactly once, when
   // the final message drains that admin's queue (not on empty/no-op runs).
-  if (sentCount === 0) {
-    return;
-  }
-  for (const adminId of sentForAdmin) {
-    try {
-      const { count } = await countUnsent(deps.supabase, adminId);
-      if (count === 0) {
-        await deps.telegram.sendMessage(adminId, COMPLETION_MESSAGE);
+  if (sentCount > 0) {
+    for (const adminId of sentForAdmin) {
+      try {
+        const { count } = await countUnsent(deps.supabase, adminId);
+        if (count === 0) {
+          await deps.telegram.sendMessage(adminId, COMPLETION_MESSAGE);
+        }
+      } catch {
+        // A completion-notice failure must not crash the cron.
       }
-    } catch {
-      // A completion-notice failure must not crash the cron.
     }
   }
+
+  // GỌI KIỂM TRA SLA 5 PHÚT Ở CUỐI MỖI CHU KỲ CRON
+  await checkUnansweredMessages(deps.telegram, deps.supabase);
 }
 
 // Accepts the request only when it is a genuine Vercel cron invocation. Vercel

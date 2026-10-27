@@ -38,9 +38,20 @@ export interface TelegramMessage {
   new_chat_members?: TelegramUser[];
 }
 
+// Thêm đoạn này vào lib/types.ts
+export interface TelegramMessageReaction {
+  chat: TelegramChat;
+  message_id: number;
+  user?: TelegramUser;
+  date: number;
+  old_reaction?: unknown[];
+  new_reaction?: unknown[];
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  message_reaction?: TelegramMessageReaction; // <-- Bổ sung dòng này
 }
 
 // The three enumerated glossary statuses — Vietnamese strings kept exact.
