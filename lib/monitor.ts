@@ -3,18 +3,22 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { TelegramClient } from "./telegram.js";
 import type { TelegramMessage, TelegramMessageReaction } from "./types.js";
 
-const CONFIG_ROW_ID = -9001;
-const WATCH_ROW_ID = -9002;
-export const SLA_TIMEOUT_MS = 5 * 60 * 1000; // 5 phút
-const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
-
+// --- CẤU HÌNH VÀ CA LÀM VIỆC ---
 export interface ShiftCoordinatorConfig {
   sang: string;
   chieu: string;
   toi: string;
   defaultDp: string;
-  ctvUsernames: string[];
+  ctvUsernames: string[]; 
+  ctvSang?: string[];
+  ctvChieu?: string[];
+  ctvToi?: string[];
 }
+
+const CONFIG_ROW_ID = -9001;
+const WATCH_ROW_ID = -9002;
+export const SLA_TIMEOUT_MS = 7 * 60 * 1000; // 7 phút theo dõi
+const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 export interface WatchedGroupMessage {
   messageId: number;
@@ -29,6 +33,9 @@ const DEFAULT_CONFIG: ShiftCoordinatorConfig = {
   toi: "HuyNQ5",
   defaultDp: "HuyNQ5",
   ctvUsernames: ["op_huynq5", "huynq5"],
+  ctvSang: [],
+  ctvChieu: [],
+  ctvToi: [],
 };
 
 function stripDiacritics(str: string): string {
@@ -69,14 +76,45 @@ export function isUrgentQllMessage(text: string): boolean {
   return URGENT_PHRASES_NO_ACCENT.some((phrase) => noAccent.includes(phrase));
 }
 
+// --- HÀM KIỂM TRA ĐIỀU KIỆN KEY NHẬN DIỆN MỚI ---
+export function isValidQllCaseMessage(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed === "") return false;
+
+  // 1. Kiểm tra có chứa từ khóa khẩn cấp sẵn có không
+  if (isUrgentQllMessage(trimmed)) {
+    return true;
+  }
+
+  // 2. Kiểm tra điều kiện kết hợp: Phải chứa ít nhất 1 dãy số (từ 3 chữ số trở lên) 
+  // VÀ chứa ít nhất một tiền tố mã lớp (TOAN, MOET, KHTN, TCLC, TA, TVTTH,...)
+  const hasMin3Digits = /\d{3,}/.test(trimmed);
+  
+  // Danh sách các tiền tố mã lớp yêu cầu (không phân biệt hoa thường)
+  const classPrefixes = ["toan", "moet", "khtn", "tclc", "ta", "tvtth"];
+  const lowerText = stripDiacritics(trimmed);
+  
+  const hasClassPrefix = classPrefixes.some((prefix) => lowerText.includes(prefix));
+
+  // Phải thỏa mãn đồng thời: Có dãy số (>=3 số) VÀ có chứa mã lớp nhận diện
+  return hasMin3Digits && hasClassPrefix;
+}
+
+// Quy định khung giờ ca làm việc chuẩn:
+// Sáng: 8g - 12g (gánh đến trước 13h30)
+// Chiều: 13h30 - 17g (gánh từ 13h30 đến trước 17h30)
+// Tối: 17h30 - 21h30 (gánh từ 17h30 trở đi)
 export function getCurrentShiftVn(now: Date = new Date()): {
   key: "sang" | "chieu" | "toi";
   label: string;
 } {
   const vnTime = new Date(now.getTime() + VN_OFFSET_MS);
   const hour = vnTime.getUTCHours();
-  if (hour < 12) return { key: "sang", label: "Sáng" };
-  if (hour < 18) return { key: "chieu", label: "Chiều" };
+  const minute = vnTime.getUTCMinutes();
+  const timeVal = hour + minute / 60;
+
+  if (timeVal < 13.5) return { key: "sang", label: "Sáng" };
+  if (timeVal >= 13.5 && timeVal < 17.5) return { key: "chieu", label: "Chiều" };
   return { key: "toi", label: "Tối" };
 }
 
@@ -112,6 +150,9 @@ export async function loadMonitorConfig(
       ctvUsernames: Array.isArray(raw.ctvUsernames)
         ? raw.ctvUsernames
         : DEFAULT_CONFIG.ctvUsernames,
+      ctvSang: Array.isArray(raw.ctvSang) ? raw.ctvSang : [],
+      ctvChieu: Array.isArray(raw.ctvChieu) ? raw.ctvChieu : [],
+      ctvToi: Array.isArray(raw.ctvToi) ? raw.ctvToi : [],
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -170,7 +211,7 @@ export async function saveWatchedMessages(
   }
 }
 
-// Xử lý các lệnh quản lý /dp, /đp, /addctv, /delctv
+// Xử lý các lệnh quản lý /dp, /đp, /addctv, /addctvca, /delctv
 export async function maybeHandleCoordinatorCommands(
   message: TelegramMessage,
   telegram: TelegramClient,
@@ -195,21 +236,41 @@ export async function maybeHandleCoordinatorCommands(
         config.ctvUsernames.length > 0
           ? config.ctvUsernames.map((u) => `@${u}`).join(", ")
           : "(chưa có)";
+      const ctvSangList =
+        config.ctvSang && config.ctvSang.length > 0
+          ? config.ctvSang.map((u) => `@${u}`).join(", ")
+          : "(chưa có)";
+      const ctvChieuList =
+        config.ctvChieu && config.ctvChieu.length > 0
+          ? config.ctvChieu.map((u) => `@${u}`).join(", ")
+          : "(chưa có)";
+      const ctvToiList =
+        config.ctvToi && config.ctvToi.length > 0
+          ? config.ctvToi.map((u) => `@${u}`).join(", ")
+          : "(chưa có)";
+
       await telegram.sendMessage(
         message.chat.id,
         [
           "📋 Cấu hình Điều phối viên theo ca:",
-          `• Ca Sáng (00h-12h): @${config.sang}`,
-          `• Ca Chiều (12h-18h): @${config.chieu}`,
-          `• Ca Tối (18h-24h): @${config.toi}`,
+          `• Ca Sáng (08h-12h): @${config.sang}`,
+          `• Ca Chiều (13h30-17h): @${config.chieu}`,
+          `• Ca Tối (17h30-21h30): @${config.toi}`,
           `👉 Hiện tại đang là ca ${active.shiftLabel} -> Tag: @${active.username}`,
           "",
           `👥 Danh sách CTV Vận hành (${config.ctvUsernames.length}): ${ctvList}`,
+          "",
+          "🧑‍💻 Danh sách CTV trực theo ca (Tag sau 7p):",
+          `• Ca Sáng: ${ctvSangList}`,
+          `• Ca Chiều: ${ctvChieuList}`,
+          `• Ca Tối: ${ctvToiList}`,
           "",
           "💡 Cú pháp đổi điều phối:",
           "/đp sáng HuyNQ5 | /đp chiều HuyNQ5 | /đp tối HuyNQ5",
           "💡 Cú pháp thêm/xóa CTV vận hành:",
           "/addctv @user1 @user2 | /delctv @user1",
+          "💡 Cú pháp thêm CTV trực theo ca:",
+          "/addctvca <sang|chieu|toi> @user1 @user2",
         ].join("\n")
       );
       return true;
@@ -275,6 +336,48 @@ export async function maybeHandleCoordinatorCommands(
     return true;
   }
 
+  // --- LỆNH /addctvca ---
+  if (lower.startsWith("/addctvca")) {
+    const rest = trimmed.slice("/addctvca".length).trim();
+    if (!rest) {
+      await telegram.sendMessage(
+        message.chat.id,
+        "Cú pháp: /addctvca <sang|chieu|toi> @username1 @username2"
+      );
+      return true;
+    }
+
+    const parts = rest.split(/\s+/);
+    const shiftType = stripDiacritics(parts[0] || "");
+    const usernames = parts
+      .slice(1)
+      .map((u) => u.replace(/^@/, "").trim().toLowerCase())
+      .filter(Boolean);
+
+    if (["sang", "chieu", "toi"].includes(shiftType) && usernames.length > 0) {
+      const config = await loadMonitorConfig(supabase);
+
+      if (shiftType === "sang") config.ctvSang = usernames;
+      if (shiftType === "chieu") config.ctvChieu = usernames;
+      if (shiftType === "toi") config.ctvToi = usernames;
+
+      await saveMonitorConfig(supabase, config);
+      await telegram.sendMessage(
+        message.chat.id,
+        `✅ Đã lưu thành công ${usernames.length} CTV cho ca ${shiftType.toUpperCase()}: ${usernames
+          .map((u) => `@${u}`)
+          .join(", ")}`
+      );
+    } else {
+      await telegram.sendMessage(
+        message.chat.id,
+        "⚠️ Sai cú pháp! Dùng: /addctvca <sang|chieu|toi> @user1 @user2"
+      );
+    }
+    return true;
+  }
+
+  // --- LỆNH ADDCTV CŨ ---
   if (lower.startsWith("/addctv")) {
     const rest = trimmed.slice("/addctv".length).trim();
     if (!rest) {
@@ -302,6 +405,7 @@ export async function maybeHandleCoordinatorCommands(
     return true;
   }
 
+  // --- LỆNH DELCTV CŨ ---
   if (lower.startsWith("/delctv")) {
     const rest = trimmed.slice("/delctv".length).trim();
     if (!rest) {
@@ -331,7 +435,7 @@ export async function maybeHandleCoordinatorCommands(
   return false;
 }
 
-// Bắt sự kiện thả Icon (Reaction) trong nhóm để giải phóng SLA 5 phút
+// Bắt sự kiện thả Icon (Reaction) trong nhóm để giải phóng SLA
 export async function handleGroupReaction(
   reaction: TelegramMessageReaction,
   supabase: SupabaseClient,
@@ -374,9 +478,14 @@ export async function handleGroupQllMessage(
   }
 
   const senderUname = (message.from.username ?? "").trim().toLowerCase();
+  const isAllCtvShift =
+    (config.ctvSang && config.ctvSang.includes(senderUname)) ||
+    (config.ctvChieu && config.ctvChieu.includes(senderUname)) ||
+    (config.ctvToi && config.ctvToi.includes(senderUname));
+
   const isCtvOrAdmin =
     adminIds.includes(message.from.id) ||
-    (senderUname !== "" && config.ctvUsernames.includes(senderUname));
+    (senderUname !== "" && (config.ctvUsernames.includes(senderUname) || isAllCtvShift));
 
   if (isCtvOrAdmin) {
     if (watchedChanged) {
@@ -391,32 +500,47 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // RULE 1: Chỉ khi có từ khóa khẩn cấp (gấp, duyệt, khẩn...) mới thả icon và tag điều phối viên
-  if (isUrgentQllMessage(text)) {
-    // --- Thả icon ngẫu nhiên khi bắt được đúng từ khóa ---
-    const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
-    const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
-    await sendReaction(message.chat.id, message.message_id, chosenEmoji);
-
-    // --- Tag điều phối viên ---
-    const { username } = getActiveCoordinator(config);
-    await telegram.sendMessage(
-      message.chat.id,
-      `@${username} Chị ơi, hỗ trợ case này ạ!`,
-      message.message_id
-    );
-
+  // --- KIỂM TRA ĐIỀU KIỆN MỚI: CÓ THỎA MÃN KEY NHẬN DIỆN CASE KHÔNG? ---
+  if (!isValidQllCaseMessage(text)) {
+    // Nếu không chứa mã lớp + dãy số hoặc từ khóa khẩn cấp -> Bỏ qua hoàn toàn, không đưa vào watch, không thả icon
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
     }
     return;
   }
 
-  // Các tin nhắn bình thường khác sẽ bỏ qua hoàn toàn
-  return;
+  // Thỏa mãn điều kiện case -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi 7 phút
+  const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
+  const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
+  await sendReaction(message.chat.id, message.message_id, chosenEmoji);
+
+  // Thêm vào danh sách theo dõi 7 phút
+  if (!watched.some((w) => w.messageId === message.message_id)) {
+    watched.push({
+      messageId: message.message_id,
+      chatId: message.chat.id,
+      senderId: message.from.id,
+      createdAtMs: Date.now(),
+    });
+    watchedChanged = true;
+  }
+
+  // Nếu đồng thời có từ khóa khẩn cấp rõ ràng -> Tag điều phối viên ngay lập tức
+  if (isUrgentQllMessage(text)) {
+    const { username } = getActiveCoordinator(config);
+    await telegram.sendMessage(
+      message.chat.id,
+      `@${username} Chị ơi, hỗ trợ case này ạ!`,
+      message.message_id
+    );
+  }
+
+  if (watchedChanged) {
+    await saveWatchedMessages(supabase, watched);
+  }
 }
 
-// Hàm kiểm tra SLA 5 phút (Chạy trong Cron mỗi phút)
+// Hàm kiểm tra SLA 7 phút (Chạy trong Cron) - Quá 7 phút không ai thả tim/reply sẽ tag random CTV trong ca
 export async function checkUnansweredMessages(
   telegram: TelegramClient,
   supabase: SupabaseClient,
@@ -429,6 +553,12 @@ export async function checkUnansweredMessages(
 
   const config = await loadMonitorConfig(supabase);
   const { username } = getActiveCoordinator(config, new Date(nowMs));
+  const currentShift = getCurrentShiftVn(new Date(nowMs));
+
+  let currentShiftCtv: string[] = [];
+  if (currentShift.key === "sang") currentShiftCtv = config.ctvSang || [];
+  else if (currentShift.key === "chieu") currentShiftCtv = config.ctvChieu || [];
+  else currentShiftCtv = config.ctvToi || [];
 
   const remaining: WatchedGroupMessage[] = [];
   let changed = false;
@@ -441,12 +571,21 @@ export async function checkUnansweredMessages(
     }
 
     if (ageMs >= SLA_TIMEOUT_MS) {
-      // Quá 5 phút không ai nhận -> Tag điều phối với mẫu câu yêu cầu
-      await telegram.sendMessage(
-        item.chatId,
-        `@${username} Chị ơi, hỗ trợ case này ạ!`,
-        item.messageId
-      );
+      // Quá 7 phút không ai thả tim/nhận -> Tag random CTV ca đó hoặc điều phối
+      if (currentShiftCtv.length > 0) {
+        const randomCtv = currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
+        await telegram.sendMessage(
+          item.chatId,
+          `⏰ @${randomCtv} Case này ở ca ${currentShift.label} đã quá 7 phút chưa thấy thả tim/xử lý, bạn kiểm tra hỗ trợ gấp nhé!`,
+          item.messageId
+        );
+      } else {
+        await telegram.sendMessage(
+          item.chatId,
+          `@${username} Chị ơi, hỗ trợ case này ạ!`,
+          item.messageId
+        );
+      }
       changed = true;
     } else {
       remaining.push(item);
@@ -457,43 +596,49 @@ export async function checkUnansweredMessages(
     await saveWatchedMessages(supabase, remaining);
   }
 }
-// Hàm lưu cấu hình chung (ví dụ: trạng thái bật/tắt SLA) vào dòng ID -9001
-export async function updateConfig(supabase: SupabaseClient, newConfig: Record<string, any>): Promise<void> {
+
+export async function updateConfig(
+  supabase: SupabaseClient,
+  newConfig: Record<string, any>
+): Promise<void> {
   const CONFIG_ROW_ID = -9001;
-  
-  // Đọc dữ liệu cũ đang có ở dòng -9001
+
   const { data } = await supabase
-    .from('pending_batches')
-    .select('items')
-    .eq('admin_id', CONFIG_ROW_ID)
+    .from("pending_batches")
+    .select("items")
+    .eq("admin_id", CONFIG_ROW_ID)
     .single();
 
   let existingItems = data?.items || {};
-  if (typeof existingItems !== 'object') {
+  if (typeof existingItems !== "object") {
     existingItems = {};
   }
 
-  // Trộn cấu hình mới vào cấu hình cũ
   const updatedItems = { ...existingItems, ...newConfig };
 
-  // Ghi đè ngược lại vào bảng pending_batches
   await supabase
-    .from('pending_batches')
-    .upsert({
-      admin_id: CONFIG_ROW_ID,
-      items: updatedItems,
-      created_at: new Date().toISOString(),
-    }, { onConflict: 'admin_id' });
+    .from("pending_batches")
+    .upsert(
+      {
+        admin_id: CONFIG_ROW_ID,
+        items: updatedItems,
+        created_at: new Date().toISOString(),
+      },
+      { onConflict: "admin_id" }
+    );
 }
-// Hàm thả icon linh động theo ý muốn
+
 export async function sendReaction(
   chatId: number,
   messageId: number,
-  emoji: string = "👍" // Mặc định là 👍 nếu không truyền gì vào
+  emoji: string = "👍"
 ): Promise<boolean> {
   try {
     const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) return false;
+    if (!token) {
+      console.log("❌ Thiếu TELEGRAM_BOT_TOKEN");
+      return false;
+    }
 
     const url = `https://api.telegram.org/bot${token}/setMessageReaction`;
     const response = await fetch(url, {
@@ -505,10 +650,19 @@ export async function sendReaction(
         reaction: [{ type: "emoji", emoji: emoji }],
       }),
     });
-    const data = (await response.json()) as { ok: boolean };
+
+    const data = (await response.json()) as {
+      ok: boolean;
+      description?: string;
+    };
+
+    if (!data.ok) {
+      console.error("❌ Telegram từ chối thả icon:", data.description);
+    }
+
     return data.ok;
   } catch (error) {
-    console.error("Lỗi khi thả icon:", error);
+    console.error("❌ Lỗi mạng khi gọi sendReaction:", error);
     return false;
   }
 }
