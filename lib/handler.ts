@@ -28,7 +28,7 @@ import {
   handleGroupQllMessage,
   handleGroupReaction,
   maybeHandleCoordinatorCommands,
-  updateConfig, // Thêm hàm lưu cấu hình bật/tắt SLA
+  updateConfig,
 } from "./monitor.js";
 
 import {
@@ -487,6 +487,45 @@ async function maybeHandleBatch(
   if (text.toLowerCase().startsWith('/batsla')) {
     await updateConfig(deps.supabase, { slaEnabled: true });
     await deps.telegram.sendMessage(message.chat.id, "🟢 Đã BẬT lại chế độ giám sát SLA 5 phút.");
+    return true;
+  }
+
+  // Case 0.5: Import hàng loạt CTV qua file Excel kèm caption /addctv
+  if (message.document && message.caption?.trim().toLowerCase().startsWith('/addctv')) {
+    const download = await deps.telegram.downloadFile(message.document.file_id);
+    if (!download.ok) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Không tải được file danh sách CTV. Thử gửi lại nhé."
+      );
+      return true;
+    }
+
+    let rows;
+    try {
+      rows = parseSheet(download.buffer);
+    } catch {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Không đọc được file Excel CTV. Kiểm tra lại định dạng .xlsx."
+      );
+      return true;
+    }
+
+    const newCtvUsernames: string[] = [];
+    for (const row of rows) {
+      const uname = (row.qll || "").replace(/^@/, "").trim().toLowerCase();
+      if (uname) {
+        newCtvUsernames.push(uname);
+      }
+    }
+
+    await updateConfig(deps.supabase, { ctvUsernames: newCtvUsernames });
+
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      `✅ Đã cập nhật thành công ${newCtvUsernames.length} tài khoản CTV vào danh sách miễn trừ SLA!`
+    );
     return true;
   }
 

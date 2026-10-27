@@ -348,7 +348,9 @@ export async function handleGroupReaction(
 }
 
 // Xử lý tin nhắn trong nhóm QLL (Bắt từ khóa gấp hoặc đưa vào hàng đợi 5 phút)
+
 export async function handleGroupQllMessage(
+    
   message: TelegramMessage,
   telegram: TelegramClient,
   supabase: SupabaseClient,
@@ -391,7 +393,7 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // RULE 1: Từ khóa khẩn cấp -> Tag ngay với mẫu câu yêu cầu
+// RULE 1: Từ khóa khẩn cấp -> Tag ngay với mẫu câu yêu cầu
   if (isUrgentQllMessage(text)) {
     const { username } = getActiveCoordinator(config);
     await telegram.sendMessage(
@@ -405,14 +407,8 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // RULE 2: Tin nhắn thường của QLL -> Đưa vào danh sách đếm ngược 5 phút
-  watched.push({
-    messageId: message.message_id,
-    chatId: message.chat.id,
-    senderId: message.from.id,
-    createdAtMs: Date.now(),
-  });
-  await saveWatchedMessages(supabase, watched);
+  // TẮT HOÀN TOÀN TÍNH NĂNG CHỜ 5 PHÚT (Bỏ qua Rule 2)
+  return;
 }
 
 // Hàm kiểm tra SLA 5 phút (Chạy trong Cron mỗi phút)
