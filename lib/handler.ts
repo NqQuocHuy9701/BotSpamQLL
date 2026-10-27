@@ -28,6 +28,7 @@ import {
   handleGroupQllMessage,
   handleGroupReaction,
   maybeHandleCoordinatorCommands,
+  updateConfig, // Thêm hàm lưu cấu hình bật/tắt SLA
 } from "./monitor.js";
 
 import {
@@ -472,6 +473,20 @@ async function maybeHandleBatch(
       text
     )
   ) {
+    return true;
+  }
+
+  // Bổ sung: Lệnh /tatsla để tạm dừng/tắt chế độ giám sát SLA 5 phút
+  if (text.toLowerCase().startsWith('/tatsla')) {
+    await updateConfig(deps.supabase, { slaEnabled: false });
+    await deps.telegram.sendMessage(message.chat.id, "🔴 Đã TẮT chế độ giám sát SLA 5 phút.");
+    return true;
+  }
+
+  // Bổ sung: Lệnh /batsla để bật lại chế độ giám sát SLA 5 phút
+  if (text.toLowerCase().startsWith('/batsla')) {
+    await updateConfig(deps.supabase, { slaEnabled: true });
+    await deps.telegram.sendMessage(message.chat.id, "🟢 Đã BẬT lại chế độ giám sát SLA 5 phút.");
     return true;
   }
 
