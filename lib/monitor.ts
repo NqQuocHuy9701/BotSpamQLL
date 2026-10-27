@@ -349,9 +349,7 @@ export async function handleGroupReaction(
 }
 
 // Xử lý tin nhắn trong nhóm QLL (Bắt từ khóa gấp hoặc đưa vào hàng đợi 5 phút)
-
 export async function handleGroupQllMessage(
-    
   message: TelegramMessage,
   telegram: TelegramClient,
   supabase: SupabaseClient,
@@ -361,6 +359,11 @@ export async function handleGroupQllMessage(
   if (message.chat.id !== targetChatId) return;
   if (!message.from || message.from.is_bot) return;
   if (message.new_chat_members && message.new_chat_members.length > 0) return;
+
+  // --- THẢ ICON NGẪU NHIÊN LINH ĐỘNG ---
+  const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
+  const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
+  await sendReaction(message.chat.id, message.message_id, chosenEmoji);
 
   const config = await loadMonitorConfig(supabase);
   const watched = await loadWatchedMessages(supabase);
@@ -394,7 +397,7 @@ export async function handleGroupQllMessage(
     return;
   }
 
-// RULE 1: Từ khóa khẩn cấp -> Tag ngay với mẫu câu yêu cầu
+  // RULE 1: Từ khóa khẩn cấp -> Tag ngay với mẫu câu yêu cầu
   if (isUrgentQllMessage(text)) {
     const { username } = getActiveCoordinator(config);
     await telegram.sendMessage(
@@ -480,4 +483,31 @@ export async function updateConfig(supabase: SupabaseClient, newConfig: Record<s
       items: updatedItems,
       created_at: new Date().toISOString(),
     }, { onConflict: 'admin_id' });
+}
+// Hàm thả icon linh động theo ý muốn
+export async function sendReaction(
+  chatId: number,
+  messageId: number,
+  emoji: string = "👍" // Mặc định là 👍 nếu không truyền gì vào
+): Promise<boolean> {
+  try {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return false;
+
+    const url = `https://api.telegram.org/bot${token}/setMessageReaction`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: "emoji", emoji: emoji }],
+      }),
+    });
+    const data = (await response.json()) as { ok: boolean };
+    return data.ok;
+  } catch (error) {
+    console.error("Lỗi khi thả icon:", error);
+    return false;
+  }
 }
