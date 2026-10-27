@@ -399,7 +399,7 @@ export async function handleGroupQllMessage(
     const { username } = getActiveCoordinator(config);
     await telegram.sendMessage(
       message.chat.id,
-      `@${username} Anh/chị ơi, hỗ trợ case này ạ!`,
+      `@${username} Chị ơi, hỗ trợ case này ạ!`,
       message.message_id
     );
     if (watchedChanged) {
@@ -440,7 +440,7 @@ export async function checkUnansweredMessages(
       // Quá 5 phút không ai nhận -> Tag điều phối với mẫu câu yêu cầu
       await telegram.sendMessage(
         item.chatId,
-        `@${username} Anh/chị ơi, hỗ trợ case này ạ!`,
+        `@${username} Chị ơi, hỗ trợ case này ạ!`,
         item.messageId
       );
       changed = true;
