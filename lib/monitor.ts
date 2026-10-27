@@ -53,6 +53,7 @@ const URGENT_PHRASES_NO_ACCENT = [
   "khieu nai",
   "phan nan",
   "can ngay",
+  "duyet",
 ];
 
 export function isUrgentQllMessage(text: string): boolean {
