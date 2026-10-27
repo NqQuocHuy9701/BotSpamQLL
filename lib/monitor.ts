@@ -13,6 +13,7 @@ export interface ShiftCoordinatorConfig {
   ctvSang?: string[];
   ctvChieu?: string[];
   ctvToi?: string[];
+  userTitles?: Record<string, "anh" | "chị">;
 }
 
 const CONFIG_ROW_ID = -9001;
@@ -36,6 +37,7 @@ const DEFAULT_CONFIG: ShiftCoordinatorConfig = {
   ctvSang: [],
   ctvChieu: [],
   ctvToi: [],
+  userTitles: {},
 };
 
 function stripDiacritics(str: string): string {
@@ -76,7 +78,7 @@ export function isUrgentQllMessage(text: string): boolean {
   return URGENT_PHRASES_NO_ACCENT.some((phrase) => noAccent.includes(phrase));
 }
 
-// --- HÀM KIỂM TRA ĐIỀU KIỆN KEY NHẬN DIỆN MỚI ---
+// --- HÀM KIỂM TRA ĐIỀU KIỆN KEY NHẬN DIỆN CASE MỚI ---
 export function isValidQllCaseMessage(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed === "") return false;
@@ -153,6 +155,7 @@ export async function loadMonitorConfig(
       ctvSang: Array.isArray(raw.ctvSang) ? raw.ctvSang : [],
       ctvChieu: Array.isArray(raw.ctvChieu) ? raw.ctvChieu : [],
       ctvToi: Array.isArray(raw.ctvToi) ? raw.ctvToi : [],
+      userTitles: raw.userTitles && typeof raw.userTitles === "object" ? raw.userTitles : {},
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -211,7 +214,7 @@ export async function saveWatchedMessages(
   }
 }
 
-// Xử lý các lệnh quản lý /dp, /đp, /addctv, /addctvca, /delctv
+// Xử lý các lệnh quản lý /dp, /đp, /addctv, /addctvca, /settitle, /delctv
 export async function maybeHandleCoordinatorCommands(
   message: TelegramMessage,
   telegram: TelegramClient,
@@ -238,15 +241,15 @@ export async function maybeHandleCoordinatorCommands(
           : "(chưa có)";
       const ctvSangList =
         config.ctvSang && config.ctvSang.length > 0
-          ? config.ctvSang.map((u) => `@${u}`).join(", ")
+          ? config.ctvSang.map((u) => `${config.userTitles?.[u] || ""} @${u}`.trim()).join(", ")
           : "(chưa có)";
       const ctvChieuList =
         config.ctvChieu && config.ctvChieu.length > 0
-          ? config.ctvChieu.map((u) => `@${u}`).join(", ")
+          ? config.ctvChieu.map((u) => `${config.userTitles?.[u] || ""} @${u}`.trim()).join(", ")
           : "(chưa có)";
       const ctvToiList =
         config.ctvToi && config.ctvToi.length > 0
-          ? config.ctvToi.map((u) => `@${u}`).join(", ")
+          ? config.ctvToi.map((u) => `${config.userTitles?.[u] || ""} @${u}`.trim()).join(", ")
           : "(chưa có)";
 
       await telegram.sendMessage(
@@ -267,10 +270,10 @@ export async function maybeHandleCoordinatorCommands(
           "",
           "💡 Cú pháp đổi điều phối:",
           "/đp sáng HuyNQ5 | /đp chiều HuyNQ5 | /đp tối HuyNQ5",
-          "💡 Cú pháp thêm/xóa CTV vận hành:",
-          "/addctv @user1 @user2 | /delctv @user1",
           "💡 Cú pháp thêm CTV trực theo ca:",
           "/addctvca <sang|chieu|toi> @user1 @user2",
+          "💡 Cú pháp cài đặt danh xưng (anh/chị):",
+          "/settitle @username anh (hoặc chị)",
         ].join("\n")
       );
       return true;
@@ -333,6 +336,32 @@ export async function maybeHandleCoordinatorCommands(
       message.chat.id,
       "Ca không hợp lệ. Dùng: /đp sáng <user>, /đp chiều <user>, hoặc /đp tối <user>"
     );
+    return true;
+  }
+
+  // --- LỆNH /settitle (Cài đặt danh xưng anh/chị) ---
+  if (lower.startsWith("/settitle")) {
+    const rest = trimmed.slice("/settitle".length).trim();
+    const parts = rest.split(/\s+/);
+    const uname = parts[0]?.replace(/^@/, "").trim().toLowerCase();
+    const titleArg = stripDiacritics(parts[1] || "").toLowerCase();
+
+    if (uname && (titleArg === "anh" || titleArg === "chi" || titleArg === "chị")) {
+      const config = await loadMonitorConfig(supabase);
+      if (!config.userTitles) config.userTitles = {};
+      const resolvedTitle = titleArg.startsWith("chi") ? "chị" : "anh";
+      config.userTitles[uname] = resolvedTitle;
+      await saveMonitorConfig(supabase, config);
+      await telegram.sendMessage(
+        message.chat.id,
+        `✅ Đã lưu danh xưng cho @${uname}: **${resolvedTitle}**`
+      );
+    } else {
+      await telegram.sendMessage(
+        message.chat.id,
+        "⚠️ Sai cú pháp! Dùng: /settitle @username <anh|chị>"
+      );
+    }
     return true;
   }
 
@@ -502,7 +531,6 @@ export async function handleGroupQllMessage(
 
   // --- KIỂM TRA ĐIỀU KIỆN MỚI: CÓ THỎA MÃN KEY NHẬN DIỆN CASE KHÔNG? ---
   if (!isValidQllCaseMessage(text)) {
-    // Nếu không chứa mã lớp + dãy số hoặc từ khóa khẩn cấp -> Bỏ qua hoàn toàn, không đưa vào watch, không thả icon
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
     }
@@ -514,7 +542,6 @@ export async function handleGroupQllMessage(
   const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
   await sendReaction(message.chat.id, message.message_id, chosenEmoji);
 
-  // Thêm vào danh sách theo dõi 7 phút
   if (!watched.some((w) => w.messageId === message.message_id)) {
     watched.push({
       messageId: message.message_id,
@@ -528,9 +555,11 @@ export async function handleGroupQllMessage(
   // Nếu đồng thời có từ khóa khẩn cấp rõ ràng -> Tag điều phối viên ngay lập tức
   if (isUrgentQllMessage(text)) {
     const { username } = getActiveCoordinator(config);
+    const titles = config.userTitles || {};
+    const dpTitle = titles[username.toLowerCase()] || "anh/chị";
     await telegram.sendMessage(
       message.chat.id,
-      `@${username} Chị ơi, hỗ trợ case này ạ!`,
+      `Dạ ${dpTitle} @${username} ơi case này cần hỗ trợ ạ !`,
       message.message_id
     );
   }
@@ -554,6 +583,7 @@ export async function checkUnansweredMessages(
   const config = await loadMonitorConfig(supabase);
   const { username } = getActiveCoordinator(config, new Date(nowMs));
   const currentShift = getCurrentShiftVn(new Date(nowMs));
+  const titles = config.userTitles || {};
 
   let currentShiftCtv: string[] = [];
   if (currentShift.key === "sang") currentShiftCtv = config.ctvSang || [];
@@ -571,18 +601,20 @@ export async function checkUnansweredMessages(
     }
 
     if (ageMs >= SLA_TIMEOUT_MS) {
-      // Quá 7 phút không ai thả tim/nhận -> Tag random CTV ca đó hoặc điều phối
+      // Quá 7 phút không ai thả tim/nhận -> Tag đúng anh/chị CTV ca đó hoặc điều phối
       if (currentShiftCtv.length > 0) {
         const randomCtv = currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
+        const title = titles[randomCtv.toLowerCase()] || "anh/chị";
         await telegram.sendMessage(
           item.chatId,
-          `⏰ @${randomCtv} Case này ở ca ${currentShift.label} đã quá 7 phút chưa thấy thả tim/xử lý, bạn kiểm tra hỗ trợ gấp nhé!`,
+          `Dạ ${title} @${randomCtv} ơi case này cần hỗ trợ ạ !`,
           item.messageId
         );
       } else {
+        const dpTitle = titles[username.toLowerCase()] || "anh/chị";
         await telegram.sendMessage(
           item.chatId,
-          `@${username} Chị ơi, hỗ trợ case này ạ!`,
+          `Dạ ${dpTitle} @${username} ơi case này cần hỗ trợ ạ !`,
           item.messageId
         );
       }
