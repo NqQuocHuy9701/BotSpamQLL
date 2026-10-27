@@ -348,7 +348,6 @@ export async function handleGroupReaction(
   }
 }
 
-// Xử lý tin nhắn trong nhóm QLL (Bắt từ khóa gấp hoặc đưa vào hàng đợi 5 phút)
 export async function handleGroupQllMessage(
   message: TelegramMessage,
   telegram: TelegramClient,
@@ -359,11 +358,6 @@ export async function handleGroupQllMessage(
   if (message.chat.id !== targetChatId) return;
   if (!message.from || message.from.is_bot) return;
   if (message.new_chat_members && message.new_chat_members.length > 0) return;
-
-  // --- THẢ ICON NGẪU NHIÊN LINH ĐỘNG ---
-  const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
-  const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
-  await sendReaction(message.chat.id, message.message_id, chosenEmoji);
 
   const config = await loadMonitorConfig(supabase);
   const watched = await loadWatchedMessages(supabase);
@@ -397,21 +391,28 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // RULE 1: Từ khóa khẩn cấp -> Tag ngay với mẫu câu yêu cầu
+  // RULE 1: Chỉ khi có từ khóa khẩn cấp (gấp, duyệt, khẩn...) mới thả icon và tag điều phối viên
   if (isUrgentQllMessage(text)) {
+    // --- Thả icon ngẫu nhiên khi bắt được đúng từ khóa ---
+    const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
+    const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
+    await sendReaction(message.chat.id, message.message_id, chosenEmoji);
+
+    // --- Tag điều phối viên ---
     const { username } = getActiveCoordinator(config);
     await telegram.sendMessage(
       message.chat.id,
       `@${username} Chị ơi, hỗ trợ case này ạ!`,
       message.message_id
     );
+
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
     }
     return;
   }
 
-  // TẮT HOÀN TOÀN TÍNH NĂNG CHỜ 5 PHÚT (Bỏ qua Rule 2)
+  // Các tin nhắn bình thường khác sẽ bỏ qua hoàn toàn
   return;
 }
 
