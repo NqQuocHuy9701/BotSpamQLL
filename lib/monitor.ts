@@ -18,7 +18,7 @@ export interface ShiftCoordinatorConfig {
 
 const CONFIG_ROW_ID = -9001;
 const WATCH_ROW_ID = -9002;
-export const SLA_TIMEOUT_MS = 5 * 60 * 1000; // 7 phút theo dõi
+export const SLA_TIMEOUT_MS = 5 * 60 * 1000; // 5 phút theo dõi
 const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 export interface WatchedGroupMessage {
@@ -263,7 +263,7 @@ export async function maybeHandleCoordinatorCommands(
           "",
           `👥 Danh sách CTV Vận hành (${config.ctvUsernames.length}): ${ctvList}`,
           "",
-          "🧑‍💻 Danh sách CTV trực theo ca (Tag sau 7p):",
+          "🧑‍💻 Danh sách CTV trực theo ca (Tag sau 5p):",
           `• Ca Sáng: ${ctvSangList}`,
           `• Ca Chiều: ${ctvChieuList}`,
           `• Ca Tối: ${ctvToiList}`,
@@ -537,7 +537,7 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // Thỏa mãn điều kiện case -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi 7 phút
+  // Thỏa mãn điều kiện case -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi 5 phút
   const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
   const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
   await sendReaction(message.chat.id, message.message_id, chosenEmoji);
@@ -569,7 +569,7 @@ export async function handleGroupQllMessage(
   }
 }
 
-// Hàm kiểm tra SLA 7 phút (Chạy trong Cron) - Quá 7 phút không ai thả tim/reply sẽ tag random CTV trong ca
+// Hàm kiểm tra SLA 5 phút (Chạy trong Cron) - Quá 5 phút không ai thả tim/reply sẽ tag random CTV trong ca
 export async function checkUnansweredMessages(
   telegram: TelegramClient,
   supabase: SupabaseClient,
@@ -601,7 +601,7 @@ export async function checkUnansweredMessages(
     }
 
     if (ageMs >= SLA_TIMEOUT_MS) {
-      // Quá 7 phút không ai thả tim/nhận -> Tag đúng anh/chị CTV ca đó hoặc điều phối
+      // Quá 5 phút không ai thả tim/nhận -> Tag đúng anh/chị CTV ca đó hoặc điều phối
       if (currentShiftCtv.length > 0) {
         const randomCtv = currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
         const title = titles[randomCtv.toLowerCase()] || "anh/chị";
