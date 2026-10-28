@@ -88,8 +88,7 @@ export function isValidQllCaseMessage(text: string): boolean {
     return true;
   }
 
-  // 2. Kiểm tra điều kiện kết hợp: Phải chứa ít nhất 1 dãy số (từ 3 chữ số trở lên) 
-  // VÀ chứa ít nhất một tiền tố mã lớp (TOAN, MOET, KHTN, TCLC, TA, TVTTH,...)
+  // 2. Điều kiện HOẶC: Chứa ít nhất 1 dãy số (từ 3 chữ số trở lên) HOẶC chứa tiền tố mã lớp
   const hasMin3Digits = /\d{3,}/.test(trimmed);
   
   // Danh sách các tiền tố mã lớp yêu cầu (không phân biệt hoa thường)
@@ -98,9 +97,10 @@ export function isValidQllCaseMessage(text: string): boolean {
   
   const hasClassPrefix = classPrefixes.some((prefix) => lowerText.includes(prefix));
 
-  // Phải thỏa mãn đồng thời: Có dãy số (>=3 số) VÀ có chứa mã lớp nhận diện
-  return hasMin3Digits && hasClassPrefix;
+  // Chỉ cần thõa mãn 1 trong 2 điều kiện là nhận diện case ngay lập tức
+  return hasMin3Digits || hasClassPrefix;
 }
+
 
 // Quy định khung giờ ca làm việc chuẩn:
 // Sáng: 8g - 12g (gánh đến trước 13h30)
