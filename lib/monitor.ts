@@ -537,7 +537,7 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // Thỏa mãn điều kiện case -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi 5 phút
+  // Thỏa mãn điều kiện case -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi SLA
   const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
   const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
   await sendReaction(message.chat.id, message.message_id, chosenEmoji);
