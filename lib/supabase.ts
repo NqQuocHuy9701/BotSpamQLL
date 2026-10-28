@@ -468,3 +468,28 @@ export async function upsertUser(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+// Thêm case mới khi phát sinh
+export async function insertQllCase(client: SupabaseClient, record: { message_id: number, content: string, sender_name: string, shift_name: string }) {
+  await client.from("qll_tracking").insert(record);
+}
+
+// Đánh dấu đã xử lý khi có reply/reaction
+export async function markCaseHandled(client: SupabaseClient, messageId: number) {
+  await client.from("qll_tracking").update({ handled: true }).eq("message_id", messageId);
+}
+
+// Lấy danh sách miss và đánh dấu đã báo cáo
+export async function getAndMarkMissedCases(client: SupabaseClient) {
+  const { data } = await client.from("qll_tracking")
+    .select("*")
+    .eq("handled", false)
+    .eq("reported", false)
+    .gte("created_at", new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString());
+  
+  if (data && data.length > 0) {
+    const ids = data.map((c: any) => c.message_id);
+    await client.from("qll_tracking").update({ reported: true }).in("message_id", ids);
+  }
+  return data || [];
+}

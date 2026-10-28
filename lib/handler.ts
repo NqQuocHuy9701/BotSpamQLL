@@ -23,6 +23,8 @@ import {
   loadPendingBatch,
   savePendingBatch,
   upsertUser,
+  insertQllCase,
+  markCaseHandled,
 } from "./supabase.js";
 import {
   handleGroupQllMessage,
@@ -140,12 +142,30 @@ export async function handleUpdate(
       deps.supabase,
       SPAMTEST_TARGET_CHAT_ID
     );
+    // [THÊM MỚI] Đánh dấu case đã hoàn thành cho báo cáo miss cuối ca
+    await markCaseHandled(deps.supabase, update.message_reaction.message_id);
     return;
   }
 
   const message = update.message;
   if (!message) {
     return;
+  }
+
+  // [THÊM MỚI] Xử lý Reply -> Đánh dấu tin nhắn gốc đã được phản hồi (chốt case cuối ca)
+  if (message.reply_to_message) {
+    await markCaseHandled(deps.supabase, message.reply_to_message.message_id);
+  }
+
+  // [THÊM MỚI] Quét case QLL mới để lưu vào bảng qll_tracking báo cáo cuối ca
+  const text = message.text ?? "";
+  if (isQllCase(text)) {
+    await insertQllCase(deps.supabase, {
+      message_id: message.message_id,
+      content: text,
+      sender_name: message.from?.first_name || message.from?.username || "QLL",
+      shift_name: getCurrentShift()
+    });
   }
 
   // 1. Passive user collection runs on EVERY group update, regardless of the
@@ -781,4 +801,22 @@ async function relay(
       buildLogRecord(message, STATUS_DELETION_FAILURE)
     );
   }
+}
+
+function getCurrentShift(): string {
+  const vnTime = new Date(new Date().getTime() + 7 * 60 * 60 * 1000);
+  const hour = vnTime.getUTCHours();
+  const minute = vnTime.getUTCMinutes();
+  const time = hour + minute / 60;
+
+  if (time >= 8 && time <= 12) return "Sáng";
+  if (time >= 13.5 && time <= 17) return "Chiều";
+  if (time >= 17.5 && time <= 21.5) return "Tối";
+  return "Ngoài ca";
+}
+
+function isQllCase(text: string): boolean {
+  const hasNumber = /\d{3,}/.test(text); 
+  const hasClassCode = /(TOAN|MOET|KHTN|TCLC|TA|TVTTH)/i.test(text); 
+  return hasNumber || hasClassCode;
 }

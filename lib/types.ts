@@ -48,10 +48,15 @@ export interface TelegramMessageReaction {
   new_reaction?: unknown[];
 }
 
+export interface TelegramMessageReaction {
+  chat: TelegramChat;
+  message_id: number;
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
-  message_reaction?: TelegramMessageReaction; // <-- Bổ sung dòng này
+  message_reaction?: TelegramMessageReaction;
 }
 
 // The three enumerated glossary statuses — Vietnamese strings kept exact.
