@@ -468,7 +468,7 @@ export async function handleGroupReaction(
   targetChatId: number
 ): Promise<void> {
   if (reaction.chat.id !== targetChatId) return;
-  if (!Array.isArray(reaction.new_reaction) || reaction.new_reaction.length === 0) {
+  if (!Array.isArray(reaction.new_reaction)) {
     return;
   }
   const watched = await loadWatchedMessages(supabase);
@@ -489,7 +489,6 @@ export async function handleGroupQllMessage(
   if (!message.from || message.from.is_bot) return;
   if (message.new_chat_members && message.new_chat_members.length > 0) return;
 
-  const config = await loadMonitorConfig(supabase);
   const watched = await loadWatchedMessages(supabase);
   let watchedChanged = false;
 
@@ -503,12 +502,15 @@ export async function handleGroupQllMessage(
     }
   }
 
+  // --- TẢI CONFIG TRƯỚC KHI SỬ DỤNG ---
+  const config = await loadMonitorConfig(supabase);
+
   // --- LỚP 1: KIỂM TRA VÀ LOẠI BỎ HOÀN TOÀN TIN NHẮN CỦA CTV HOẶC ADMIN ---
   const senderUname = (message.from.username ?? "").trim().toLowerCase();
   const isAllCtvShift =
-    (config.ctvSang && config.ctvSang.includes(senderUname)) ||
-    (config.ctvChieu && config.ctvChieu.includes(senderUname)) ||
-    (config.ctvToi && config.ctvToi.includes(senderUname));
+    (config?.ctvSang && config.ctvSang.includes(senderUname)) ||
+    (config?.ctvChieu && config.ctvChieu.includes(senderUname)) ||
+    (config?.ctvToi && config.ctvToi.includes(senderUname));
 
   const isCtvOrAdmin =
     adminIds.includes(message.from.id) ||
@@ -518,7 +520,7 @@ export async function handleGroupQllMessage(
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
     }
-    return; // Dừng lại ngay, không đưa tin nhắn của CTV vào hàng đợi SLA
+    return; 
   }
 
   const text = (message.text ?? message.caption ?? "").trim();
@@ -528,7 +530,6 @@ export async function handleGroupQllMessage(
   }
 
   // --- LỚP 2: KIỂM TRA ĐIỀU KIỆN NHẬN DIỆN CASE QLL CHUẨN XÁC ---
-  // (Chứa từ 3 số trở lên HOẶC chứa các tiền tố mã lớp toan, moet, khtn, tclc, ta, tvtth)
   if (!isValidQllCaseMessage(text)) {
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
@@ -536,22 +537,18 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // Thỏa mãn điều kiện case chuẩn QLL -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi SLA
+  // Thỏa mãn điều kiện case chuẩn QLL -> Tiến hành thả icon ngẫu nhiên
   const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
   const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
+  
+  // 1. Gọi API thả cảm xúc lên Telegram
   await sendReaction(message.chat.id, message.message_id, chosenEmoji);
 
-  if (!watched.some((w) => w.messageId === message.message_id)) {
-    watched.push({
-      messageId: message.message_id,
-      chatId: message.chat.id,
-      senderId: message.from.id,
-      createdAtMs: Date.now(),
-    });
-    watchedChanged = true;
-  }
+  // 2. QUAN TRỌNG: Vì bot tự thả tim/icon ở trên (và Telegram KHÔNG bắn sự kiện message_reaction ngược lại cho bot),
+  // nên ta TUYỆT ĐỐI KHÔNG PUSH message_id này vào mảng `watched`. 
+  // Bằng cách này, tin nhắn do bot tiếp nhận và thả tim sẽ được coi như đã xử lý ngay lập tức, 
+  // KHÔNG BAO GIỜ bị đưa vào hàng đợi SLA 5 phút và KHÔNG BAO GIỜ bị tag lại nữa!
 
-  // Nếu đồng thời có từ khóa khẩn cấp rõ ràng -> Tag điều phối viên ngay lập tức
   if (isUrgentQllMessage(text)) {
     const { username } = getActiveCoordinator(config);
     const titles = config.userTitles || {};
@@ -659,7 +656,6 @@ export async function updateConfig(
     );
 }
  
-
 export async function sendReaction(
   chatId: number,
   messageId: number,
