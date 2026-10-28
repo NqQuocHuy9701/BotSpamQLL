@@ -531,7 +531,8 @@ export async function handleGroupQllMessage(
   // --- TẢI CONFIG TRƯỚC KHI SỬ DỤNG ---
   const config = await loadMonitorConfig(supabase);
 
-  const senderUname = (message.from.username ?? "").trim().toLowerCase();
+const senderUname = (message.from.username ?? "").trim().toLowerCase();
+  
   const isAllCtvShift =
     (config?.ctvSang && config.ctvSang.includes(senderUname)) ||
     (config?.ctvChieu && config.ctvChieu.includes(senderUname)) ||
@@ -544,7 +545,6 @@ export async function handleGroupQllMessage(
   const text = (message.text ?? message.caption ?? "").trim();
   const lowerText = text.toLowerCase();
 
-  // --- LỚP 1.5: CHẶN TỪ KHÓA TÀI KHOẢN (Bảo vệ khi CTV không có username) ---
   const isCredentialReply = 
     lowerText.includes("acc:") || 
     lowerText.includes("pass:") || 
@@ -554,11 +554,9 @@ export async function handleGroupQllMessage(
     lowerText.includes("e gửi") || 
     lowerText.includes("gửi lại tk");
 
-  // --- LỚP 1: KIỂM TRA VÀ LOẠI BỎ HOÀN TOÀN TIN NHẮN CỦA CTV HOẶC ADMIN HOẶC TIN TRẢ TÀI KHOẢN ---
+  // Chốt chặn 1: Nếu là CTV hoặc tin nhắn có dấu hiệu trả tài khoản -> Thoát ngay lập tức
   if (isCtvOrAdmin || isCredentialReply) {
-    if (watchedChanged) {
-      await saveWatchedMessages(supabase, watched);
-    }
+    if (watchedChanged) await saveWatchedMessages(supabase, watched);
     return; 
   }
 
@@ -567,16 +565,13 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // --- LỚP 2: KIỂM TRA ĐIỀU KIỆN NHẬN DIỆN CASE QLL CHUẨN XÁC ---
+  // --- LỚP 2: LỌC RULE QLL (Yêu cầu chứa >=3 số hoặc mã lớp) ---
   if (!isValidQllCaseMessage(text)) {
-    if (watchedChanged) {
-      await saveWatchedMessages(supabase, watched);
-    }
-    return;
+    if (watchedChanged) await saveWatchedMessages(supabase, watched);
+    return; // Chốt chặn 2: Sai format QLL -> Thoát ngay lập tức
   }
 
-  // --- LƯU DATABASE BÁO CÁO CUỐI CA ---
-  // (Chỉ chạy đến đây khi chắc chắn 100% là QLL case hợp lệ)
+  // --- LỚP 3: CHỈ CÒN LẠI TIN NHẮN CHUẨN CỦA QLL -> LƯU DATABASE ---
   const senderName = message.from.first_name 
     ? `${message.from.first_name} ${message.from.last_name || ""}`.trim() 
     : senderUname || "QLL";

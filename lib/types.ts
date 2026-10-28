@@ -38,15 +38,6 @@ export interface TelegramMessage {
   new_chat_members?: TelegramUser[];
 }
 
-// Thêm đoạn này vào lib/types.ts
-export interface TelegramMessageReaction {
-  chat: TelegramChat;
-  message_id: number;
-  user?: TelegramUser;
-  date: number;
-  old_reaction?: unknown[];
-  new_reaction?: unknown[];
-}
 
 export interface TelegramMessageReaction {
   chat: TelegramChat;
@@ -114,6 +105,23 @@ export interface SendQueueRow {
   // select still satisfies the type.
   send_after?: string | null;
 }
+// Dán thêm interface này vào trên TelegramUpdate
+export interface TelegramMessageReaction {
+  chat: TelegramChat;
+  message_id: number;
+  user?: TelegramUser;
+  actor_chat?: TelegramChat;
+  date: number;
+  old_reaction: any[];
+  new_reaction: any[];
+}
+
+// Cập nhật lại TelegramUpdate
+export interface TelegramUpdate {
+  update_id: number;
+  message?: TelegramMessage;
+  message_reaction?: TelegramMessageReaction; // Bổ sung dòng này
+}
 
 export interface LogRecord {
   created_at: string; // ISO UTC
@@ -126,3 +134,5 @@ export interface LogRecord {
   // audit markers (delivery-failure / deletion-failure) on the error paths.
   status: LogStatus | string;
 }
+
+
