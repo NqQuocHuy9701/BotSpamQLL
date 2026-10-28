@@ -1,6 +1,6 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
-
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { loadConfig } from "./config.js";
 import {
   buildGroupedAnnouncement,
   buildSummary,
@@ -159,6 +159,35 @@ export async function handleUpdate(
 
   // [THÊM MỚI] Quét case QLL mới để lưu vào bảng qll_tracking báo cáo cuối ca
   const text = message.text ?? "";
+  // [THÊM MỚI] Kiểm tra tag đích danh: Bot thả tim và Forward y nguyên sang nhóm Xếp lớp (-1002493556435)
+  if (/@OP_LinhDK6|@OP_LinhDTT1/i.test(text)) {
+    const TARGET_GROUP_ID = -1002493556435; // Nhóm đích (Xếp lớp)
+    const CURRENT_GROUP_ID = message.chat.id; // Tự động lấy ID nhóm hiện tại
+    const config = loadConfig();
+
+    // 1. Bot tự động thả tim (reaction) vào tin nhắn gốc
+    fetch(`https://api.telegram.org/bot${config.botToken}/setMessageReaction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CURRENT_GROUP_ID,
+        message_id: message.message_id,
+        reaction: [{ type: "emoji", emoji: "❤️" }]
+      })
+    }).catch(console.error);
+
+    // 2. Forward y nguyên tin nhắn sang nhóm đích
+    fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TARGET_GROUP_ID,
+        from_chat_id: CURRENT_GROUP_ID,
+        message_id: message.message_id
+      })
+    }).catch(console.error);
+  }
+  
   if (isQllCase(text)) {
     await insertQllCase(deps.supabase, {
       message_id: message.message_id,
