@@ -478,6 +478,32 @@ export async function handleGroupReaction(
   }
 }
 
+// --- CÁC HÀM PHỤ TRỢ XỬ LÝ DATABASE & REACTION ---
+
+export async function insertQllCase(
+  client: SupabaseClient,
+  record: { message_id: number; chat_id: number; sender_id: number; sender_name: string; content: string }
+) {
+  if (!client || typeof client.from !== "function") return;
+  try {
+    await client.from("qll_tracking").upsert(
+      { ...record, handled: false, reported: false },
+      { onConflict: "message_id" }
+    );
+  } catch (e) {
+    console.error("Lỗi insertQllCase:", e);
+  }
+}
+
+export async function markCaseHandled(client: SupabaseClient, messageId: number) {
+  if (!client || typeof client.from !== "function") return;
+  try {
+    await client.from("qll_tracking").update({ handled: true }).eq("message_id", messageId);
+  } catch (e) {
+    console.error("Lỗi markCaseHandled:", e);
+  }
+}
+
 export async function handleGroupQllMessage(
   message: TelegramMessage,
   telegram: TelegramClient,
@@ -505,7 +531,6 @@ export async function handleGroupQllMessage(
   // --- TẢI CONFIG TRƯỚC KHI SỬ DỤNG ---
   const config = await loadMonitorConfig(supabase);
 
-  // --- LỚP 1: KIỂM TRA VÀ LOẠI BỎ HOÀN TOÀN TIN NHẮN CỦA CTV HOẶC ADMIN ---
   const senderUname = (message.from.username ?? "").trim().toLowerCase();
   const isAllCtvShift =
     (config?.ctvSang && config.ctvSang.includes(senderUname)) ||
@@ -516,14 +541,27 @@ export async function handleGroupQllMessage(
     adminIds.includes(message.from.id) ||
     (senderUname !== "" && (config.ctvUsernames.includes(senderUname) || isAllCtvShift));
 
-  if (isCtvOrAdmin) {
+  const text = (message.text ?? message.caption ?? "").trim();
+  const lowerText = text.toLowerCase();
+
+  // --- LỚP 1.5: CHẶN TỪ KHÓA TÀI KHOẢN (Bảo vệ khi CTV không có username) ---
+  const isCredentialReply = 
+    lowerText.includes("acc:") || 
+    lowerText.includes("pass:") || 
+    lowerText.includes("mk:") || 
+    lowerText.includes("tk:") || 
+    lowerText.includes("tk gia sư") ||
+    lowerText.includes("e gửi") || 
+    lowerText.includes("gửi lại tk");
+
+  // --- LỚP 1: KIỂM TRA VÀ LOẠI BỎ HOÀN TOÀN TIN NHẮN CỦA CTV HOẶC ADMIN HOẶC TIN TRẢ TÀI KHOẢN ---
+  if (isCtvOrAdmin || isCredentialReply) {
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
     }
     return; 
   }
 
-  const text = (message.text ?? message.caption ?? "").trim();
   if (text === "") {
     if (watchedChanged) await saveWatchedMessages(supabase, watched);
     return;
@@ -536,6 +574,20 @@ export async function handleGroupQllMessage(
     }
     return;
   }
+
+  // --- LƯU DATABASE BÁO CÁO CUỐI CA ---
+  // (Chỉ chạy đến đây khi chắc chắn 100% là QLL case hợp lệ)
+  const senderName = message.from.first_name 
+    ? `${message.from.first_name} ${message.from.last_name || ""}`.trim() 
+    : senderUname || "QLL";
+    
+  await insertQllCase(supabase, {
+    message_id: message.message_id,
+    chat_id: message.chat.id,
+    sender_id: message.from.id,
+    sender_name: senderName,
+    content: text,
+  });
 
   // Thỏa mãn điều kiện case chuẩn QLL -> Tiến hành thả icon ngẫu nhiên
   const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
