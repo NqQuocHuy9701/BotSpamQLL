@@ -77,7 +77,10 @@ const SPAMTEST_COMMAND = "/spam";
 // Add more telegram_ids here as other managers are authorized.
 const SPAMTEST_ADMIN_IDS: number[] = [
   6532155675, // Quốc Huy 🐾 (OP_HuyNQ5)
+  6410818714, // Thêm Admin mới vào đây LinhPT9
 ];
+
+
 
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
