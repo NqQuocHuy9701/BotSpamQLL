@@ -83,21 +83,18 @@ export function isValidQllCaseMessage(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed === "") return false;
 
-  // 1. Kiểm tra có chứa từ khóa khẩn cấp sẵn có không
+  // 1. Kiểm tra từ khóa khẩn cấp
   if (isUrgentQllMessage(trimmed)) {
     return true;
   }
 
-  // 2. Điều kiện HOẶC: Chứa ít nhất 1 dãy số (từ 3 chữ số trở lên) HOẶC chứa tiền tố mã lớp
+  // 2. Điều kiện HOẶC: Chứa từ 3 chữ số trở lên HOẶC chứa tiền tố mã lớp
   const hasMin3Digits = /\d{3,}/.test(trimmed);
   
-  // Danh sách các tiền tố mã lớp yêu cầu (không phân biệt hoa thường)
   const classPrefixes = ["toan", "moet", "khtn", "tclc", "ta", "tvtth"];
   const lowerText = stripDiacritics(trimmed);
-  
   const hasClassPrefix = classPrefixes.some((prefix) => lowerText.includes(prefix));
 
-  // Chỉ cần thõa mãn 1 trong 2 điều kiện là nhận diện case ngay lập tức
   return hasMin3Digits || hasClassPrefix;
 }
 
@@ -506,6 +503,7 @@ export async function handleGroupQllMessage(
     }
   }
 
+  // --- LỚP 1: KIỂM TRA VÀ LOẠI BỎ HOÀN TOÀN TIN NHẮN CỦA CTV HOẶC ADMIN ---
   const senderUname = (message.from.username ?? "").trim().toLowerCase();
   const isAllCtvShift =
     (config.ctvSang && config.ctvSang.includes(senderUname)) ||
@@ -520,7 +518,7 @@ export async function handleGroupQllMessage(
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
     }
-    return;
+    return; // Dừng lại ngay, không đưa tin nhắn của CTV vào hàng đợi SLA
   }
 
   const text = (message.text ?? message.caption ?? "").trim();
@@ -529,7 +527,8 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // --- KIỂM TRA ĐIỀU KIỆN MỚI: CÓ THỎA MÃN KEY NHẬN DIỆN CASE KHÔNG? ---
+  // --- LỚP 2: KIỂM TRA ĐIỀU KIỆN NHẬN DIỆN CASE QLL CHUẨN XÁC ---
+  // (Chứa từ 3 số trở lên HOẶC chứa các tiền tố mã lớp toan, moet, khtn, tclc, ta, tvtth)
   if (!isValidQllCaseMessage(text)) {
     if (watchedChanged) {
       await saveWatchedMessages(supabase, watched);
@@ -537,7 +536,7 @@ export async function handleGroupQllMessage(
     return;
   }
 
-  // Thỏa mãn điều kiện case -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi SLA
+  // Thỏa mãn điều kiện case chuẩn QLL -> Tiến hành thả icon ngẫu nhiên & đưa vào hàng đợi theo dõi SLA
   const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
   const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
   await sendReaction(message.chat.id, message.message_id, chosenEmoji);
