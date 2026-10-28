@@ -18,7 +18,7 @@ export interface ShiftCoordinatorConfig {
 
 const CONFIG_ROW_ID = -9001;
 const WATCH_ROW_ID = -9002;
-export const SLA_TIMEOUT_MS = 7 * 60 * 1000; // 7 phút theo dõi
+export const SLA_TIMEOUT_MS = 5 * 60 * 1000; // 7 phút theo dõi
 const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 export interface WatchedGroupMessage {
