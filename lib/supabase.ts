@@ -471,15 +471,17 @@ export async function upsertUser(
 
 
 
-// Thêm case mới khi phát sinh
-// Thêm case mới khi phát sinh - Ép cứng chat_id luôn thuộc nhóm QLL chuẩn
+// Sửa lại hàm insertQllCase trong file lib/supabase.ts thành thế này:
 export async function insertQllCase(
   client: SupabaseClient, 
   record: { message_id: number; content: string; sender_name: string; shift_name: string; chat_id?: number }
 ): Promise<void> {
   await client.from("qll_tracking").insert({
-    ...record,
-    chat_id: -1002273179613, // 👈 Ép cứng ID chuẩn nhóm QLL - Support ở đây để không bao giờ bị lệch nhóm nữa
+    message_id: record.message_id,
+    content: record.content,
+    sender_name: record.sender_name,
+    shift_name: record.shift_name,
+    chat_id: -1002273179613, // 👈 Ép cứng chuẩn nhóm QLL Support ở đây
     handled: false
   });
 }
