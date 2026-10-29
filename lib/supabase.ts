@@ -469,9 +469,19 @@ export async function upsertUser(
   }
 }
 
+
+
 // Thêm case mới khi phát sinh
-export async function insertQllCase(client: SupabaseClient, record: { message_id: number, content: string, sender_name: string, shift_name: string }) {
-  await client.from("qll_tracking").insert(record);
+// Thêm case mới khi phát sinh - Ép cứng chat_id luôn thuộc nhóm QLL chuẩn
+export async function insertQllCase(
+  client: SupabaseClient, 
+  record: { message_id: number; content: string; sender_name: string; shift_name: string; chat_id?: number }
+): Promise<void> {
+  await client.from("qll_tracking").insert({
+    ...record,
+    chat_id: -1002273179613, // 👈 Ép cứng ID chuẩn nhóm QLL - Support ở đây để không bao giờ bị lệch nhóm nữa
+    handled: false
+  });
 }
 
 export async function markCaseHandled(
