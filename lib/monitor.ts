@@ -558,14 +558,20 @@ export async function handleGroupQllMessage(
     return; 
   }
   
-  const isAllCtvShift =
-    (config?.ctvSang && config.ctvSang.includes(senderUname)) ||
-    (config?.ctvChieu && config.ctvChieu.includes(senderUname)) ||
-    (config?.ctvToi && config.ctvToi.includes(senderUname));
+// Chuẩn hóa: Gọt sạch dấu "@" và đưa về chữ thường cho toàn bộ danh sách CTV lấy từ DB
+const listCtv = (config.ctvUsernames || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+const listSang = (config?.ctvSang || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+const listChieu = (config?.ctvChieu || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+const listToi = (config?.ctvToi || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
 
-  const isCtvOrAdmin =
-    adminIds.includes(message.from.id) ||
-    (senderUname !== "" && (config.ctvUsernames.includes(senderUname) || isAllCtvShift));
+const isAllCtvShift =
+  listSang.includes(senderUname) ||
+  listChieu.includes(senderUname) ||
+  listToi.includes(senderUname);
+
+const isCtvOrAdmin =
+  adminIds.includes(message.from.id) ||
+  (senderUname !== "" && (listCtv.includes(senderUname) || isAllCtvShift));
 
   // CHỐT CHẶN 2: Tin nhắn của Admin/CTV ca trực cũng bỏ qua
   if (isCtvOrAdmin) {

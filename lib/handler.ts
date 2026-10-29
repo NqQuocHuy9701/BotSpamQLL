@@ -88,6 +88,9 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
 
+// --- TÍNH NĂNG FW VẮNG: ID Nhóm gốc hỗ trợ kĩ thuật ---
+const SOURCE_ABSENT_GROUP_ID = -1002458492731; // Nhóm Gốc Hỗ Trợ Kỹ Thuật
+
 // Batch-announcement commands (admin private DM only). On /ok the confirmed
 // batch is enqueued into send_queue and drip-sent later by the Vercel cron
 // (see api/cron.ts) rather than posted synchronously here.
@@ -201,6 +204,21 @@ export async function handleUpdate(
   // 1. Passive user collection runs on EVERY group update, regardless of the
   // relay switch: capture the sender and any newly-joined members.
   await collectUsers(message, deps);
+
+  // ==========================================
+  // TÍNH NĂNG MỚI THÊM: FW TIN NHẮN CHỨA TỪ "VẮNG"
+  // ==========================================
+  if (message.chat.id === SOURCE_ABSENT_GROUP_ID && message.text) {
+    const lowerText = message.text.toLowerCase();
+    if (lowerText.includes("vắng")) {
+      const senderName = message.from ? displayName(message.from) : "Unknown";
+      const fwText = `⚠️ **Báo vắng từ Nhóm Hỗ Trợ Kỹ Thuật:**\n👤 Người gửi: ${senderName}\n💬 Nội dung:\n${message.text}`;
+      
+      await deps.telegram.sendMessage(SPAMTEST_TARGET_CHAT_ID, fwText);
+      return; 
+    }
+  }
+  // ==========================================
 
   // 2. Theo dõi tin nhắn trong nhóm QLL (Rule 1: Bắt từ khóa khẩn cấp tag ngay | Rule 2: Đưa vào hàng đợi 5 phút)
   await handleGroupQllMessage(
