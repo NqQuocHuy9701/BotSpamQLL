@@ -463,17 +463,24 @@ export async function maybeHandleCoordinatorCommands(
 
 // Bắt sự kiện thả Icon (Reaction) trong nhóm để giải phóng SLA
 export async function handleGroupReaction(
-  reaction: any, // Đổi sang any để xử lý JSON payload từ Telegram
+  reaction: any, 
   supabase: SupabaseClient,
   targetChatId: number
 ): Promise<void> {
-  if (reaction.chat.id !== targetChatId) return;
+  // Lấy chat_id linh hoạt từ payload reaction để tránh trường hợp Telegram trả về thiếu cấu trúc chat
+  const chatId = reaction.chat?.id || reaction.message_chat_id || targetChatId;
+  if (targetChatId && chatId !== targetChatId) return;
+
   // Chỉ gỡ SLA khi có thao tác THÊM icon mới
   if (!Array.isArray(reaction.new_reaction) || reaction.new_reaction.length === 0) {
     return;
   }
+  
   const watched = await loadWatchedMessages(supabase);
+  
+  // So khớp chính xác message_id để xóa khỏi hàng đợi SLA
   const filtered = watched.filter((w) => w.messageId !== reaction.message_id);
+  
   if (filtered.length !== watched.length) {
     await saveWatchedMessages(supabase, filtered);
   }
