@@ -154,66 +154,71 @@ export async function handleUpdate(
     return;
   }
 
-  const message = update.message;
+const message = update.message;
   if (!message) {
     return;
   }
 
-  // CHỈ LẮNG NGHE VÀ XỬ LÝ DỮ LIỆU NẾU ĐÚNG TỪ NHÓM QLL (-1002273179613)
-  if (message.chat.id === SPAMTEST_TARGET_CHAT_ID) {
-    const text = message.text ?? "";
-
-    // 1. Xử lý Reply -> Đánh dấu tin nhắn gốc đã được phản hồi
-    if (message.reply_to_message) {
-      await markCaseHandled(deps.supabase, message.reply_to_message.message_id);
-    }
-
-    // 2. Kiểm tra tag đích danh: Bot thả tim và Forward y nguyên sang nhóm Xếp lớp (-1002493556435)
-    if (/@OP_LinhDK6|@OP_LinhDTT1/i.test(text)) {
-      const TARGET_GROUP_ID = -1002493556435; // Nhóm đích (Xếp lớp)
-      const CURRENT_GROUP_ID = message.chat.id;
-      const config = loadConfig();
-
-      fetch(`https://api.telegram.org/bot${config.botToken}/setMessageReaction`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: CURRENT_GROUP_ID,
-          message_id: message.message_id,
-          reaction: [{ type: "emoji", emoji: "❤️" }]
-        })
-      }).catch(console.error);
-
-      fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TARGET_GROUP_ID,
-          from_chat_id: CURRENT_GROUP_ID,
-          message_id: message.message_id
-        })
-      }).catch(console.error);
-    }
-    
-    // 3. Quét case QLL chuẩn xác để lưu vào bảng qll_tracking
-    if (isQllCase(text)) {
-      await insertQllCase(deps.supabase, {
-        message_id: message.message_id,
-        content: text,
-        sender_name: message.from?.first_name || message.from?.username || "QLL",
-        shift_name: getCurrentShift()
-      });
-    }
-
-    // 4. Theo dõi tin nhắn trong nhóm QLL (Rule 1 & Rule 2 cho SLA 5 phút)
-    await handleGroupQllMessage(
-      message,
-      deps.telegram,
-      deps.supabase,
-      SPAMTEST_TARGET_CHAT_ID,
-      SPAMTEST_ADMIN_IDS
-    );
+  // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép bot xử lý và tracking tin nhắn nếu đúng là nhóm QLL (-1002273179613)
+  // Mọi tin nhắn từ nhóm khác đi qua đây sẽ bị return ngay lập tức, không bao giờ lọt vào qll_tracking!
+  if (message.chat.id !== SPAMTEST_TARGET_CHAT_ID) {
+    // Nếu không phải nhóm QLL thì chỉ chạy các tính năng phụ (như gom user) rồi thoát luôn
+    await collectUsers(message, deps);
+    return;
   }
+
+  // --- TỪ ĐIỂM NÀY TRỞ XUỐNG LÀ DÀNH RIÊNG CHO ĐÚNG NHÓM QLL ---
+  const text = message.text ?? "";
+
+  // 1. Xử lý Reply -> Đánh dấu tin nhắn gốc đã được phản hồi
+  if (message.reply_to_message) {
+    await markCaseHandled(deps.supabase, message.reply_to_message.message_id);
+  }
+
+  // 2. Kiểm tra tag đích danh để forward nhóm Xếp lớp (-1002493556435)
+  if (/@OP_LinhDK6|@OP_LinhDTT1/i.test(text)) {
+    const TARGET_GROUP_ID = -1002493556435; 
+    const CURRENT_GROUP_ID = message.chat.id;
+    const config = loadConfig();
+
+    fetch(`https://api.telegram.org/bot${config.botToken}/setMessageReaction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CURRENT_GROUP_ID,
+        message_id: message.message_id,
+        reaction: [{ type: "emoji", emoji: "❤️" }]
+      })
+    }).catch(console.error);
+
+    fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TARGET_GROUP_ID,
+        from_chat_id: CURRENT_GROUP_ID,
+        message_id: message.message_id
+      })
+    }).catch(console.error);
+  }
+  
+  // 3. Quét và đẩy vào qll_tracking (Chắc chắn 100% chỉ thuộc nhóm -1002273179613)
+  if (isQllCase(text)) {
+    await insertQllCase(deps.supabase, {
+      message_id: message.message_id,
+      content: text,
+      sender_name: message.from?.first_name || message.from?.username || "QLL",
+      shift_name: getCurrentShift()
+    });
+  }
+
+  await handleGroupQllMessage(
+    message,
+    deps.telegram,
+    deps.supabase,
+    SPAMTEST_TARGET_CHAT_ID,
+    SPAMTEST_ADMIN_IDS
+  );
 
   // 5. Passive user collection chạy trên mọi update nhóm
   await collectUsers(message, deps);
