@@ -205,14 +205,34 @@ export async function handleUpdate(
   // relay switch: capture the sender and any newly-joined members.
   await collectUsers(message, deps);
 
-  // ==========================================
-  // TÍNH NĂNG MỚI THÊM: FW TIN NHẮN CHỨA TỪ "VẮNG"
+// ==========================================
+// ==========================================
+  // TÍNH NĂNG: BẮT TIN NHẮN CHỨA TỪ KHÓA "VẮNG" (linh hoạt viết hoa/thường, có dấu #)
   // ==========================================
   if (message.chat.id === SOURCE_ABSENT_GROUP_ID && message.text) {
-    const lowerText = message.text.toLowerCase();
+    const rawText = message.text;
+    const lowerText = rawText.toLowerCase();
+    
+    // Kiểm tra nếu nội dung chứa chữ "vắng" (bất kể #vắng, Vắng, #VẮNG, v.v.)
     if (lowerText.includes("vắng")) {
-      const senderName = message.from ? displayName(message.from) : "Unknown";
-      const fwText = `⚠️ **Báo vắng từ Nhóm Hỗ Trợ Kỹ Thuật:**\n👤 Người gửi: ${senderName}\n💬 Nội dung:\n${message.text}`;
+      // 1. Tự động bóc tách mã lớp từ nội dung tin nhắn
+      let subjectName = "Khác";
+      let classCodeFound = "";
+      
+      const classCodeMatch = rawText.match(/([A-ZÀ-Ỹa-zà-ỹ0-9_]+\.[0-9A-Za-z\.]+)/);
+      if (classCodeMatch) {
+        classCodeFound = classCodeMatch[1];
+        // Lấy 4 ký tự đầu tiên của mã lớp làm tên môn học (viết hoa)
+        subjectName = classCodeFound.substring(0, 4).toUpperCase();
+      }
+
+      // 2. Build lại form gọn gàng theo đúng yêu cầu
+      const fwText = [
+        `⚠️ **THÔNG BÁO BẮT VẮNG**`,
+        `📚 **Môn học:** ${subjectName}`,
+        classCodeFound ? `📋 **Mã lớp:** ${classCodeFound}` : "",
+        `💬 **Nội dung:** ${rawText}`
+      ].filter(Boolean).join("\n");
       
       await deps.telegram.sendMessage(SPAMTEST_TARGET_CHAT_ID, fwText);
       return; 
