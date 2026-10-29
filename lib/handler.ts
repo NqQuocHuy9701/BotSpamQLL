@@ -28,7 +28,6 @@ import {
 } from "./supabase.js";
 import {
   handleGroupQllMessage,
-  handleGroupReaction,
   maybeHandleCoordinatorCommands,
   updateConfig,
 } from "./monitor.js";
@@ -140,19 +139,20 @@ export async function handleUpdate(
   deps: Deps
 ): Promise<void> {
   // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
-// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
+// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL
   if (update.message_reaction) {
     const reaction = update.message_reaction;
+    // Lấy đúng message_id từ object reaction của Telegram
     const targetMessageId = reaction.message_id;
 
     if (targetMessageId) {
-      await handleGroupReaction(
-        reaction,
-        deps.supabase,
-        SPAMTEST_TARGET_CHAT_ID
-      );
-      // Đánh dấu case đã hoàn thành dựa trên message_id chuẩn xác
-      await markCaseHandled(deps.supabase, targetMessageId);
+      // Gọi lệnh update thẳng vào bảng qll_tracking đổi handled thành true
+      await deps.supabase
+        .from("qll_tracking")
+        .update({ handled: true })
+        .eq("message_id", targetMessageId);
+        
+      console.log(`✅ Đã thả reaction, set handled = true cho message_id: ${targetMessageId}`);
     }
     return;
   }
