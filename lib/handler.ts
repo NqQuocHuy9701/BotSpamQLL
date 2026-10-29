@@ -140,14 +140,20 @@ export async function handleUpdate(
   deps: Deps
 ): Promise<void> {
   // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
+// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
   if (update.message_reaction) {
-    await handleGroupReaction(
-      update.message_reaction,
-      deps.supabase,
-      SPAMTEST_TARGET_CHAT_ID
-    );
-    // [THÊM MỚI] Đánh dấu case đã hoàn thành cho báo cáo miss cuối ca
-    await markCaseHandled(deps.supabase, update.message_reaction.message_id);
+    const reaction = update.message_reaction;
+    const targetMessageId = reaction.message_id;
+
+    if (targetMessageId) {
+      await handleGroupReaction(
+        reaction,
+        deps.supabase,
+        SPAMTEST_TARGET_CHAT_ID
+      );
+      // Đánh dấu case đã hoàn thành dựa trên message_id chuẩn xác
+      await markCaseHandled(deps.supabase, targetMessageId);
+    }
     return;
   }
 
