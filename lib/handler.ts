@@ -227,12 +227,10 @@ export async function handleUpdate(
       }
 
       // 2. Build lại form gọn gàng theo đúng yêu cầu
-      const fwText = [
-        `⚠️ **THÔNG BÁO BẮT VẮNG**`,
-        `📚 **Môn học:** ${subjectName}`,
-        classCodeFound ? `📋 **Mã lớp:** ${classCodeFound}` : "",
-        `💬 **Nội dung:** ${rawText}`
-      ].filter(Boolean).join("\n");
+const fwText = [
+        `#${subjectName}`,
+        `Nội dung: ${rawText}`
+      ].join("\n");
       
       await deps.telegram.sendMessage(SPAMTEST_TARGET_CHAT_ID, fwText);
       return; 
