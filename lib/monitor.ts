@@ -1,7 +1,7 @@
 // lib/monitor.ts
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { TelegramClient } from "./telegram.js";
-import type { TelegramMessage, TelegramMessageReaction } from "./types.js";
+import type { TelegramMessage } from "./types.js";
 
 // --- CẤU HÌNH VÀ CA LÀM VIỆC ---
 export interface ShiftCoordinatorConfig {
@@ -463,12 +463,13 @@ export async function maybeHandleCoordinatorCommands(
 
 // Bắt sự kiện thả Icon (Reaction) trong nhóm để giải phóng SLA
 export async function handleGroupReaction(
-  reaction: TelegramMessageReaction,
+  reaction: any, // Đổi sang any để xử lý JSON payload từ Telegram
   supabase: SupabaseClient,
   targetChatId: number
 ): Promise<void> {
   if (reaction.chat.id !== targetChatId) return;
-  if (!Array.isArray(reaction.new_reaction)) {
+  // Chỉ gỡ SLA khi có thao tác THÊM icon mới
+  if (!Array.isArray(reaction.new_reaction) || reaction.new_reaction.length === 0) {
     return;
   }
   const watched = await loadWatchedMessages(supabase);
@@ -589,12 +590,6 @@ export async function handleGroupQllMessage(
     content: text,
   });
 
-  // Thỏa mãn điều kiện case chuẩn QLL -> Tiến hành thả icon ngẫu nhiên
-  const randomEmojis = ["👍", "🔥", "❤️", "👏", "👀", "🚀"];
-  const chosenEmoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
-  
-  // 1. Gọi API thả cảm xúc lên Telegram
-  await sendReaction(message.chat.id, message.message_id, chosenEmoji);
 
   // 2. PUSH VÀO MẢNG ĐỂ TÍNH SLA 5 PHÚT
   watched.push({
