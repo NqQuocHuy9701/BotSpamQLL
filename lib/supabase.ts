@@ -470,20 +470,27 @@ export async function upsertUser(
 }
 
 
-
-// Sửa lại hàm insertQllCase trong file lib/supabase.ts thành thế này:
+// Hàm insert case mới vào qll_tracking phục vụ SLA chuẩn xác
 export async function insertQllCase(
   client: SupabaseClient, 
   record: { message_id: number; content: string; sender_name: string; shift_name: string; chat_id?: number }
 ): Promise<void> {
-  await client.from("qll_tracking").insert({
-    message_id: record.message_id,
-    content: record.content,
-    sender_name: record.sender_name,
-    shift_name: record.shift_name,
-    chat_id: -1002273179613, // 👈 Ép cứng chuẩn nhóm QLL Support ở đây
-    handled: false
-  });
+  try {
+    const { error } = await client.from("qll_tracking").insert({
+      message_id: record.message_id,
+      content: record.content,
+      sender_name: record.sender_name,
+      shift_name: record.shift_name,
+      chat_id: -1002273179613, // Ép cứng chính xác nhóm QLL - Support
+      handled: false
+    });
+    
+    if (error) {
+      console.error("Lỗi insert qll_tracking:", error.message);
+    }
+  } catch (err) {
+    console.error("Lỗi ngoại lệ insertQllCase:", err);
+  }
 }
 
 export async function markCaseHandled(
