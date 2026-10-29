@@ -139,14 +139,11 @@ export async function handleUpdate(
   deps: Deps
 ): Promise<void> {
   // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
-// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL
   if (update.message_reaction) {
     const reaction = update.message_reaction;
-    // Lấy đúng message_id từ object reaction của Telegram
     const targetMessageId = reaction.message_id;
 
     if (targetMessageId) {
-      // Gọi lệnh update thẳng vào bảng qll_tracking đổi handled thành true
       await deps.supabase
         .from("qll_tracking")
         .update({ handled: true })
@@ -162,121 +159,84 @@ export async function handleUpdate(
     return;
   }
 
-  // [THÊM MỚI] Xử lý Reply -> Đánh dấu tin nhắn gốc đã được phản hồi (chốt case cuối ca)
-  if (message.reply_to_message) {
-    await markCaseHandled(deps.supabase, message.reply_to_message.message_id);
-  }
+  // CHỈ LẮNG NGHE VÀ XỬ LÝ DỮ LIỆU NẾU ĐÚNG TỪ NHÓM QLL (-1002273179613)
+  if (message.chat.id === SPAMTEST_TARGET_CHAT_ID) {
+    const text = message.text ?? "";
 
-  // [THÊM MỚI] Quét case QLL mới để lưu vào bảng qll_tracking báo cáo cuối ca
-  const text = message.text ?? "";
-  // [THÊM MỚI] Kiểm tra tag đích danh: Bot thả tim và Forward y nguyên sang nhóm Xếp lớp (-1002493556435)
-  if (/@OP_LinhDK6|@OP_LinhDTT1/i.test(text)) {
-    const TARGET_GROUP_ID = -1002493556435; // Nhóm đích (Xếp lớp)
-    const CURRENT_GROUP_ID = message.chat.id; // Tự động lấy ID nhóm hiện tại
-    const config = loadConfig();
+    // 1. Xử lý Reply -> Đánh dấu tin nhắn gốc đã được phản hồi
+    if (message.reply_to_message) {
+      await markCaseHandled(deps.supabase, message.reply_to_message.message_id);
+    }
 
-    // 1. Bot tự động thả tim (reaction) vào tin nhắn gốc
-    fetch(`https://api.telegram.org/bot${config.botToken}/setMessageReaction`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CURRENT_GROUP_ID,
+    // 2. Kiểm tra tag đích danh: Bot thả tim và Forward y nguyên sang nhóm Xếp lớp (-1002493556435)
+    if (/@OP_LinhDK6|@OP_LinhDTT1/i.test(text)) {
+      const TARGET_GROUP_ID = -1002493556435; // Nhóm đích (Xếp lớp)
+      const CURRENT_GROUP_ID = message.chat.id;
+      const config = loadConfig();
+
+      fetch(`https://api.telegram.org/bot${config.botToken}/setMessageReaction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: CURRENT_GROUP_ID,
+          message_id: message.message_id,
+          reaction: [{ type: "emoji", emoji: "❤️" }]
+        })
+      }).catch(console.error);
+
+      fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TARGET_GROUP_ID,
+          from_chat_id: CURRENT_GROUP_ID,
+          message_id: message.message_id
+        })
+      }).catch(console.error);
+    }
+    
+    // 3. Quét case QLL chuẩn xác để lưu vào bảng qll_tracking
+    if (isQllCase(text)) {
+      await insertQllCase(deps.supabase, {
         message_id: message.message_id,
-        reaction: [{ type: "emoji", emoji: "❤️" }]
-      })
-    }).catch(console.error);
+        content: text,
+        sender_name: message.from?.first_name || message.from?.username || "QLL",
+        shift_name: getCurrentShift()
+      });
+    }
 
-    // 2. Forward y nguyên tin nhắn sang nhóm đích
-    fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TARGET_GROUP_ID,
-        from_chat_id: CURRENT_GROUP_ID,
-        message_id: message.message_id
-      })
-    }).catch(console.error);
-  }
-  
-  if (isQllCase(text)) {
-    await insertQllCase(deps.supabase, {
-      message_id: message.message_id,
-      content: text,
-      sender_name: message.from?.first_name || message.from?.username || "QLL",
-      shift_name: getCurrentShift()
-    });
+    // 4. Theo dõi tin nhắn trong nhóm QLL (Rule 1 & Rule 2 cho SLA 5 phút)
+    await handleGroupQllMessage(
+      message,
+      deps.telegram,
+      deps.supabase,
+      SPAMTEST_TARGET_CHAT_ID,
+      SPAMTEST_ADMIN_IDS
+    );
   }
 
-  // 1. Passive user collection runs on EVERY group update, regardless of the
-  // relay switch: capture the sender and any newly-joined members.
+  // 5. Passive user collection chạy trên mọi update nhóm
   await collectUsers(message, deps);
 
-// ==========================================
-// ==========================================
-  // TÍNH NĂNG: BẮT TIN NHẮN CHỨA TỪ KHÓA "VẮNG" (linh hoạt viết hoa/thường, có dấu #)
-  // ==========================================
- /* if (message.chat.id === SOURCE_ABSENT_GROUP_ID && message.text) {
-    const rawText = message.text;
-    const lowerText = rawText.toLowerCase();
-    
-    // Kiểm tra nếu nội dung chứa chữ "vắng" (bất kể #vắng, Vắng, #VẮNG, v.v.)
-    if (lowerText.includes("vắng")) {
-      // 1. Tự động bóc tách mã lớp từ nội dung tin nhắn
-      let subjectName = "Khác";
-      let classCodeFound = "";
-      
-      const classCodeMatch = rawText.match(/([A-ZÀ-Ỹa-zà-ỹ0-9_]+\.[0-9A-Za-z\.]+)/);
-      if (classCodeMatch) {
-        classCodeFound = classCodeMatch[1];
-        // Lấy 4 ký tự đầu tiên của mã lớp làm tên môn học (viết hoa)
-        subjectName = classCodeFound.substring(0, 4).toUpperCase();
-      }
-
-      // 2. Build lại form gọn gàng theo đúng yêu cầu
-const fwText = [
-        `#${subjectName}`,
-        `Nội dung: ${rawText}`
-      ].join("\n");
-      
-      await deps.telegram.sendMessage(SPAMTEST_TARGET_CHAT_ID, fwText);
-      return; 
-    }
-  }*/
-  // ==========================================
-
-  // 2. Theo dõi tin nhắn trong nhóm QLL (Rule 1: Bắt từ khóa khẩn cấp tag ngay | Rule 2: Đưa vào hàng đợi 5 phút)
-  await handleGroupQllMessage(
-    message,
-    deps.telegram,
-    deps.supabase,
-    SPAMTEST_TARGET_CHAT_ID,
-    SPAMTEST_ADMIN_IDS
-  );
-
-  // 3. Auto-acknowledge: when someone REPLIES in the group to one of the bot's HS
-  // announcements, reply back a short ack. Independent of the relay switch.
+  // 6. Auto-acknowledge khi có người reply thông báo của bot
   if (await maybeAckAnnouncementReply(message, deps)) {
     return;
   }
 
-  // 4. /spamtest: admin-only, one message, independent of the relay switch.
+  // 7. /spamtest admin-only
   if (await maybeHandleSpamTest(message, deps)) {
     return;
   }
 
-  // 5. Batch announcement from an .xlsx file (admin private DM only). Independent
-  // of the relay switch, exactly like /spam.
+  // 8. Batch announcement từ file .xlsx
   if (await maybeHandleBatch(message, deps)) {
     return;
   }
 
-  // 6. HARD STOP when relay is disabled. The bot must not delete, send to inbox,
-  // or reply to anyone while collecting users. This is the "nằm vùng" mode.
   if (!deps.relayEnabled) {
     return;
   }
 
-  // 7. Branch (a): private-chat /start -> acknowledge inbox is open.
   if (message.chat.type === "private") {
     if (message.text && message.text.startsWith("/start")) {
       await deps.telegram.sendMessage(message.chat.id, START_ACK);
@@ -284,20 +244,16 @@ const fwText = [
     return;
   }
 
-  // 8. Branch (d): group message that is NOT a reply -> ignore.
   const replyTo = message.reply_to_message;
   if (!replyTo) {
     return;
   }
 
   const sensitiveText = message.text ?? "";
-
-  // 9. Branch (c): group reply that is NOT sensitive -> ignore.
   if (!isSensitive(sensitiveText)) {
     return;
   }
 
-  // 10. Branch (b): sensitive group reply -> relay flow.
   await relay(message, replyTo, deps);
 }
 // Passively records users seen in a group chat into telegram_users_qll.
