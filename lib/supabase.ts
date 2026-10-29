@@ -475,8 +475,15 @@ export async function insertQllCase(client: SupabaseClient, record: { message_id
 }
 
 // Đánh dấu đã xử lý khi có reply/reaction
-export async function markCaseHandled(client: SupabaseClient, messageId: number) {
-  await client.from("qll_tracking").update({ handled: true }).eq("message_id", messageId);
+export async function markCaseHandled(
+  supabase: SupabaseClient,
+  messageId: number
+): Promise<void> {
+  // Sửa từ 'is_handled' thành 'handled' cho khớp hoàn toàn với bảng qll_tracking trên Supabase
+  await supabase
+    .from("qll_tracking")
+    .update({ handled: true })
+    .eq("message_id", messageId);
 }
 
 // Lấy danh sách miss và đánh dấu đã báo cáo
