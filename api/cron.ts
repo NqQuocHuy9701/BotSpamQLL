@@ -52,9 +52,7 @@ export async function runCron(deps: CronDeps): Promise<void> {
 
   const { rows } = await fetchNextUnsent(deps.supabase, batchSize);
   
-  // NẾU HÀNG ĐỢI RẢI TIN EXCEL TRỐNG, VẪN PHẢI GỌI QUÉT SLA 5 PHÚT
   if (rows.length === 0) {
-    await checkUnansweredMessages(deps.telegram, deps.supabase);
     return; // empty queue: nothing to send
   }
 
@@ -115,9 +113,6 @@ export async function runCron(deps: CronDeps): Promise<void> {
       }
     }
   }
-
-  // GỌI KIỂM TRA SLA 5 PHÚT Ở CUỐI MỖI CHU KỲ CRON
-  await checkUnansweredMessages(deps.telegram, deps.supabase);
 }
 
 // Accepts the request only when it is a genuine Vercel cron invocation. Vercel
@@ -162,8 +157,16 @@ export default async function handler(
   // Catch everything so a single failure never crashes the cron.
   try {
     await runCron(deps);
-  } catch {
+  } catch (err) {
     // Swallow: a failed send stays unsent and retries on the next run.
+    console.error("Cron send error:", err);
+  }
+
+  // TIẾN TRÌNH QUÉT SLA ĐỘC LẬP HOÀN TOÀN
+  try {
+    await checkUnansweredMessages(deps.telegram, deps.supabase);
+  } catch (err) {
+    console.error("SLA Check error:", err);
   }
 
   res.status(200).json({ ok: true });

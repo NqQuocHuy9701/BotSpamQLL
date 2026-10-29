@@ -531,17 +531,7 @@ export async function handleGroupQllMessage(
   // --- TẢI CONFIG TRƯỚC KHI SỬ DỤNG ---
   const config = await loadMonitorConfig(supabase);
 
-const senderUname = (message.from.username ?? "").trim().toLowerCase();
-  
-  const isAllCtvShift =
-    (config?.ctvSang && config.ctvSang.includes(senderUname)) ||
-    (config?.ctvChieu && config.ctvChieu.includes(senderUname)) ||
-    (config?.ctvToi && config.ctvToi.includes(senderUname));
-
-  const isCtvOrAdmin =
-    adminIds.includes(message.from.id) ||
-    (senderUname !== "" && (config.ctvUsernames.includes(senderUname) || isAllCtvShift));
-
+  const senderUname = (message.from.username ?? "").trim().toLowerCase();
   const text = (message.text ?? message.caption ?? "").trim();
   const lowerText = text.toLowerCase();
 
@@ -554,8 +544,23 @@ const senderUname = (message.from.username ?? "").trim().toLowerCase();
     lowerText.includes("e gửi") || 
     lowerText.includes("gửi lại tk");
 
-  // Chốt chặn 1: Nếu là CTV hoặc tin nhắn có dấu hiệu trả tài khoản -> Thoát ngay lập tức
-  if (isCtvOrAdmin || isCredentialReply) {
+  // CHỐT CHẶN 1: Chặn tuyệt đối tin nhắn Tài khoản / Mật khẩu
+  if (isCredentialReply) {
+    if (watchedChanged) await saveWatchedMessages(supabase, watched);
+    return; 
+  }
+  
+  const isAllCtvShift =
+    (config?.ctvSang && config.ctvSang.includes(senderUname)) ||
+    (config?.ctvChieu && config.ctvChieu.includes(senderUname)) ||
+    (config?.ctvToi && config.ctvToi.includes(senderUname));
+
+  const isCtvOrAdmin =
+    adminIds.includes(message.from.id) ||
+    (senderUname !== "" && (config.ctvUsernames.includes(senderUname) || isAllCtvShift));
+
+  // CHỐT CHẶN 2: Tin nhắn của Admin/CTV ca trực cũng bỏ qua
+  if (isCtvOrAdmin) {
     if (watchedChanged) await saveWatchedMessages(supabase, watched);
     return; 
   }
@@ -568,7 +573,7 @@ const senderUname = (message.from.username ?? "").trim().toLowerCase();
   // --- LỚP 2: LỌC RULE QLL (Yêu cầu chứa >=3 số hoặc mã lớp) ---
   if (!isValidQllCaseMessage(text)) {
     if (watchedChanged) await saveWatchedMessages(supabase, watched);
-    return; // Chốt chặn 2: Sai format QLL -> Thoát ngay lập tức
+    return; // Sai format QLL -> Thoát ngay lập tức
   }
 
   // --- LỚP 3: CHỈ CÒN LẠI TIN NHẮN CHUẨN CỦA QLL -> LƯU DATABASE ---
@@ -591,10 +596,14 @@ const senderUname = (message.from.username ?? "").trim().toLowerCase();
   // 1. Gọi API thả cảm xúc lên Telegram
   await sendReaction(message.chat.id, message.message_id, chosenEmoji);
 
-  // 2. QUAN TRỌNG: Vì bot tự thả tim/icon ở trên (và Telegram KHÔNG bắn sự kiện message_reaction ngược lại cho bot),
-  // nên ta TUYỆT ĐỐI KHÔNG PUSH message_id này vào mảng `watched`. 
-  // Bằng cách này, tin nhắn do bot tiếp nhận và thả tim sẽ được coi như đã xử lý ngay lập tức, 
-  // KHÔNG BAO GIỜ bị đưa vào hàng đợi SLA 5 phút và KHÔNG BAO GIỜ bị tag lại nữa!
+  // 2. PUSH VÀO MẢNG ĐỂ TÍNH SLA 5 PHÚT
+  watched.push({
+    messageId: message.message_id,
+    chatId: message.chat.id,
+    senderId: message.from.id,
+    createdAtMs: Date.now(),
+  });
+  watchedChanged = true;
 
   if (isUrgentQllMessage(text)) {
     const { username } = getActiveCoordinator(config);
@@ -709,9 +718,9 @@ export async function sendReaction(
   emoji: string = "👍"
 ): Promise<boolean> {
   try {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const token = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
     if (!token) {
-      console.log("❌ Thiếu TELEGRAM_BOT_TOKEN");
+      console.log("❌ Thiếu BOT_TOKEN");
       return false;
     }
 
