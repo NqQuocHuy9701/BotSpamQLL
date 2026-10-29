@@ -269,6 +269,8 @@ export async function maybeHandleCoordinatorCommands(
           "/đp sáng HuyNQ5 | /đp chiều HuyNQ5 | /đp tối HuyNQ5",
           "💡 Cú pháp thêm CTV trực theo ca:",
           "/addctvca <sang|chieu|toi> @user1 @user2",
+          "💡 Cú pháp xóa CTV trực theo ca:",
+          "/delctvca <sang|chieu|toi> @username",
           "💡 Cú pháp cài đặt danh xưng (anh/chị):",
           "/settitle @username anh (hoặc chị)",
         ].join("\n")
@@ -400,6 +402,48 @@ export async function maybeHandleCoordinatorCommands(
         "⚠️ Sai cú pháp! Dùng: /addctvca <sang|chieu|toi> @user1 @user2"
       );
     }
+    return true;
+  }
+
+  // --- [THÊM MỚI] LỆNH /delctvca (Xóa CTV theo ca) ---
+  if (lower.startsWith("/delctvca")) {
+    const rest = trimmed.slice("/delctvca".length).trim();
+    const parts = rest.split(/\s+/);
+    if (parts.length < 2) {
+      await telegram.sendMessage(
+        message.chat.id,
+        "Cú pháp: /delctvca <sang|chieu|toi> @username"
+      );
+      return true;
+    }
+
+    const shiftType = stripDiacritics(parts[0] || "");
+    const targetUname = parts[1].replace(/^@/, "").trim().toLowerCase();
+
+    if (!["sang", "chieu", "toi"].includes(shiftType) || !targetUname) {
+      await telegram.sendMessage(
+        message.chat.id,
+        "⚠️ Sai cú pháp! Dùng: /delctvca <sang|chieu|toi> @username"
+      );
+      return true;
+    }
+
+    const config = await loadMonitorConfig(supabase);
+    let targetKey: "ctvSang" | "ctvChieu" | "ctvToi" = "ctvSang";
+    if (shiftType === "chieu") targetKey = "ctvChieu";
+    if (shiftType === "toi") targetKey = "ctvToi";
+
+    const currentList = config[targetKey] || [];
+    const updatedList = currentList.filter((u) => u.toLowerCase() !== targetUname);
+    config[targetKey] = updatedList;
+
+    await saveMonitorConfig(supabase, config);
+    await telegram.sendMessage(
+      message.chat.id,
+      `♻️ Đã xóa @${targetUname} khỏi ca **${shiftType.toUpperCase()}**. Còn lại (${updatedList.length}): ${
+        updatedList.length > 0 ? updatedList.map((u) => `@${u}`).join(", ") : "(trống)"
+      }`
+    );
     return true;
   }
 
