@@ -89,7 +89,7 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
 
 // --- TÍNH NĂNG FW VẮNG: ID Nhóm gốc hỗ trợ kĩ thuật ---
-const SOURCE_ABSENT_GROUP_ID = -1002458492731; // Nhóm Gốc Hỗ Trợ Kỹ Thuật
+//const SOURCE_ABSENT_GROUP_ID = -1002458492731; // Nhóm Gốc Hỗ Trợ Kỹ Thuật
 
 // Batch-announcement commands (admin private DM only). On /ok the confirmed
 // batch is enqueued into send_queue and drip-sent later by the Vercel cron
@@ -215,7 +215,7 @@ export async function handleUpdate(
 // ==========================================
   // TÍNH NĂNG: BẮT TIN NHẮN CHỨA TỪ KHÓA "VẮNG" (linh hoạt viết hoa/thường, có dấu #)
   // ==========================================
-  if (message.chat.id === SOURCE_ABSENT_GROUP_ID && message.text) {
+ /* if (message.chat.id === SOURCE_ABSENT_GROUP_ID && message.text) {
     const rawText = message.text;
     const lowerText = rawText.toLowerCase();
     
@@ -241,7 +241,7 @@ const fwText = [
       await deps.telegram.sendMessage(SPAMTEST_TARGET_CHAT_ID, fwText);
       return; 
     }
-  }
+  }*/
   // ==========================================
 
   // 2. Theo dõi tin nhắn trong nhóm QLL (Rule 1: Bắt từ khóa khẩn cấp tag ngay | Rule 2: Đưa vào hàng đợi 5 phút)
