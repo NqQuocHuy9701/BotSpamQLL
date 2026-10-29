@@ -162,7 +162,7 @@ export default async function handler(
     console.error("Cron send error:", err);
   }
 
-  // TIẾN TRÌNH QUÉT SLA ĐỘC LẬP HOÀN TOÀN
+  // TIẾN TRÌNH QUÉT SLA ĐỘC LẬP HOÀN TOÀN (Đảm bảo bên trong monitor.ts có query .eq("handled", false))
   try {
     await checkUnansweredMessages(deps.telegram, deps.supabase);
   } catch (err) {
