@@ -143,20 +143,27 @@ export async function handleUpdate(
 // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
 // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
   if (update.message_reaction) {
-    const reactionUpdate = update.message_reaction;
-    const targetMessageId = reactionUpdate.message_id;
+    console.log("📥 [DEBUG REACTION PAYLOAD]:", JSON.stringify(update));
+
+    const reactionObj = update.message_reaction;
+    const targetMessageId = reactionObj?.message_id;
 
     if (targetMessageId) {
-      const { error } = await deps.supabase
+      console.log(`🔍 [DEBUG] Tìm thấy targetMessageId: ${targetMessageId}`);
+
+      const { data, error } = await deps.supabase
         .from("qll_tracking")
         .update({ handled: true })
-        .eq("message_id", targetMessageId);
+        .eq("message_id", targetMessageId)
+        .select();
 
       if (error) {
-        console.error("Lỗi update handled qua reaction:", error);
+        console.error("❌ [ERROR] Lỗi update Supabase qua reaction:", error);
       } else {
-        console.log(`✅ Đã nhận reaction, set handled = true cho message_id: ${targetMessageId}`);
+        console.log(`✅ [SUCCESS] Đã chuyển handled = true cho message_id: ${targetMessageId}. Kết quả:`, data);
       }
+    } else {
+      console.log("⚠️ [WARNING] Không trích xuất được message_id từ sự kiện reaction này.");
     }
     return;
   }
