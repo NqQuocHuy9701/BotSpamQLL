@@ -1,6 +1,7 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig } from "./config.js";
+import { trackCtvCase } from './v4_stats.js';
 
 import {
   buildGroupedAnnouncement,
@@ -165,10 +166,31 @@ export async function handleUpdate(
         console.error("❌ [SUPABASE ERROR] Lỗi cập nhật handled qua reaction:", error);
       } else {
         console.log(`✅ [SUCCESS] Đã cập nhật handled = TRUE qua REACTION thành công cho message_id: ${targetMessageId}`, data);
+
+        // ==========================================
+        // 🔒 MODULE V4 ĐỘC LẬP (Không đụng code cũ)
+        // ==========================================
+const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
+        const ctvUsername = user?.username;
+        const ctvName = user?.first_name || user?.username;
+        const chatId = reactionUpdate.chat?.id || 0;
+
+        if (ctvUsername) {
+          trackCtvCase(deps.supabase, {
+            ctvUsername: ctvUsername,
+            ctvName: ctvName,
+            groupId: chatId,
+            groupName: chatId === -1002273179613 ? 'QLL' : 'Hỗ trợ kỹ thuật',
+            messageId: targetMessageId,
+            actionType: 'REACT',
+            shiftId: 'SANG' // Hoặc xác định ca trực theo hệ thống hiện tại của bạn
+          }).catch(err => console.error("V4 tracking error:", err));
+        }
       }
     } else {
       console.log(`ℹ️ [REACTION INFO] Hành động gỡ reaction hoặc thiếu thông tin, bỏ qua.`);
     }
+    
     return;
   }
 
@@ -213,6 +235,40 @@ export async function handleUpdate(
     
     return;
   }
+
+// ==========================================
+// ==========================================
+    // 🔒 MODULE V4: Lệnh tra cứu /mystats độc lập
+    // ==========================================
+    if (message.text && message.text.startsWith('/mystats')) {
+      const senderUsername = message.from?.username;
+      const chatId = message.chat.id;
+
+      if (senderUsername) {
+        const { data, error } = await deps.supabase
+          .from('ctv_case_tracking')
+          .select('action_type, message_id')
+          .eq('ctv_username', senderUsername)
+          .eq('shift_id', 'SANG'); // Hoặc lấy ca trực theo hệ thống
+
+        if (!error && data && data.length > 0) {
+          const uniqueCases = new Set(data.map((row: any) => row.message_id));
+          const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
+          const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
+
+          const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername})**\n\n` +
+                           `❤️ Số case qua Reaction: ${reactCount}\n` +
+                           `💬 Số case qua Reply: ${replyCount}\n` +
+                           `🔥 **Tổng số case xử lý độc lập:** ${uniqueCases.size}`;
+
+          await deps.telegram.sendMessage(chatId, replyMsg, message.message_id);
+        } else {
+          await deps.telegram.sendMessage(chatId, `📊 @${senderUsername} chưa có dữ liệu xử lý trong ca này.`, message.message_id);
+        }
+      }
+      return;
+    }
+
 
   // --- TỪ ĐIỂM NÀY TRỞ XUỐNG LÀ DÀNH RIÊNG CHO ĐÚNG NHÓM QLL ---
   const text = message.text ?? "";
