@@ -141,17 +141,22 @@ export async function handleUpdate(
   deps: Deps
 ): Promise<void> {
 // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
+// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
   if (update.message_reaction) {
-    const reaction = update.message_reaction;
-    const targetMessageId = reaction.message_id;
+    const reactionUpdate = update.message_reaction;
+    const targetMessageId = reactionUpdate.message_id;
 
     if (targetMessageId) {
-      await deps.supabase
+      const { error } = await deps.supabase
         .from("qll_tracking")
         .update({ handled: true })
         .eq("message_id", targetMessageId);
 
-      console.log(`✅ Đã thả reaction, set handled = true cho message_id: ${targetMessageId}`);
+      if (error) {
+        console.error("Lỗi update handled qua reaction:", error);
+      } else {
+        console.log(`✅ Đã nhận reaction, set handled = true cho message_id: ${targetMessageId}`);
+      }
     }
     return;
   }
