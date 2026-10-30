@@ -243,6 +243,11 @@ const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
     // ==========================================
     if (message.text && message.text.startsWith('/mystats')) {
       const chatId = message.chat.id;
+      if (message.text && message.text.startsWith('/mystats')) {
+    console.log("👉 ĐÃ BẮT ĐƯỢC LỆNH /mystats từ:", message.from?.username);
+    await deps.telegram.sendMessage(message.chat.id, `Đã nhận được lệnh /mystats!`, message.message_id);
+    return;
+  }
 
       // Chỉ cho phép chạy ở 2 nhóm của bạn
       if (chatId === -1002273179613 || chatId === -1002458492731) {
