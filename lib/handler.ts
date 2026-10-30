@@ -143,32 +143,35 @@ export async function handleUpdate(
     // BƯỚC 0: XỬ LÝ SỰ KIỆN REACTION (THẢ TIM/ICON)
     // 0. Bắt sự kiện người dùng thả icon (Reaction) -> Cập nhật handled = true
     // ==========================================
-    if (update.message_reaction) {
-      const reactionUpdate = update.message_reaction as any;
-      const targetMessageId = reactionUpdate.message_id;
-      const newReaction = reactionUpdate.new_reaction;
+// 0. Bắt sự kiện người dùng thả icon (Reaction) -> Cập nhật handled = true
+  if (update.message_reaction) {
+    const reactionUpdate = update.message_reaction;
+    const targetMessageId = reactionUpdate.message_id;
+    const newReaction = reactionUpdate.new_reaction;
 
-      console.log(`💟 [REACTION LOG] Nhận update reaction - MessageID: ${targetMessageId}`);
+    console.log(`📥 [REACTION LOG] Nhận update reaction - MessageID: ${targetMessageId}`);
 
-      const hasValidReaction = Array.isArray(newReaction) && newReaction.length > 0;
+    const hasValidReaction = Array.isArray(newReaction) && newReaction.length > 0;
 
-      if (targetMessageId && hasValidReaction) {
-        console.log(`🔍 [REACTION FLOW] Đang tìm và update handled=true cho message_id: ${targetMessageId}`);
+    if (targetMessageId && hasValidReaction) {
+      console.log(`🔍 [REACTION FLOW] Đang tìm và update handled=true cho message_id: ${targetMessageId}`);
 
-        const { data, error } = await deps.supabase
-          .from("qll_tracking")
-          .update({ handled: true })
-          .eq("message_id", targetMessageId)
-          .select();
+      const { data, error } = await deps.supabase
+        .from("qll_tracking")
+        .update({ handled: true })
+        .eq("message_id", targetMessageId)
+        .select();
 
-        if (error) {
-          console.error("❌ [SUPABASE ERROR] Lỗi cập nhật handled qua reaction:", error);
-        } else {
-          console.log(`✅ [SUCCESS] Đã cập nhật handled = TRUE qua REACTION thành công cho message_id: ${targetMessageId} [${data ? JSON.stringify(data) : ""}]`);
-        }
+      if (error) {
+        console.error("❌ [SUPABASE ERROR] Lỗi cập nhật handled qua reaction:", error);
+      } else {
+        console.log(`✅ [SUCCESS] Đã cập nhật handled = TRUE qua REACTION thành công cho message_id: ${targetMessageId}`, data);
       }
-      return;
+    } else {
+      console.log(`ℹ️ [REACTION INFO] Hành động gỡ reaction hoặc thiếu thông tin, bỏ qua.`);
     }
+    return;
+  }
 
 const message = update.message;
   if (!message) {
