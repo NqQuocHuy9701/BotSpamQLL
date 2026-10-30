@@ -154,16 +154,46 @@ export async function handleUpdate(
     return;
   }
 
-const message = update.message;
+  const message = update.message;
   if (!message) {
     return;
   }
 
-  // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép bot xử lý và tracking tin nhắn nếu đúng là nhóm QLL (-1002273179613)
-  // Mọi tin nhắn từ nhóm khác đi qua đây sẽ bị return ngay lập tức, không bao giờ lọt vào qll_tracking!
+  // ==========================================
+  // LUỒNG 1: ƯU TIÊN PRIVATE CHAT (ADMIN NHẮN RIÊNG & GỬI FILE)
+  // Đưa lên đây để không bị block bởi điều kiện kiểm tra nhóm ở dưới
+  // ==========================================
+  if (message.chat.type === "private") {
+    if (message.text && message.text.startsWith("/start")) {
+      await deps.telegram.sendMessage(message.chat.id, START_ACK);
+    }
+    // /spamtest admin-only
+    if (await maybeHandleSpamTest(message, deps)) {
+      return;
+    }
+    // Batch announcement từ file .xlsx
+    if (await maybeHandleBatch(message, deps)) {
+      return;
+    }
+    return; // Thoát luôn, tin nhắn riêng không cần chạy xuống logic nhóm
+  }
+
+  // ==========================================
+  // LUỒNG 2: XỬ LÝ NHÓM CHUNG & NHÓM QLL (-1002273179613)
+  // ==========================================
+  
+  // 🛑 CHẶN TUYỆT ĐỐI: Nếu không phải nhóm QLL thì chỉ chạy các tính năng phụ rồi thoát
   if (message.chat.id !== SPAMTEST_TARGET_CHAT_ID) {
-    // Nếu không phải nhóm QLL thì chỉ chạy các tính năng phụ (như gom user) rồi thoát luôn
     await collectUsers(message, deps);
+    if (await maybeAckAnnouncementReply(message, deps)) return;
+    
+    if (!deps.relayEnabled) return;
+    const replyTo = message.reply_to_message;
+    if (!replyTo) return;
+    const sensitiveText = message.text ?? "";
+    if (!isSensitive(sensitiveText)) return;
+    await relay(message, replyTo, deps);
+    
     return;
   }
 
@@ -220,32 +250,16 @@ const message = update.message;
     SPAMTEST_ADMIN_IDS
   );
 
-  // 5. Passive user collection chạy trên mọi update nhóm
+  // 4. Passive user collection chạy trên mọi update nhóm
   await collectUsers(message, deps);
 
-  // 6. Auto-acknowledge khi có người reply thông báo của bot
+  // 5. Auto-acknowledge khi có người reply thông báo của bot
   if (await maybeAckAnnouncementReply(message, deps)) {
     return;
   }
 
-  // 7. /spamtest admin-only
-  if (await maybeHandleSpamTest(message, deps)) {
-    return;
-  }
-
-  // 8. Batch announcement từ file .xlsx
-  if (await maybeHandleBatch(message, deps)) {
-    return;
-  }
-
+  // 6. Xử lý Relay cho nhóm QLL
   if (!deps.relayEnabled) {
-    return;
-  }
-
-  if (message.chat.type === "private") {
-    if (message.text && message.text.startsWith("/start")) {
-      await deps.telegram.sendMessage(message.chat.id, START_ACK);
-    }
     return;
   }
 
@@ -261,9 +275,6 @@ const message = update.message;
 
   await relay(message, replyTo, deps);
 }
-// Passively records users seen in a group chat into telegram_users_qll.
-// Captures the message sender and any newly-joined members. Never touches
-// private chats, and skips bot accounts and the "sender" of a join event
 // (the message.from on a join event is whoever added them / the joiner).
 async function collectUsers(
   message: TelegramMessage,
