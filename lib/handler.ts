@@ -237,64 +237,77 @@ const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
   }
 
 // ==========================================
+// 🔒 XỬ LÝ LỆNH TRA CỨU CÁ NHÂN /mystats (CÓ LOG VÀ BÁO LỖI/TRỐNG)
 // ==========================================
-// ==========================================
-    // 🔒 MODULE V4: Lệnh tra cứu /mystats (ƯU TIÊN ĐẶT LÊN ĐẦU)
-    // ==========================================
-    if (message.text && message.text.startsWith('/mystats')) {
-      const chatId = message.chat.id;
-      if (message.text && message.text.startsWith('/mystats')) {
-    console.log("👉 ĐÃ BẮT ĐƯỢC LỆNH /mystats từ:", message.from?.username);
-    await deps.telegram.sendMessage(message.chat.id, `Đã nhận được lệnh /mystats!`, message.message_id);
-    return;
-  }
+if (message.text && message.text.startsWith('/mystats')) {
+  const chatId = message.chat.id;
+  
+  // Chỉ cho phép chạy ở 2 nhóm của bạn (-1002273179613 và -1002458492731)
+  if (chatId === -1002273179613 || chatId === -1002458492731) {
+    const senderUsername = message.from?.username;
 
-      // Chỉ cho phép chạy ở 2 nhóm của bạn
-      if (chatId === -1002273179613 || chatId === -1002458492731) {
-        const senderUsername = message.from?.username;
-
-        if (senderUsername) {
-          // Xác định ca hiện tại theo giờ
-          const currentHour = new Date().getHours();
-          let currentShift = 'SANG';
-          if (currentHour >= 12 && currentHour < 17) {
-            currentShift = 'CHIEU';
-          } else if (currentHour >= 17) {
-            currentShift = 'TOI';
-          }
-
-          // Lấy dữ liệu từ bảng ctv_case_tracking
-          const { data, error } = await deps.supabase
-            .from('ctv_case_tracking')
-            .select('action_type, message_id')
-            .eq('ctv_username', senderUsername)
-            .eq('shift_id', currentShift);
-
-          if (error) {
-            await deps.telegram.sendMessage(chatId, `⚠️ Lỗi truy vấn dữ liệu thống kê.`, message.message_id);
-          } else if (!data || data.length === 0) {
-            // Hiển thị hint báo rõ ràng nếu chưa có case nào trong ca
-            await deps.telegram.sendMessage(
-              chatId, 
-              `📊 @${senderUsername} ơi, ca **${currentShift}** này bạn chưa ghi nhận case xử lý nào cả!`, 
-              message.message_id
-            );
-          } else {
-            const uniqueCases = new Set(data.map((row: any) => row.message_id));
-            const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
-            const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
-
-            const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername}) - Ca ${currentShift}**\n\n` +
-                             `❤️ Số case qua Reaction: ${reactCount}\n` +
-                             `💬 Số case qua Reply: ${replyCount}\n` +
-                             `🔥 **Tổng số case xử lý độc lập:** ${uniqueCases.size}`;
-
-            await deps.telegram.sendMessage(chatId, replyMsg, message.message_id);
-          }
-        }
-      }
-      return; // Dừng lại ngay lập tức, không chạy tiếp các luồng khác
+    if (!senderUsername) {
+      console.log("⚠️ [MYSTATS] Không lấy được username từ message.from");
+      await deps.telegram.sendMessage(chatId, `⚠️ Không xác định được username Telegram của bạn.`, message.message_id);
+      return;
     }
+
+    try {
+      // 1. Tự động xác định ca hiện tại theo giờ hệ thống
+      const currentHour = new Date().getHours();
+      let currentShift = 'SANG';
+      if (currentHour >= 12 && currentHour < 17) {
+        currentShift = 'CHIEU';
+      } else if (currentHour >= 17) {
+        currentShift = 'TOI';
+      }
+
+      console.log(`🔍 [MYSTATS] Người dùng @${senderUsername} đang tra cứu cho ca: ${currentShift}`);
+
+      // 2. Truy vấn dữ liệu từ bảng ctv_case_tracking
+      const { data, error } = await deps.supabase
+        .from('ctv_case_tracking')
+        .select('action_type, message_id')
+        .eq('ctv_username', senderUsername)
+        .eq('shift_id', currentShift);
+
+      if (error) {
+        console.error(`❌ [MYSTATS ERROR] Lỗi Supabase khi truy vấn:`, error);
+        await deps.telegram.sendMessage(chatId, `⚠️ Lỗi hệ thống khi lấy dữ liệu thống kê ca ${currentShift}.`, message.message_id);
+        return;
+      }
+
+      // 3. Xử lý trường hợp không có dữ liệu hoặc không có CTV/case nào trong ca
+      if (!data || data.length === 0) {
+        console.log(`ℹ️ [MYSTATS] Không tìm thấy dữ liệu case nào cho @${senderUsername} trong ca ${currentShift}`);
+        await deps.telegram.sendMessage(
+          chatId, 
+          `📊 @${senderUsername} ơi, hệ thống ghi nhận trong ca **${currentShift}** hiện chưa có dữ liệu xử lý nào của bạn (hoặc không tìm thấy CTV trong ca này).`, 
+          message.message_id
+        );
+        return;
+      }
+
+      // 4. Tính toán và trả về kết quả nếu có dữ liệu
+      const uniqueCases = new Set(data.map((row: any) => row.message_id));
+      const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
+      const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
+
+      const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername}) - Ca ${currentShift}**\n\n` +
+                       `❤️ Số case qua Reaction: ${reactCount}\n` +
+                       `💬 Số case qua Reply: ${replyCount}\n` +
+                       `🔥 **Tổng số case xử lý độc lập:** ${uniqueCases.size}`;
+
+      await deps.telegram.sendMessage(chatId, replyMsg, message.message_id);
+      console.log(`✅ [MYSTATS] Đã trả kết quả thống kê thành công cho @${senderUsername}`);
+
+    } catch (err) {
+      console.error(`❌ [MYSTATS EXCEPTION]:`, err);
+      await deps.telegram.sendMessage(chatId, `⚠️ Đã xảy ra lỗi ngoại lệ khi thực hiện lệnh /mystats.`, message.message_id);
+    }
+  }
+  return; // Dừng lại, không chạy các luồng khác
+}
 
 
   // --- TỪ ĐIỂM NÀY TRỞ XUỐNG LÀ DÀNH RIÊNG CHO ĐÚNG NHÓM QLL ---
