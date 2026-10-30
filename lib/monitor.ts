@@ -534,7 +534,7 @@ export async function handleGroupReaction(
 
 export async function insertQllCase(
   client: SupabaseClient,
-  record: { message_id: number; chat_id: number; sender_id: number; sender_name: string; content: string }
+  record: { message_id: number; sender_name: string; content: string; shift_name: string }
 ) {
   if (!client || typeof client.from !== "function") return;
   try {
@@ -639,12 +639,11 @@ const isCtvOrAdmin =
     ? `${message.from.first_name} ${message.from.last_name || ""}`.trim() 
     : senderUname || "QLL";
     
-  await insertQllCase(supabase, {
+await insertQllCase(supabase, {
     message_id: message.message_id,
-    chat_id: message.chat.id,
-    sender_id: message.from.id,
-    sender_name: senderName,
     content: text,
+    sender_name: senderName,
+    shift_name: getCurrentShiftVn().label
   });
 
 
@@ -673,7 +672,6 @@ const isCtvOrAdmin =
   }
 }
 
-// Hàm kiểm tra SLA 5 phút (Chạy trong Cron) - Quá 5 phút không ai thả tim/reply sẽ tag random CTV trong ca
 export async function checkUnansweredMessages(
   telegram: TelegramClient,
   supabase: SupabaseClient,
@@ -681,8 +679,18 @@ export async function checkUnansweredMessages(
 ): Promise<void> {
   if (!supabase || typeof supabase.from !== "function") return;
 
-  const watched = await loadWatchedMessages(supabase);
-  if (watched.length === 0) return;
+  // Lấy mốc 5 phút trước
+  const fiveMinsAgo = new Date(nowMs - SLA_TIMEOUT_MS).toISOString();
+
+  // Truy vấn trực tiếp db: Chưa handled, chưa reported, quá 5 phút
+  const { data: expiredCases, error } = await supabase
+    .from("qll_tracking")
+    .select("message_id, created_at")
+    .eq("handled", false)
+    .eq("reported", false)
+    .lte("created_at", fiveMinsAgo);
+
+  if (error || !expiredCases || expiredCases.length === 0) return;
 
   const config = await loadMonitorConfig(supabase);
   const { username } = getActiveCoordinator(config, new Date(nowMs));
@@ -694,42 +702,24 @@ export async function checkUnansweredMessages(
   else if (currentShift.key === "chieu") currentShiftCtv = config.ctvChieu || [];
   else currentShiftCtv = config.ctvToi || [];
 
-  const remaining: WatchedGroupMessage[] = [];
-  let changed = false;
+  const processedIds: number[] = [];
+  const TARGET_GROUP_ID = -1002273179613; 
 
-  for (const item of watched) {
-    const ageMs = nowMs - item.createdAtMs;
-    if (ageMs > 12 * 60 * 60 * 1000) {
-      changed = true;
-      continue;
-    }
-
-    if (ageMs >= SLA_TIMEOUT_MS) {
-      // Quá 5 phút không ai thả tim/nhận -> Tag đúng anh/chị CTV ca đó hoặc điều phối
-      if (currentShiftCtv.length > 0) {
-        const randomCtv = currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
-        const title = titles[randomCtv.toLowerCase()] || "anh/chị";
-        await telegram.sendMessage(
-          item.chatId,
-          `Dạ ${title} @${randomCtv} ơi case này cần hỗ trợ ạ !`,
-          item.messageId
-        );
-      } else {
-        const dpTitle = titles[username.toLowerCase()] || "anh/chị";
-        await telegram.sendMessage(
-          item.chatId,
-          `Dạ ${dpTitle} @${username} ơi case này cần hỗ trợ ạ !`,
-          item.messageId
-        );
-      }
-      changed = true;
+  for (const item of expiredCases) {
+    if (currentShiftCtv.length > 0) {
+      const randomCtv = currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
+      const title = titles[randomCtv.toLowerCase()] || "anh/chị";
+      await telegram.sendMessage(TARGET_GROUP_ID, `Dạ ${title} @${randomCtv} ơi case này cần hỗ trợ ạ !`, item.message_id);
     } else {
-      remaining.push(item);
+      const dpTitle = titles[username.toLowerCase()] || "anh/chị";
+      await telegram.sendMessage(TARGET_GROUP_ID, `Dạ ${dpTitle} @${username} ơi case này cần hỗ trợ ạ !`, item.message_id);
     }
+    processedIds.push(item.message_id);
   }
 
-  if (changed) {
-    await saveWatchedMessages(supabase, remaining);
+  // Khóa case lại, không tag lần 2
+  if (processedIds.length > 0) {
+    await supabase.from("qll_tracking").update({ reported: true }).in("message_id", processedIds);
   }
 }
 
