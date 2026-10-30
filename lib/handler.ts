@@ -1,7 +1,7 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig } from "./config.js";
-import { trackCtvCase } from './v4_stats.js';
+
 
 import {
   buildGroupedAnnouncement,
@@ -175,7 +175,7 @@ export async function handleUpdate(
             .single();
 
           const activeCTVs = batchData?.items?.[jsonKey] || [];
-
+console.log(`🔍 [DEBUG PHỄU 1] Ca: ${shiftName} | Nhận diện người thả: ${reactionUser} | Danh sách lấy được:`, activeCTVs);
           // Chỉ lưu nếu người thả tim CÓ TRONG danh sách ca
           if (activeCTVs.includes(reactionUser)) {
             console.log(`✅ [PHỄU 1] Ghi nhận REACTION từ CTV @${reactionUser} (Ca ${shiftName})`);
