@@ -140,30 +140,40 @@ export async function handleUpdate(
   update: TelegramUpdate,
   deps: Deps
 ): Promise<void> {
-// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
-// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
+// ==========================================
+  // BƯỚC 0: XỬ LÝ SỰ KIỆN REACTION (THẢ TIM/ICON)
+  // ==========================================
   if (update.message_reaction) {
-    console.log("📥 [DEBUG REACTION PAYLOAD]:", JSON.stringify(update));
+    const reactionUpdate = update.message_reaction;
+    const chatId = reactionUpdate.chat?.id;
+    const targetMessageId = reactionUpdate.message_id;
+    const newReaction = reactionUpdate.new_reaction;
 
-    const reactionObj = update.message_reaction;
-    const targetMessageId = reactionObj?.message_id;
+    console.log(`📥 [REACTION LOG] Nhận update reaction - ChatID: ${chatId}, MessageID: ${targetMessageId}`);
 
-    if (targetMessageId) {
-      console.log(`🔍 [DEBUG] Tìm thấy targetMessageId: ${targetMessageId}`);
+    // Kiểm tra xem đây có phải là hành động THÊM reaction hay không (new_reaction có phần tử)
+    const hasValidReaction = Array.isArray(newReaction) && newReaction.length > 0;
 
+    if (chatId && targetMessageId && hasValidReaction) {
+      console.log(`🔍 [REACTION FLOW] Đang tìm bản ghi qll_tracking với chat_id: ${chatId} và message_id: ${targetMessageId}`);
+
+      // Cập nhật handled = TRUE dựa trên cả chat_id và message_id để đảm bảo độ chính xác tuyệt đối
       const { data, error } = await deps.supabase
         .from("qll_tracking")
         .update({ handled: true })
+        .eq("chat_id", chatId)
         .eq("message_id", targetMessageId)
         .select();
 
       if (error) {
-        console.error("❌ [ERROR] Lỗi update Supabase qua reaction:", error);
+        console.error("❌ [SUPABASE ERROR] Lỗi cập nhật handled qua reaction:", error);
+      } else if (!data || data.length === 0) {
+        console.log(`⚠️ [WARNING] Không tìm thấy bản ghi khớp trong qll_tracking cho message_id: ${targetMessageId}`);
       } else {
-        console.log(`✅ [SUCCESS] Đã chuyển handled = true cho message_id: ${targetMessageId}. Kết quả:`, data);
+        console.log(`✅ [SUCCESS] Đã cập nhật handled = TRUE qua REACTION thành công cho message_id: ${targetMessageId}`, data);
       }
     } else {
-      console.log("⚠️ [WARNING] Không trích xuất được message_id từ sự kiện reaction này.");
+      console.log(`ℹ️ [REACTION INFO] Hành động gỡ reaction hoặc thiếu thông tin, bỏ qua cập nhật handled.`);
     }
     return;
   }
