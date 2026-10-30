@@ -178,6 +178,19 @@ const message = update.message;
     return;
   }
 
+  // --- MỚI THÊM: Ưu tiên xử lý tin nhắn Private (lệnh Admin) ---
+  if (message.chat.type === "private") {
+      // 8. Batch announcement & Các lệnh Admin (/dp, /addctvca, v.v.)
+      if (await maybeHandleBatch(message, deps)) {
+          return;
+      }
+      if (!deps.relayEnabled) return;
+      if (message.text && message.text.startsWith("/start")) {
+          await deps.telegram.sendMessage(message.chat.id, START_ACK);
+      }
+      return;
+  }
+
   // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép bot xử lý và tracking tin nhắn nếu đúng là nhóm QLL (-1002273179613)
   // Mọi tin nhắn từ nhóm khác đi qua đây sẽ bị return ngay lập tức, không bao giờ lọt vào qll_tracking!
   if (message.chat.id !== SPAMTEST_TARGET_CHAT_ID) {
@@ -283,12 +296,7 @@ const message = update.message;
     return;
   }
 
-  if (message.chat.type === "private") {
-    if (message.text && message.text.startsWith("/start")) {
-      await deps.telegram.sendMessage(message.chat.id, START_ACK);
-    }
-    return;
-  }
+
 
   const replyTo = message.reply_to_message;
   if (!replyTo) {
