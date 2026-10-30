@@ -237,92 +237,95 @@ const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
   }
 
 // ==========================================
-// 🔒 XỬ LÝ LỆNH TRA CỨU CÁ NHÂN /mystats (GỬI CẢ CHO ADMIN + HINT VERCEL)
+// 🔒 MODULE V4: LỆNH BÁO CÁO CA CHUẨN ĐẶC TẢ
 // ==========================================
-if (message.text && message.text.startsWith('/mystats')) {
+if (message && message.text && message.text.startsWith('/baocaoca')) {
   const chatId = message.chat.id;
-  
-  // Chỉ cho phép chạy ở 2 nhóm của bạn (-1002273179613 và -1002458492731)
-  if (chatId === -1002273179613 || chatId === -1002458492731) {
-    const senderUsername = message.from?.username;
+  const QLL_CHAT_ID = -1002273179613;
+  const HTKT_CHAT_ID = -1002458492731;
 
-    if (!senderUsername) {
-      console.log("⚠️ [MYSTATS] Không lấy được username từ message.from");
-      await deps.telegram.sendMessage(chatId, `⚠️ Không xác định được username Telegram của bạn.`, message.message_id);
-      return;
-    }
-
+  if (chatId === QLL_CHAT_ID || chatId === HTKT_CHAT_ID) {
     try {
-      // 1. Tự động xác định ca hiện tại theo giờ hệ thống
       const currentHour = new Date().getHours();
-      let currentShift = 'SANG';
+      let shiftName = 'SANG';
+      let jsonKey = 'ctvSang';
+      
       if (currentHour >= 12 && currentHour < 17) {
-        currentShift = 'CHIEU';
+        shiftName = 'CHIEU';
+        jsonKey = 'ctvChieu';
       } else if (currentHour >= 17) {
-        currentShift = 'TOI';
+        shiftName = 'TOI';
+        jsonKey = 'ctvToi';
       }
 
-      console.log(`🔍 [MYSTATS] Bắt đầu tra cứu cho @${senderUsername} | Ca: ${currentShift}`);
+      // BƯỚC 1: DANH SÁCH CTV TRONG CA (DATABASE)
+      const { data: batchData, error: batchError } = await deps.supabase
+        .from('pending_batches')
+        .select('items')
+        .eq('admin_id', -9001)
+        .single();
 
-      // 2. Truy vấn dữ liệu từ bảng ctv_case_tracking
-      const { data, error } = await deps.supabase
+      if (batchError || !batchData?.items) {
+        await deps.telegram.sendMessage(chatId, `⚠️ Lỗi dữ liệu JSON CTV.`, message.message_id);
+        return;
+      }
+
+      const activeCTVs: string[] = (batchData.items as any)[jsonKey] || [];
+      if (activeCTVs.length === 0) {
+        await deps.telegram.sendMessage(chatId, `📊 **BÁO CÁO CA ${shiftName}**\n\nKhông có CTV trực.`, message.message_id);
+        return;
+      }
+
+      // (Pre-fetch dữ liệu tracking trong ngày để đối soát cục bộ, không làm thay đổi bảng cũ)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const { data: trackingData } = await deps.supabase
         .from('ctv_case_tracking')
-        .select('action_type, message_id, group_name')
-        .eq('ctv_username', senderUsername)
-        .eq('shift_id', currentShift);
+        .select('ctv_username, chat_id, message_id')
+        .eq('shift_id', shiftName)
+        .gte('created_at', today.toISOString());
+      
+      const allEvents = trackingData || [];
+      const results: { username: string; count: number }[] = [];
 
-      if (error) {
-        console.error(`❌ [VERCEL LOG - ERROR] Lỗi Supabase khi truy vấn:`, error);
-        await deps.telegram.sendMessage(chatId, `⚠️ Lỗi hệ thống khi lấy dữ liệu thống kê ca ${currentShift}.`, message.message_id);
-        return;
-      }
-
-      // 💡 HINT VERCEL 1: Xem Supabase trả về bao nhiêu dòng dữ liệu thô
-      console.log(`💡 [VERCEL HINT - DATABASE] Truy vấn thành công! Trả về ${data ? data.length : 0} dòng dữ liệu thô từ Supabase cho @${senderUsername}.`);
-
-      // 3. Xử lý trường hợp không có dữ liệu
-      if (!data || data.length === 0) {
-        console.log(`ℹ️ [MYSTATS] Dữ liệu trống. @${senderUsername} chưa có case nào trong ca ${currentShift}`);
+      // BƯỚC 2: DUYỆT TỪNG CTV
+      for (const ctv of activeCTVs) {
         
-        const emptyMsg = `📊 @${senderUsername} ơi, hệ thống ghi nhận trong ca **${currentShift}** hiện chưa có dữ liệu xử lý nào của bạn.`;
-        await deps.telegram.sendMessage(chatId, emptyMsg, message.message_id);
-        return;
+        // BƯỚC 3: ĐỐI SOÁT TRONG NHÓM QLL
+        const qllEvents = allEvents.filter(row => row.ctv_username === ctv && row.chat_id === QLL_CHAT_ID);
+        
+        // BƯỚC 4: ĐỐI SOÁT TRONG NHÓM HỖ TRỢ KỸ THUẬT
+        const htktEvents = allEvents.filter(row => row.ctv_username === ctv && row.chat_id === HTKT_CHAT_ID);
+
+        // BƯỚC 5: ĐẾM CASE (Chống trùng lặp theo định danh)
+        const uniqueCases = new Set<string>();
+        qllEvents.forEach(e => uniqueCases.add(`${e.chat_id}_${e.message_id}`));
+        htktEvents.forEach(e => uniqueCases.add(`${e.chat_id}_${e.message_id}`));
+
+        results.push({ username: ctv, count: uniqueCases.size });
       }
 
-      // 4. Tính toán kết quả
-      const uniqueCases = new Set(data.map((row: any) => row.message_id));
-      const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
-      const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
+      // BƯỚC 6: TỔNG HỢP BÁO CÁO
+      results.sort((a, b) => b.count - a.count);
 
-      // 💡 HINT VERCEL 2: Xem kết quả sau khi đếm bóc tách
-      console.log(`💡 [VERCEL HINT - COUNTING] Kết quả bóc tách: ${reactCount} REACT | ${replyCount} REPLY | ${uniqueCases.size} UNIQUE CASES.`);
+      let replyMsg = `📊 **BÁO CÁO CASE XỬ LÝ CTV CUỐI CA (${shiftName})**\n\n`;
+      replyMsg += `\`STT | Tên CTV           | Số case\`\n`;
+      replyMsg += `\`---------------------------------\`\n`;
+      
+      results.forEach((r, index) => {
+        const stt = (index + 1).toString().padEnd(3, ' ');
+        const name = r.username.padEnd(17, ' ');
+        replyMsg += `\`${stt} | ${name} | ${r.count}\`\n`;
+      });
 
-      const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername}) - Ca ${currentShift}**\n\n` +
-                       `❤️ Số case qua Reaction: ${reactCount}\n` +
-                       `💬 Số case qua Reply: ${replyCount}\n` +
-                       `🔥 **Tổng số case xử lý độc lập:** ${uniqueCases.size}`;
-
-      // Gửi kết quả cho CTV tại nhóm chat hiện tại
       await deps.telegram.sendMessage(chatId, replyMsg, message.message_id);
 
-      // ==========================================
-      // 🚀 GỬI BẢN SAO THÔNG BÁO VỀ CHO ADMIN / NHÓM QUẢN LÝ
-      // ==========================================
-      const ADMIN_TARGET_ID = -1002273179613; // ID nhóm QLL
-      const adminLogMsg = `🔔 **[ADMIN NOTIFY]** CTV @${senderUsername} vừa tra cứu hiệu suất cá nhân:\n\n` + replyMsg;
-      
-      await deps.telegram.sendMessage(ADMIN_TARGET_ID, adminLogMsg);
-
-      console.log(`✅ [MYSTATS] Đã trả kết quả cho @${senderUsername} và Admin thành công!`);
-
     } catch (err) {
-      console.error(`❌ [MYSTATS EXCEPTION]:`, err);
-      await deps.telegram.sendMessage(chatId, `⚠️ Đã xảy ra lỗi ngoại lệ khi thực hiện lệnh /mystats.`, message.message_id);
+      await deps.telegram.sendMessage(chatId, `⚠️ Đã xảy ra lỗi báo cáo.`, message.message_id);
     }
   }
   return; 
 }
-
   // --- TỪ ĐIỂM NÀY TRỞ XUỐNG LÀ DÀNH RIÊNG CHO ĐÚNG NHÓM QLL ---
   const text = message.text ?? "";
 
