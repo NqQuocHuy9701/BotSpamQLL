@@ -241,29 +241,44 @@ const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
     // 🔒 MODULE V4: Lệnh tra cứu /mystats độc lập
     // ==========================================
     if (message.text && message.text.startsWith('/mystats')) {
-      const senderUsername = message.from?.username;
       const chatId = message.chat.id;
 
+      // Chỉ cho phép dùng lệnh ở 2 nhóm chính thức của bạn
+      if (chatId !== -1002273179613 && chatId !== -1002458492731) {
+        return; // Không phải nhóm quản lý thì bỏ qua
+      }
+
+      const senderUsername = message.from?.username;
+
       if (senderUsername) {
+        // Tự động xác định ca hiện tại dựa theo khung giờ vận hành của bạn
+        const currentHour = new Date().getHours();
+        let currentShift = 'SANG';
+        if (currentHour >= 12 && currentHour < 17) {
+          currentShift = 'CHIEU';
+        } else if (currentHour >= 17) {
+          currentShift = 'TOI';
+        }
+
         const { data, error } = await deps.supabase
           .from('ctv_case_tracking')
           .select('action_type, message_id')
           .eq('ctv_username', senderUsername)
-          .eq('shift_id', 'SANG'); // Hoặc lấy ca trực theo hệ thống
+          .eq('shift_id', currentShift);
 
         if (!error && data && data.length > 0) {
           const uniqueCases = new Set(data.map((row: any) => row.message_id));
           const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
           const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
 
-          const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername})**\n\n` +
+          const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername}) - Ca ${currentShift}**\n\n` +
                            `❤️ Số case qua Reaction: ${reactCount}\n` +
                            `💬 Số case qua Reply: ${replyCount}\n` +
                            `🔥 **Tổng số case xử lý độc lập:** ${uniqueCases.size}`;
 
           await deps.telegram.sendMessage(chatId, replyMsg, message.message_id);
         } else {
-          await deps.telegram.sendMessage(chatId, `📊 @${senderUsername} chưa có dữ liệu xử lý trong ca này.`, message.message_id);
+          await deps.telegram.sendMessage(chatId, `📊 @${senderUsername} chưa có dữ liệu xử lý trong ca ${currentShift} này.`, message.message_id);
         }
       }
       return;
