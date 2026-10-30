@@ -237,7 +237,7 @@ const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
   }
 
 // ==========================================
-// 🔒 XỬ LÝ LỆNH TRA CỨU CÁ NHÂN /mystats (CÓ LOG VÀ BÁO LỖI/TRỐNG)
+// 🔒 XỬ LÝ LỆNH TRA CỨU CÁ NHÂN /mystats (GỬI CẢ CHO ADMIN)
 // ==========================================
 if (message.text && message.text.startsWith('/mystats')) {
   const chatId = message.chat.id;
@@ -267,7 +267,7 @@ if (message.text && message.text.startsWith('/mystats')) {
       // 2. Truy vấn dữ liệu từ bảng ctv_case_tracking
       const { data, error } = await deps.supabase
         .from('ctv_case_tracking')
-        .select('action_type, message_id')
+        .select('action_type, message_id, group_name')
         .eq('ctv_username', senderUsername)
         .eq('shift_id', currentShift);
 
@@ -277,18 +277,21 @@ if (message.text && message.text.startsWith('/mystats')) {
         return;
       }
 
-      // 3. Xử lý trường hợp không có dữ liệu hoặc không có CTV/case nào trong ca
+      // 3. Xử lý trường hợp không có dữ liệu
       if (!data || data.length === 0) {
         console.log(`ℹ️ [MYSTATS] Không tìm thấy dữ liệu case nào cho @${senderUsername} trong ca ${currentShift}`);
-        await deps.telegram.sendMessage(
-          chatId, 
-          `📊 @${senderUsername} ơi, hệ thống ghi nhận trong ca **${currentShift}** hiện chưa có dữ liệu xử lý nào của bạn (hoặc không tìm thấy CTV trong ca này).`, 
-          message.message_id
-        );
+        
+        const emptyMsg = `📊 @${senderUsername} ơi, hệ thống ghi nhận trong ca **${currentShift}** hiện chưa có dữ liệu xử lý nào của bạn.`;
+        await deps.telegram.sendMessage(chatId, emptyMsg, message.message_id);
+        
+        // (Tùy chọn) Gửi thông báo về cho Admin/Nhóm quản lý nếu muốn nắm tình hình CTV chưa làm case
+        // const ADMIN_CHAT_ID = -1002273179613; // Điền ID nhóm/Admin nhận thông báo nếu muốn
+        // await deps.telegram.sendMessage(ADMIN_CHAT_ID, `🔔 [TRA CỨU] @${senderUsername} vừa gõ /mystats nhưng ca ${currentShift} chưa có case nào.`);
+        
         return;
       }
 
-      // 4. Tính toán và trả về kết quả nếu có dữ liệu
+      // 4. Tính toán kết quả
       const uniqueCases = new Set(data.map((row: any) => row.message_id));
       const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
       const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
@@ -298,17 +301,26 @@ if (message.text && message.text.startsWith('/mystats')) {
                        `💬 Số case qua Reply: ${replyCount}\n` +
                        `🔥 **Tổng số case xử lý độc lập:** ${uniqueCases.size}`;
 
+      // Gửi kết quả cho CTV tại nhóm chat hiện tại
       await deps.telegram.sendMessage(chatId, replyMsg, message.message_id);
-      console.log(`✅ [MYSTATS] Đã trả kết quả thống kê thành công cho @${senderUsername}`);
+
+      // ==========================================
+      // 🚀 GỬI BẢN SAO THÔNG BÁO VỀ CHO ADMIN / NHÓM QUẢN LÝ
+      // ==========================================
+      const ADMIN_TARGET_ID = -1002273179613; // 💡 Đặt ID nhóm QLL hoặc ID tài khoản Admin của bạn ở đây
+      const adminLogMsg = `🔔 **[ADMIN NOTIFY]** CTV @${senderUsername} vừa tra cứu hiệu suất cá nhân:\n\n` + replyMsg;
+      
+      await deps.telegram.sendMessage(ADMIN_TARGET_ID, adminLogMsg);
+
+      console.log(`✅ [MYSTATS] Đã trả kết quả cho @${senderUsername} và bắn bản sao báo cáo về cho Admin thành công!`);
 
     } catch (err) {
       console.error(`❌ [MYSTATS EXCEPTION]:`, err);
       await deps.telegram.sendMessage(chatId, `⚠️ Đã xảy ra lỗi ngoại lệ khi thực hiện lệnh /mystats.`, message.message_id);
     }
   }
-  return; // Dừng lại, không chạy các luồng khác
+  return; 
 }
-
 
   // --- TỪ ĐIỂM NÀY TRỞ XUỐNG LÀ DÀNH RIÊNG CHO ĐÚNG NHÓM QLL ---
   const text = message.text ?? "";
