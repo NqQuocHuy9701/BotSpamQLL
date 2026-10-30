@@ -1,6 +1,7 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig } from "./config.js";
+
 import {
   buildGroupedAnnouncement,
   buildSummary,
@@ -30,6 +31,7 @@ import {
   handleGroupQllMessage,
   maybeHandleCoordinatorCommands,
   updateConfig,
+  loadMonitorConfig, // <-- CHỈ THÊM ĐÚNG 1 CHỮ NÀY VÀO ĐÂY
 } from "./monitor.js";
 
 
@@ -233,13 +235,32 @@ export async function handleUpdate(
   }
   
   // 3. Quét và đẩy vào qll_tracking (Chắc chắn 100% chỉ thuộc nhóm -1002273179613)
+// 3. Quét và đẩy vào qll_tracking (Chắc chắn 100% chỉ thuộc nhóm -1002273179613)
   if (isQllCase(text)) {
-    await insertQllCase(deps.supabase, {
-      message_id: message.message_id,
-      content: text,
-      sender_name: message.from?.first_name || message.from?.username || "QLL",
-      shift_name: getCurrentShift()
-    });
+    // Tải cấu hình chứa danh sách CTV từ database
+    const monitorConfig = await loadMonitorConfig(deps.supabase);
+    
+    const senderUname = (message.from?.username ?? "").trim().toLowerCase();
+    const listCtv = (monitorConfig.ctvUsernames || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+    const listSang = (monitorConfig.ctvSang || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+    const listChieu = (monitorConfig.ctvChieu || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+    const listToi = (monitorConfig.ctvToi || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
+
+    const isAllCtvShift = listSang.includes(senderUname) || listChieu.includes(senderUname) || listToi.includes(senderUname);
+
+    const isCtvOrAdmin = 
+      (message.from && SPAMTEST_ADMIN_IDS.includes(message.from.id)) || 
+      (senderUname !== "" && (listCtv.includes(senderUname) || isAllCtvShift));
+
+    // CHỈ ĐẨY VÀO TRACKING NẾU KHÔNG PHẢI LÀ CTV HOẶC ADMIN
+    if (!isCtvOrAdmin) {
+      await insertQllCase(deps.supabase, {
+        message_id: message.message_id,
+        content: text,
+        sender_name: message.from?.first_name || message.from?.username || "QLL",
+        shift_name: getCurrentShift()
+      });
+    }
   }
 
   await handleGroupQllMessage(
