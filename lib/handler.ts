@@ -1,8 +1,6 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig } from "./config.js";
-
-
 import {
   buildGroupedAnnouncement,
   buildSummary,
@@ -32,7 +30,6 @@ import {
   handleGroupQllMessage,
   maybeHandleCoordinatorCommands,
   updateConfig,
-  loadMonitorConfig, // <-- CHỈ THÊM ĐÚNG 1 CHỮ NÀY VÀO ĐÂY
 } from "./monitor.js";
 
 
@@ -141,158 +138,50 @@ export async function handleUpdate(
   update: TelegramUpdate,
   deps: Deps
 ): Promise<void> {
+  // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
 // ==========================================
-// ==========================================
-    // 🔒 PHỄU 1 (MODULE V4): LƯU SỰ KIỆN REACTION ĐỘC LẬP
+    // BƯỚC 0: XỬ LÝ SỰ KIỆN REACTION (THẢ TIM/ICON)
+    // 0. Bắt sự kiện người dùng thả icon (Reaction) -> Cập nhật handled = true
     // ==========================================
     if (update.message_reaction) {
-      // Ép kiểu as any để fix triệt để lỗi TypeScript
-      const reaction = update.message_reaction as any;
-      const reactionUser = reaction?.user?.username || reaction?.actor?.username;
-      
-      if (reactionUser) {
-        // Tính múi giờ UTC+7 chuẩn Vercel
-        const utcHour = new Date().getUTCHours();
-        const utcMin = new Date().getUTCMinutes();
-        const timeFloat = ((utcHour + 7) % 24) + (utcMin / 60);
+      const reactionUpdate = update.message_reaction as any;
+      const targetMessageId = reactionUpdate.message_id;
+      const newReaction = reactionUpdate.new_reaction;
 
-        let shiftName = 'SANG';
-        let jsonKey = 'ctvSang';
+      console.log(`💟 [REACTION LOG] Nhận update reaction - MessageID: ${targetMessageId}`);
 
-        if (timeFloat >= 13.5 && timeFloat < 17.5) {
-          shiftName = 'CHIEU';
-          jsonKey = 'ctvChieu';
-        } else if (timeFloat >= 17.5) {
-          shiftName = 'TOI';
-          jsonKey = 'ctvToi';
-        }
+      const hasValidReaction = Array.isArray(newReaction) && newReaction.length > 0;
 
-        try {
-          const { data: batchData } = await deps.supabase
-            .from('pending_batches')
-            .select('items')
-            .eq('admin_id', -9001)
-            .single();
+      if (targetMessageId && hasValidReaction) {
+        console.log(`🔍 [REACTION FLOW] Đang tìm và update handled=true cho message_id: ${targetMessageId}`);
 
-          const activeCTVs = batchData?.items?.[jsonKey] || [];
-console.log(`🔍 [DEBUG PHỄU 1] Ca: ${shiftName} | Nhận diện người thả: ${reactionUser} | Danh sách lấy được:`, activeCTVs);
-          // Chỉ lưu nếu người thả tim CÓ TRONG danh sách ca
-          if (activeCTVs.includes(reactionUser)) {
-            console.log(`✅ [PHỄU 1] Ghi nhận REACTION từ CTV @${reactionUser} (Ca ${shiftName})`);
-            await deps.supabase.from('ctv_case_tracking').insert({
-              ctv_username: reactionUser,
-              chat_id: reaction.chat.id,
-              message_id: reaction.message_id,
-              action_type: 'REACT',
-              shift_id: shiftName
-            });
-          }
-        } catch (error) {
-          console.error(`❌ [PHỄU 1 ERROR]:`, error);
+        const { data, error } = await deps.supabase
+          .from("qll_tracking")
+          .update({ handled: true })
+          .eq("message_id", targetMessageId)
+          .select();
+
+        if (error) {
+          console.error("❌ [SUPABASE ERROR] Lỗi cập nhật handled qua reaction:", error);
+        } else {
+          console.log(`✅ [SUCCESS] Đã cập nhật handled = TRUE qua REACTION thành công cho message_id: ${targetMessageId} [${data ? JSON.stringify(data) : ""}]`);
         }
       }
+      return;
     }
 
-  const message = update.message;
+const message = update.message;
   if (!message) {
     return;
   }
-  // ==========================================
-  // LUỒNG 1: ƯU TIÊN PRIVATE CHAT (ADMIN NHẮN RIÊNG & GỬI FILE)
-  // Đưa lên đây để không bị block bởi điều kiện kiểm tra nhóm ở dưới
-  // ==========================================
-  if (message.chat.type === "private") {
-    if (message.text && message.text.startsWith("/start")) {
-      await deps.telegram.sendMessage(message.chat.id, START_ACK);
-    }
-    // /spamtest admin-only
-    if (await maybeHandleSpamTest(message, deps)) {
-      return;
-    }
-    // Batch announcement từ file .xlsx
-    if (await maybeHandleBatch(message, deps)) {
-      return;
-    }
-    return; // Thoát luôn, tin nhắn riêng không cần chạy xuống logic nhóm
-  }
 
-  // ==========================================
-  // LUỒNG 2: XỬ LÝ NHÓM CHUNG & NHÓM QLL (-1002273179613)
-  // ==========================================
-  
-  // 🛑 CHẶN TUYỆT ĐỐI: Nếu không phải nhóm QLL thì chỉ chạy các tính năng phụ rồi thoát
+  // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép bot xử lý và tracking tin nhắn nếu đúng là nhóm QLL (-1002273179613)
+  // Mọi tin nhắn từ nhóm khác đi qua đây sẽ bị return ngay lập tức, không bao giờ lọt vào qll_tracking!
   if (message.chat.id !== SPAMTEST_TARGET_CHAT_ID) {
+    // Nếu không phải nhóm QLL thì chỉ chạy các tính năng phụ (như gom user) rồi thoát luôn
     await collectUsers(message, deps);
-    if (await maybeAckAnnouncementReply(message, deps)) return;
-    
-    if (!deps.relayEnabled) return;
-    const replyTo = message.reply_to_message;
-    if (!replyTo) return;
-    const sensitiveText = message.text ?? "";
-    if (!isSensitive(sensitiveText)) return;
-    await relay(message, replyTo, deps);
-    
     return;
   }
-
-// ==========================================
-// 🔒 PHỄU 1: LƯU SỰ KIỆN REACTION CỦA CTV TRONG CA
-// ==========================================
-if (update.message_reaction) {
-  // 1. ĐỊNH DANH TELEGRAM: Lấy đúng người thực hiện thao tác thả tim
-  const reactionUser = update.message_reaction.user?.username;
-  if (!reactionUser) return; 
-
-  // 2. CA THỰC TẾ: Tính toán giờ Việt Nam (UTC+7) chuẩn cho Vercel
-  const utcHour = new Date().getUTCHours();
-  const utcMin = new Date().getUTCMinutes();
-  const timeFloat = ((utcHour + 7) % 24) + (utcMin / 60);
-
-  let shiftName = 'SANG';
-  let jsonKey = 'ctvSang';
-
-  if (timeFloat >= 13.5 && timeFloat < 17.5) {
-    shiftName = 'CHIEU';
-    jsonKey = 'ctvChieu';
-  } else if (timeFloat >= 17.5) {
-    shiftName = 'TOI';
-    jsonKey = 'ctvToi';
-  }
-
-  try {
-    // 3. DANH SÁCH CTV ĐẦU VÀO: Trích xuất từ pending_batches (-9001)
-    const { data: batchData } = await deps.supabase
-      .from('pending_batches')
-      .select('items')
-      .eq('admin_id', -9001)
-      .single();
-
-    const activeCTVs = batchData?.items?.[jsonKey] || [];
-
-    // 4. BỘ LỌC ĐỐI SOÁT: Chỉ kiểm tra những CTV thuộc danh sách ca thực tế
-    if (!activeCTVs.includes(reactionUser)) {
-      // Người thả tim KHÔNG CÓ trong JSON ca thực tế -> Bỏ qua, không lưu, không báo log rác
-      return; 
-    }
-
-    // 5. GHI NHẬN THÔNG TIN TƯƠNG TÁC
-    console.log(`✅ [PHỄU 1] Ghi nhận REACTION từ CTV @${reactionUser} (Ca ${shiftName})`);
-    
-    await deps.supabase.from('ctv_case_tracking').insert({
-      ctv_username: reactionUser,
-      chat_id: update.message_reaction.chat.id,
-      message_id: update.message_reaction.message_id,
-      action_type: 'REACT',
-      shift_id: shiftName
-    });
-
-  } catch (error) {
-    console.error(`❌ [PHỄU 1 ERROR]:`, error);
-  }
-  return; 
-}
-
-
 
   // --- TỪ ĐIỂM NÀY TRỞ XUỐNG LÀ DÀNH RIÊNG CHO ĐÚNG NHÓM QLL ---
   const text = message.text ?? "";
@@ -330,32 +219,13 @@ if (update.message_reaction) {
   }
   
   // 3. Quét và đẩy vào qll_tracking (Chắc chắn 100% chỉ thuộc nhóm -1002273179613)
-// 3. Quét và đẩy vào qll_tracking (Chắc chắn 100% chỉ thuộc nhóm -1002273179613)
   if (isQllCase(text)) {
-    // Tải cấu hình chứa danh sách CTV từ database
-    const monitorConfig = await loadMonitorConfig(deps.supabase);
-    
-    const senderUname = (message.from?.username ?? "").trim().toLowerCase();
-    const listCtv = (monitorConfig.ctvUsernames || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-    const listSang = (monitorConfig.ctvSang || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-    const listChieu = (monitorConfig.ctvChieu || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-    const listToi = (monitorConfig.ctvToi || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-
-    const isAllCtvShift = listSang.includes(senderUname) || listChieu.includes(senderUname) || listToi.includes(senderUname);
-
-    const isCtvOrAdmin = 
-      (message.from && SPAMTEST_ADMIN_IDS.includes(message.from.id)) || 
-      (senderUname !== "" && (listCtv.includes(senderUname) || isAllCtvShift));
-
-    // CHỈ ĐẨY VÀO TRACKING NẾU KHÔNG PHẢI LÀ CTV HOẶC ADMIN
-    if (!isCtvOrAdmin) {
-      await insertQllCase(deps.supabase, {
-        message_id: message.message_id,
-        content: text,
-        sender_name: message.from?.first_name || message.from?.username || "QLL",
-        shift_name: getCurrentShift()
-      });
-    }
+    await insertQllCase(deps.supabase, {
+      message_id: message.message_id,
+      content: text,
+      sender_name: message.from?.first_name || message.from?.username || "QLL",
+      shift_name: getCurrentShift()
+    });
   }
 
   await handleGroupQllMessage(
@@ -366,16 +236,32 @@ if (update.message_reaction) {
     SPAMTEST_ADMIN_IDS
   );
 
-  // 4. Passive user collection chạy trên mọi update nhóm
+  // 5. Passive user collection chạy trên mọi update nhóm
   await collectUsers(message, deps);
 
-  // 5. Auto-acknowledge khi có người reply thông báo của bot
+  // 6. Auto-acknowledge khi có người reply thông báo của bot
   if (await maybeAckAnnouncementReply(message, deps)) {
     return;
   }
 
-  // 6. Xử lý Relay cho nhóm QLL
+  // 7. /spamtest admin-only
+  if (await maybeHandleSpamTest(message, deps)) {
+    return;
+  }
+
+  // 8. Batch announcement từ file .xlsx
+  if (await maybeHandleBatch(message, deps)) {
+    return;
+  }
+
   if (!deps.relayEnabled) {
+    return;
+  }
+
+  if (message.chat.type === "private") {
+    if (message.text && message.text.startsWith("/start")) {
+      await deps.telegram.sendMessage(message.chat.id, START_ACK);
+    }
     return;
   }
 
@@ -391,6 +277,9 @@ if (update.message_reaction) {
 
   await relay(message, replyTo, deps);
 }
+// Passively records users seen in a group chat into telegram_users_qll.
+// Captures the message sender and any newly-joined members. Never touches
+// private chats, and skips bot accounts and the "sender" of a join event
 // (the message.from on a join event is whoever added them / the joiner).
 async function collectUsers(
   message: TelegramMessage,
