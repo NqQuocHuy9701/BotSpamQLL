@@ -246,17 +246,23 @@ if (message && message.text && message.text.startsWith('/baocaoca')) {
 
   if (chatId === QLL_CHAT_ID || chatId === HTKT_CHAT_ID) {
     try {
-      const currentHour = new Date().getHours();
-      let shiftName = 'SANG';
-      let jsonKey = 'ctvSang';
-      
-      if (currentHour >= 12 && currentHour < 17) {
-        shiftName = 'CHIEU';
-        jsonKey = 'ctvChieu';
-      } else if (currentHour >= 17) {
-        shiftName = 'TOI';
-        jsonKey = 'ctvToi';
-      }
+// ⏰ TÍNH CA TRỰC CHUẨN MÚI GIỜ VIỆT NAM (UTC+7)
+    const now = new Date();
+    const vnTime = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
+    const hour = vnTime.getHours();
+    const minute = vnTime.getMinutes();
+    const timeFloat = hour + (minute / 60);
+
+    let shiftName = 'SANG';
+    let jsonKey = 'ctvSang';
+
+    if (timeFloat >= 13.5 && timeFloat < 17.5) {
+      shiftName = 'CHIEU';
+      jsonKey = 'ctvChieu';
+    } else if (timeFloat >= 17.5) {
+      shiftName = 'TOI';
+      jsonKey = 'ctvToi';
+    }
 
       // BƯỚC 1: DANH SÁCH CTV TRONG CA (DATABASE)
       const { data: batchData, error: batchError } = await deps.supabase
