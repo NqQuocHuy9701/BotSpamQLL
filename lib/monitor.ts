@@ -587,6 +587,27 @@ export async function handleGroupQllMessage(
   const text = (message.text ?? message.caption ?? "").trim();
   const lowerText = text.toLowerCase();
 
+  // Chuẩn hóa: Gọt sạch dấu "@", khoảng trắng và đưa về chữ thường cho toàn bộ danh sách CTV lấy từ DB
+  const listCtv = (config.ctvUsernames || []).map((u: string) => u.replace(/^@/, "").trim().toLowerCase());
+  const listSang = (config?.ctvSang || []).map((u: string) => u.replace(/^@/, "").trim().toLowerCase());
+  const listChieu = (config?.ctvChieu || []).map((u: string) => u.replace(/^@/, "").trim().toLowerCase());
+  const listToi = (config?.ctvToi || []).map((u: string) => u.replace(/^@/, "").trim().toLowerCase());
+
+  const isAllCtvShift =
+    listSang.includes(senderUname) ||
+    listChieu.includes(senderUname) ||
+    listToi.includes(senderUname);
+
+  const isCtvOrAdmin =
+    adminIds.includes(message.from.id) ||
+    (senderUname !== "" && (listCtv.includes(senderUname) || isAllCtvShift));
+
+  // 🛑 CHỐT CHẶN 1 (ƯU TIÊN CAO NHẤT): Nếu là Admin hoặc CTV nội bộ -> Bỏ qua hoàn toàn ngay từ cửa ngõ
+  if (isCtvOrAdmin) {
+    if (watchedChanged) await saveWatchedMessages(supabase, watched);
+    return; 
+  }
+
   const isCredentialReply = 
     lowerText.includes("acc:") || 
     lowerText.includes("pass:") || 
@@ -596,29 +617,8 @@ export async function handleGroupQllMessage(
     lowerText.includes("e gửi") || 
     lowerText.includes("gửi lại tk");
 
-  // CHỐT CHẶN 1: Chặn tuyệt đối tin nhắn Tài khoản / Mật khẩu
+  // CHỐT CHẶN 2: Chặn tuyệt đối tin nhắn Tài khoản / Mật khẩu của người ngoài
   if (isCredentialReply) {
-    if (watchedChanged) await saveWatchedMessages(supabase, watched);
-    return; 
-  }
-  
-// Chuẩn hóa: Gọt sạch dấu "@" và đưa về chữ thường cho toàn bộ danh sách CTV lấy từ DB
-const listCtv = (config.ctvUsernames || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-const listSang = (config?.ctvSang || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-const listChieu = (config?.ctvChieu || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-const listToi = (config?.ctvToi || []).map((u: string) => u.replace(/^@/, "").toLowerCase());
-
-const isAllCtvShift =
-  listSang.includes(senderUname) ||
-  listChieu.includes(senderUname) ||
-  listToi.includes(senderUname);
-
-const isCtvOrAdmin =
-  adminIds.includes(message.from.id) ||
-  (senderUname !== "" && (listCtv.includes(senderUname) || isAllCtvShift));
-
-  // CHỐT CHẶN 2: Tin nhắn của Admin/CTV ca trực cũng bỏ qua
-  if (isCtvOrAdmin) {
     if (watchedChanged) await saveWatchedMessages(supabase, watched);
     return; 
   }
@@ -639,13 +639,12 @@ const isCtvOrAdmin =
     ? `${message.from.first_name} ${message.from.last_name || ""}`.trim() 
     : senderUname || "QLL";
     
-await insertQllCase(supabase, {
+  await insertQllCase(supabase, {
     message_id: message.message_id,
     content: text,
     sender_name: senderName,
     shift_name: getCurrentShiftVn().label
   });
-
 
   // 2. PUSH VÀO MẢNG ĐỂ TÍNH SLA 5 PHÚT
   watched.push({
@@ -671,7 +670,6 @@ await insertQllCase(supabase, {
     await saveWatchedMessages(supabase, watched);
   }
 }
-
 export async function checkUnansweredMessages(
   telegram: TelegramClient,
   supabase: SupabaseClient,
