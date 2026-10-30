@@ -237,7 +237,7 @@ const user = (reactionUpdate.user || reactionUpdate.actor_chat) as any;
   }
 
 // ==========================================
-// 🔒 XỬ LÝ LỆNH TRA CỨU CÁ NHÂN /mystats (GỬI CẢ CHO ADMIN)
+// 🔒 XỬ LÝ LỆNH TRA CỨU CÁ NHÂN /mystats (GỬI CẢ CHO ADMIN + HINT VERCEL)
 // ==========================================
 if (message.text && message.text.startsWith('/mystats')) {
   const chatId = message.chat.id;
@@ -262,7 +262,7 @@ if (message.text && message.text.startsWith('/mystats')) {
         currentShift = 'TOI';
       }
 
-      console.log(`🔍 [MYSTATS] Người dùng @${senderUsername} đang tra cứu cho ca: ${currentShift}`);
+      console.log(`🔍 [MYSTATS] Bắt đầu tra cứu cho @${senderUsername} | Ca: ${currentShift}`);
 
       // 2. Truy vấn dữ liệu từ bảng ctv_case_tracking
       const { data, error } = await deps.supabase
@@ -272,22 +272,20 @@ if (message.text && message.text.startsWith('/mystats')) {
         .eq('shift_id', currentShift);
 
       if (error) {
-        console.error(`❌ [MYSTATS ERROR] Lỗi Supabase khi truy vấn:`, error);
+        console.error(`❌ [VERCEL LOG - ERROR] Lỗi Supabase khi truy vấn:`, error);
         await deps.telegram.sendMessage(chatId, `⚠️ Lỗi hệ thống khi lấy dữ liệu thống kê ca ${currentShift}.`, message.message_id);
         return;
       }
 
+      // 💡 HINT VERCEL 1: Xem Supabase trả về bao nhiêu dòng dữ liệu thô
+      console.log(`💡 [VERCEL HINT - DATABASE] Truy vấn thành công! Trả về ${data ? data.length : 0} dòng dữ liệu thô từ Supabase cho @${senderUsername}.`);
+
       // 3. Xử lý trường hợp không có dữ liệu
       if (!data || data.length === 0) {
-        console.log(`ℹ️ [MYSTATS] Không tìm thấy dữ liệu case nào cho @${senderUsername} trong ca ${currentShift}`);
+        console.log(`ℹ️ [MYSTATS] Dữ liệu trống. @${senderUsername} chưa có case nào trong ca ${currentShift}`);
         
         const emptyMsg = `📊 @${senderUsername} ơi, hệ thống ghi nhận trong ca **${currentShift}** hiện chưa có dữ liệu xử lý nào của bạn.`;
         await deps.telegram.sendMessage(chatId, emptyMsg, message.message_id);
-        
-        // (Tùy chọn) Gửi thông báo về cho Admin/Nhóm quản lý nếu muốn nắm tình hình CTV chưa làm case
-        // const ADMIN_CHAT_ID = -1002273179613; // Điền ID nhóm/Admin nhận thông báo nếu muốn
-        // await deps.telegram.sendMessage(ADMIN_CHAT_ID, `🔔 [TRA CỨU] @${senderUsername} vừa gõ /mystats nhưng ca ${currentShift} chưa có case nào.`);
-        
         return;
       }
 
@@ -295,6 +293,9 @@ if (message.text && message.text.startsWith('/mystats')) {
       const uniqueCases = new Set(data.map((row: any) => row.message_id));
       const reactCount = data.filter((row: any) => row.action_type === 'REACT').length;
       const replyCount = data.filter((row: any) => row.action_type === 'REPLY').length;
+
+      // 💡 HINT VERCEL 2: Xem kết quả sau khi đếm bóc tách
+      console.log(`💡 [VERCEL HINT - COUNTING] Kết quả bóc tách: ${reactCount} REACT | ${replyCount} REPLY | ${uniqueCases.size} UNIQUE CASES.`);
 
       const replyMsg = `📊 **THỐNG KÊ HIỆU SUẤT CÁ NHÂN (${senderUsername}) - Ca ${currentShift}**\n\n` +
                        `❤️ Số case qua Reaction: ${reactCount}\n` +
@@ -307,12 +308,12 @@ if (message.text && message.text.startsWith('/mystats')) {
       // ==========================================
       // 🚀 GỬI BẢN SAO THÔNG BÁO VỀ CHO ADMIN / NHÓM QUẢN LÝ
       // ==========================================
-      const ADMIN_TARGET_ID = -1002273179613; // 💡 Đặt ID nhóm QLL hoặc ID tài khoản Admin của bạn ở đây
+      const ADMIN_TARGET_ID = -1002273179613; // ID nhóm QLL
       const adminLogMsg = `🔔 **[ADMIN NOTIFY]** CTV @${senderUsername} vừa tra cứu hiệu suất cá nhân:\n\n` + replyMsg;
       
       await deps.telegram.sendMessage(ADMIN_TARGET_ID, adminLogMsg);
 
-      console.log(`✅ [MYSTATS] Đã trả kết quả cho @${senderUsername} và bắn bản sao báo cáo về cho Admin thành công!`);
+      console.log(`✅ [MYSTATS] Đã trả kết quả cho @${senderUsername} và Admin thành công!`);
 
     } catch (err) {
       console.error(`❌ [MYSTATS EXCEPTION]:`, err);

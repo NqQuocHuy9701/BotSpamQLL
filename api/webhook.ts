@@ -56,4 +56,6 @@ function parseUpdate(body: unknown): TelegramUpdate {
     return body as TelegramUpdate;
   }
   return { update_id: 0 };
+
+  
 }
