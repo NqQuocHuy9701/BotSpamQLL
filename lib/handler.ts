@@ -221,14 +221,36 @@ const message = update.message;
     }).catch(console.error);
   }
   
-  // 3. Quét và đẩy vào qll_tracking (Chắc chắn 100% chỉ thuộc nhóm -1002273179613)
+// 3. Quét và đẩy vào qll_tracking (Chỉ lưu tin nhắn hợp lệ và CHẶN TẤT CẢ CTV TRONG MẢNG ctvUsernames)
   if (isQllCase(text)) {
-    await insertQllCase(deps.supabase, {
-      message_id: message.message_id,
-      content: text,
-      sender_name: message.from?.first_name || message.from?.username || "QLL",
-      shift_name: getCurrentShift()
-    });
+    const senderUsername = message.from?.username?.toLowerCase() || "";
+
+    if (senderUsername) {
+      // Kéo dữ liệu từ bảng pending_batches (-9001) lấy trực tiếp mảng ctvUsernames
+      const { data: batchData } = await deps.supabase
+        .from('pending_batches')
+        .select('items')
+        .eq('admin_id', -9001)
+        .single();
+
+      // Lấy toàn bộ danh sách CTV từ mảng ctvUsernames trong JSON
+      const allCtvs = (batchData?.items?.ctvUsernames || []).map((u: string) => u.toLowerCase().replace(/^@/, ""));
+      const cleanSender = senderUsername.replace(/^@/, "");
+
+      // Nếu người gửi CÓ MẶT trong danh sách tổng ctvUsernames -> Bỏ qua, không lưu DB
+      if (allCtvs.includes(cleanSender)) {
+        console.log(`🛡️ [QLL TRACKING] Chặn tin nhắn của CTV @${cleanSender} (Thuộc danh sách ctvUsernames).`);
+      } else {
+        // Không phải CTV mới cho phép lưu vào qll_tracking
+        await insertQllCase(deps.supabase, {
+          message_id: message.message_id,
+          content: text,
+          sender_name: message.from?.first_name || message.from?.username || "QLL",
+          shift_name: getCurrentShift()
+        });
+        console.log(`✅ [QLL TRACKING] Đã lưu case từ non-CTV: @${cleanSender}`);
+      }
+    }
   }
 
   await handleGroupQllMessage(
