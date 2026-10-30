@@ -140,7 +140,7 @@ export async function handleUpdate(
   update: TelegramUpdate,
   deps: Deps
 ): Promise<void> {
-  // 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Xóa khỏi danh sách chờ SLA 5 phút
+// 0. Bắt sự kiện người dùng thả icon (Reaction) trong nhóm QLL -> Cập nhật handled = true
   if (update.message_reaction) {
     const reaction = update.message_reaction;
     const targetMessageId = reaction.message_id;
@@ -150,7 +150,7 @@ export async function handleUpdate(
         .from("qll_tracking")
         .update({ handled: true })
         .eq("message_id", targetMessageId);
-        
+
       console.log(`✅ Đã thả reaction, set handled = true cho message_id: ${targetMessageId}`);
     }
     return;
@@ -160,7 +160,6 @@ export async function handleUpdate(
   if (!message) {
     return;
   }
-
   // ==========================================
   // LUỒNG 1: ƯU TIÊN PRIVATE CHAT (ADMIN NHẮN RIÊNG & GỬI FILE)
   // Đưa lên đây để không bị block bởi điều kiện kiểm tra nhóm ở dưới

@@ -790,3 +790,25 @@ export async function sendReaction(
     return false;
   }
 }
+export async function handleMessageReaction(
+  update: any,
+  supabase: SupabaseClient
+): Promise<void> {
+  const reaction = update.message_reaction;
+  if (!reaction || !reaction.message_id) return;
+
+  const messageId = reaction.message_id;
+  const newReaction = reaction.new_reaction || [];
+
+  // Nếu có thả icon (new_reaction không rỗng) -> Cập nhật handled = true
+  if (newReaction.length > 0) {
+    try {
+      await supabase
+        .from("qll_tracking")
+        .update({ handled: true })
+        .eq("message_id", messageId);
+    } catch (e) {
+      console.error("Lỗi cập nhật handled qua reaction:", e);
+    }
+  }
+}
