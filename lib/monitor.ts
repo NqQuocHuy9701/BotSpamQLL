@@ -222,6 +222,46 @@ export async function saveWatchedMessages(
 }
 
 // Xử lý các lệnh quản lý /dp, /đp, /addctv, /addctvca, /settitle, /delctv
+// Bảng tổng hợp toàn bộ lệnh tương tác với bot (dùng cho /help, /menu, /start).
+export function buildHelpText(): string {
+  return [
+    "📖 DANH SÁCH LỆNH BOT (gõ ở chat riêng với bot)",
+    "",
+    "👥 ĐIỀU PHỐI / CTV CA:",
+    "• /dp — xem cấu hình điều phối + CTV các ca",
+    "• /dp <sáng|chiều|tối> <tên> — đổi điều phối viên ca",
+    "• /addctvca <sang|chieu|toi> @u1 @u2 — thêm CTV trực ca",
+    "• /delctvca <sang|chieu|toi> @u — xóa CTV trực ca",
+    "• /settitle @u <anh|chị> — đặt danh xưng",
+    "",
+    "📊 BÁO CÁO / CHECK-IN:",
+    "• /checkin — CTV đã check-in ca hiện tại (thực tế)",
+    "• /baocao — báo cáo React/Reply/Tổng mỗi CTV (gộp 2 nhóm)",
+    "",
+    "⏰ SLA (nhắc case quá 5 phút):",
+    "• /slaoff @u1 @u2 — tắt SLA tag cho CTV (nhóm QLL, theo ngày)",
+    "• /slaon @u — bật lại SLA tag",
+    "• /slaoff — xem danh sách đang tắt hôm nay",
+    "• /tatsla — tắt toàn bộ giám sát SLA",
+    "• /batsla — bật lại giám sát SLA",
+    "",
+    "📨 THÔNG BÁO HS (gửi hàng loạt):",
+    "• (gửi file Excel) — nạp danh sách HS",
+    "• /ok — gửi ngay | /ok 21:00 | /ok 16/10 21:00 — hẹn giờ",
+    "• /huy — hủy batch đang chờ",
+    "• /cancel — dừng/xóa các tin chưa gửi",
+    "",
+    "👤 QUẢN LÝ QLL:",
+    "• /adduser <username> <họ tên> — thêm QLL thủ công",
+    "• /finduser <họ tên> — tìm QLL",
+    "• /listusers — liệt kê QLL",
+    "",
+    "📢 KHÁC:",
+    "• /spam — đăng thông báo vào nhóm QLL (admin)",
+    "• /help hoặc /menu — hiện bảng lệnh này",
+  ].join("\n");
+}
+
 export async function maybeHandleCoordinatorCommands(
   message: TelegramMessage,
   telegram: TelegramClient,
@@ -230,6 +270,13 @@ export async function maybeHandleCoordinatorCommands(
 ): Promise<boolean> {
   const trimmed = text.trim();
   const lower = trimmed.toLowerCase();
+
+  // --- LỆNH /help (/menu): tổng hợp toàn bộ lệnh tương tác với bot ---
+  // Lưu ý: KHÔNG bắt /start ở đây — /start giữ luồng mở inbox cho QLL.
+  if (lower === "/help" || lower === "/menu") {
+    await telegram.sendMessage(message.chat.id, buildHelpText());
+    return true;
+  }
 
   if (
     lower === "/dp" ||
