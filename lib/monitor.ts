@@ -1115,3 +1115,68 @@ export async function addCtvFromCheckin(
     return true;
   }
 }
+
+// =====================================================================
+// LỆNH /checkin (admin, chat riêng): liệt kê CTV ĐÃ CHECK-IN của CA HIỆN TẠI.
+// Đọc config (-9001). List CTV ca tự reset theo ngày (ctvShiftDate): nếu
+// ctvShiftDate != hôm nay thì coi như chưa ai check-in (list cũ đã hết hạn).
+// =====================================================================
+
+// Dựng text danh sách CTV đã check-in cho ca hiện tại.
+export async function buildCheckinList(
+  supabase: SupabaseClient,
+  now: Date = new Date()
+): Promise<string> {
+  const config = await loadMonitorConfig(supabase);
+  const { key, label } = getCurrentShiftVn(now);
+  const today = getVnDateString(now);
+
+  // List ca chỉ hợp lệ nếu thuộc về hôm nay; nếu khác ngày -> đã hết hạn.
+  let list: string[] = [];
+  if (config.ctvShiftDate === today) {
+    const raw =
+      key === "sang"
+        ? config.ctvSang
+        : key === "chieu"
+        ? config.ctvChieu
+        : config.ctvToi;
+    list = (raw || []).map((u) => u.replace(/^@/, "").trim().toLowerCase());
+  }
+
+  const lines: string[] = [];
+  lines.push(`📋 CTV đã check-in ca [${label.toUpperCase()}] hôm nay (${today}):`);
+  if (list.length === 0) {
+    lines.push("(Chưa có ai check-in)");
+  } else {
+    list.forEach((u, i) => {
+      lines.push(`${i + 1}. @${u}`);
+    });
+    lines.push("------------------------");
+    lines.push(`Tổng: ${list.length} CTV`);
+  }
+  return lines.join("\n");
+}
+
+// Xử lý lệnh /checkin (admin, chat riêng): liệt kê CTV đã check-in ca hiện
+// tại và trả về chat riêng của admin. Trả true nếu đã xử lý lệnh này.
+export async function maybeHandleCheckinCommand(
+  message: TelegramMessage,
+  telegram: TelegramClient,
+  supabase: SupabaseClient,
+  adminIds: number[]
+): Promise<boolean> {
+  const text = (message.text ?? "").trim().toLowerCase();
+  if (text !== "/checkin") return false;
+  // Chỉ admin trong chat riêng.
+  const fromId = message.from?.id;
+  if (
+    message.chat.type !== "private" ||
+    fromId === undefined ||
+    !adminIds.includes(fromId)
+  ) {
+    return true; // nuốt lệnh, không làm gì nếu không đúng quyền/chat
+  }
+  const list = await buildCheckinList(supabase);
+  await telegram.sendMessage(message.chat.id, list);
+  return true;
+}

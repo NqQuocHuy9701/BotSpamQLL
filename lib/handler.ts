@@ -32,6 +32,7 @@ import {
   updateConfig,
   recordCtvReply,
   maybeHandleReportCommand,
+  maybeHandleCheckinCommand,
   addCtvFromCheckin,
 } from "./monitor.js";
 
@@ -201,6 +202,17 @@ const message = update.message;
       // 7b. /baocao -> gửi báo cáo hiệu suất ca hiện tại cho admin (chat riêng).
       if (
         await maybeHandleReportCommand(
+          message,
+          deps.telegram,
+          deps.supabase,
+          SPAMTEST_ADMIN_IDS
+        )
+      ) {
+          return;
+      }
+      // 7c. /checkin -> liệt kê CTV đã check-in ca hiện tại cho admin (chat riêng).
+      if (
+        await maybeHandleCheckinCommand(
           message,
           deps.telegram,
           deps.supabase,
