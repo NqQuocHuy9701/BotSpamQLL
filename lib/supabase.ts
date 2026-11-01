@@ -516,3 +516,55 @@ export async function getAndMarkMissedCases(client: SupabaseClient) {
   }
   return data || [];
 }
+
+// --- Dọn dữ liệu hiệu suất cũ (chống phình DB) --------------------------------
+// shift_interactions và qll_tracking tích lũy rất nhanh (nhiều case/ngày × 2
+// nhóm). /baocao chỉ cần dữ liệu TRONG NGÀY, nên có thể xóa dòng cũ an toàn:
+//   - shift_interactions: > INTERACTION_RETENTION_DAYS ngày (mặc định 2).
+//   - qll_tracking:       > CASE_RETENTION_DAYS ngày (mặc định 3; đủ xa cửa sổ
+//     SLA 12h + báo cáo miss, để không xóa nhầm case đang theo dõi).
+// Non-throwing; trả số dòng đã xóa mỗi bảng. Lọc theo created_at (UTC).
+export const INTERACTION_RETENTION_DAYS = 2;
+export const CASE_RETENTION_DAYS = 3;
+
+export async function purgeOldPerformanceData(
+  client: SupabaseClient,
+  now: Date = new Date()
+): Promise<{ ok: boolean; interactions: number; cases: number; error?: string }> {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const interactionCutoff = new Date(
+    now.getTime() - INTERACTION_RETENTION_DAYS * dayMs
+  ).toISOString();
+  const caseCutoff = new Date(
+    now.getTime() - CASE_RETENTION_DAYS * dayMs
+  ).toISOString();
+
+  let interactions = 0;
+  let cases = 0;
+  try {
+    const { data: d1, error: e1 } = await client
+      .from("shift_interactions")
+      .delete()
+      .lt("created_at", interactionCutoff)
+      .select("message_id");
+    if (e1) return { ok: false, interactions: 0, cases: 0, error: e1.message };
+    interactions = Array.isArray(d1) ? d1.length : 0;
+
+    const { data: d2, error: e2 } = await client
+      .from("qll_tracking")
+      .delete()
+      .lt("created_at", caseCutoff)
+      .select("message_id");
+    if (e2) return { ok: false, interactions, cases: 0, error: e2.message };
+    cases = Array.isArray(d2) ? d2.length : 0;
+
+    return { ok: true, interactions, cases };
+  } catch (err) {
+    return {
+      ok: false,
+      interactions,
+      cases,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}

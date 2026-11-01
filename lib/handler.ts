@@ -91,6 +91,11 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
 
+// Nhóm HTKT (hỗ trợ kỹ thuật) — nhóm THỨ HAI được theo dõi hiệu suất CTV.
+// CHỈ dùng cho: đẩy case hợp lệ vào qll_tracking + ghi React/Reply vào
+// shift_interactions. KHÔNG relay / forward / auto-ack (khác nhóm QLL).
+const HTKT_GROUP_ID = -1002458492731;
+
 // --- TÍNH NĂNG FW VẮNG: ID Nhóm gốc hỗ trợ kĩ thuật ---
 //const SOURCE_ABSENT_GROUP_ID = -1002458492731; // Nhóm Gốc Hỗ Trợ Kỹ Thuật
 
@@ -180,10 +185,16 @@ export async function handleUpdate(
       // được ảnh hưởng tới việc cập nhật handled đã chạy xong. Chỉ áp cho nhóm
       // QLL (nơi có case trong qll_tracking).
       try {
-        if (reactionUpdate.chat?.id === SPAMTEST_TARGET_CHAT_ID) {
+        const reactChatId = reactionUpdate.chat?.id;
+        // Ghi React cho CẢ HAI nhóm theo dõi: QLL + HTKT. Dùng scopedCaseId để
+        // khớp đúng khóa case (HTKT lưu dưới id âm phái sinh).
+        if (
+          reactChatId === SPAMTEST_TARGET_CHAT_ID ||
+          reactChatId === HTKT_GROUP_ID
+        ) {
           await recordCtvReaction(deps.supabase, {
-            chatId: reactionUpdate.chat.id,
-            caseMessageId: targetMessageId,
+            chatId: reactChatId,
+            caseMessageId: scopedCaseId(reactChatId, targetMessageId),
             reactorUsername: reactionUpdate.user?.username,
             checkinClient: deps.checkinSupabase,
           });
@@ -244,10 +255,35 @@ const message = update.message;
       return;
   }
 
-  // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép bot xử lý và tracking tin nhắn nếu đúng là nhóm QLL (-1002273179613)
-  // Mọi tin nhắn từ nhóm khác đi qua đây sẽ bị return ngay lập tức, không bao giờ lọt vào qll_tracking!
+  // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép LUỒNG QLL (relay/forward/auto-ack) nếu đúng
+  // nhóm QLL (-1002273179613). Nhóm khác return ngay, không lọt vào luồng QLL.
   if (message.chat.id !== SPAMTEST_TARGET_CHAT_ID) {
-    // Nếu không phải nhóm QLL thì chỉ chạy các tính năng phụ (như gom user) rồi thoát luôn
+    // NHÓM HTKT: nhóm thứ hai được theo dõi hiệu suất. CHỈ tracking case hợp lệ
+    // + ghi Reply vào shift_interactions. TUYỆT ĐỐI KHÔNG relay/forward/auto-ack.
+    if (message.chat.id === HTKT_GROUP_ID) {
+      // 1) Reply của CTV lên case hợp lệ -> ghi nhận hiệu suất (gộp chung /baocao).
+      //    Dùng scopedCaseId để khớp đúng khóa case HTKT trong qll_tracking.
+      if (message.reply_to_message) {
+        const htktCaseId = scopedCaseId(
+          message.chat.id,
+          message.reply_to_message.message_id
+        );
+        await markCaseHandled(deps.supabase, htktCaseId);
+        await recordCtvReply(deps.supabase, {
+          chatId: message.chat.id,
+          caseMessageId: htktCaseId,
+          replierUsername: message.from?.username,
+          checkinClient: deps.checkinSupabase,
+        });
+      }
+      // 2) Quét & đẩy case hợp lệ vào qll_tracking (cùng rule + cùng cách chặn
+      //    CTV như nhóm QLL: chỉ lưu case từ NON-CTV).
+      await trackQllCase(message, deps);
+      // 3) Gom user thụ động (như mọi nhóm).
+      await collectUsers(message, deps);
+      return;
+    }
+    // Nhóm khác: chỉ gom user rồi thoát.
     await collectUsers(message, deps);
     return;
   }
@@ -262,7 +298,7 @@ const message = update.message;
     // gốc là case hợp lệ, tính cho CTV đó (ghi đè theo case -> CTV reply cuối).
     await recordCtvReply(deps.supabase, {
       chatId: message.chat.id,
-      caseMessageId: message.reply_to_message.message_id,
+      caseMessageId: scopedCaseId(message.chat.id, message.reply_to_message.message_id),
       replierUsername: message.from?.username,
       checkinClient: deps.checkinSupabase,
     });
@@ -295,37 +331,8 @@ const message = update.message;
     }).catch(console.error);
   }
   
-// 3. Quét và đẩy vào qll_tracking (Chỉ lưu tin nhắn hợp lệ và CHẶN TẤT CẢ CTV TRONG MẢNG ctvUsernames)
-  if (isQllCase(text)) {
-    const senderUsername = message.from?.username?.toLowerCase() || "";
-
-    if (senderUsername) {
-      // Kéo dữ liệu từ bảng pending_batches (-9001) lấy trực tiếp mảng ctvUsernames
-      const { data: batchData } = await deps.supabase
-        .from('pending_batches')
-        .select('items')
-        .eq('admin_id', -9001)
-        .single();
-
-      // Lấy toàn bộ danh sách CTV từ mảng ctvUsernames trong JSON
-      const allCtvs = (batchData?.items?.ctvUsernames || []).map((u: string) => u.toLowerCase().replace(/^@/, ""));
-      const cleanSender = senderUsername.replace(/^@/, "");
-
-      // Nếu người gửi CÓ MẶT trong danh sách tổng ctvUsernames -> Bỏ qua, không lưu DB
-      if (allCtvs.includes(cleanSender)) {
-        console.log(`🛡️ [QLL TRACKING] Chặn tin nhắn của CTV @${cleanSender} (Thuộc danh sách ctvUsernames).`);
-      } else {
-        // Không phải CTV mới cho phép lưu vào qll_tracking
-        await insertQllCase(deps.supabase, {
-          message_id: message.message_id,
-          content: text,
-          sender_name: message.from?.first_name || message.from?.username || "QLL",
-          shift_name: getCurrentShift()
-        });
-        console.log(`✅ [QLL TRACKING] Đã lưu case từ non-CTV: @${cleanSender}`);
-      }
-    }
-  }
+// 3. Quét và đẩy vào qll_tracking (dùng chung cho nhóm QLL & HTKT).
+  await trackQllCase(message, deps);
 
   await handleGroupQllMessage(
     message,
@@ -962,4 +969,54 @@ function isQllCase(text: string): boolean {
   const hasNumber = /\d{3,}/.test(text); 
   const hasClassCode = /(TOAN|MOET|KHTN|TCLC|TA|TVTTH)/i.test(text); 
   return hasNumber || hasClassCode;
+}
+
+// qll_tracking dùng khóa message_id ĐƠN (không có chat_id). Telegram đánh
+// message_id RIÊNG theo từng nhóm -> HTKT có thể trùng id với QLL. Để tách
+// không gian khóa mà KHÔNG đổi schema: nhóm QLL giữ NGUYÊN message_id (dương),
+// nhóm HTKT ghi dưới dạng ÂM phái sinh = -(messageId*10 + 1). QLL luôn dương,
+// HTKT luôn âm -> không bao giờ va chạm. Xác định + đảo ngược được. Hàm phụ
+// recordCtvReply/recordCtvReaction cũng quy cùng công thức này khi tra case.
+export function scopedCaseId(chatId: number, messageId: number): number {
+  if (chatId === SPAMTEST_TARGET_CHAT_ID) return messageId; // QLL: giữ nguyên
+  if (chatId === HTKT_GROUP_ID) return -(messageId * 10 + 1); // HTKT: âm phái sinh
+  return messageId; // nhóm khác (không dùng tới) — giữ nguyên
+}
+
+// Quét 1 tin nhắn nhóm và đẩy vào qll_tracking nếu là case hợp lệ. Dùng CHUNG
+// cho nhóm QLL và nhóm HTKT (cùng rule isQllCase, cùng cách chặn: chỉ lưu case
+// từ NON-CTV — người gửi KHÔNG nằm trong mảng ctvUsernames của config -9001).
+// Giữ nguyên hành vi gốc của khối tracking nhóm QLL.
+async function trackQllCase(message: TelegramMessage, deps: Deps): Promise<void> {
+  const text = message.text ?? "";
+  if (!isQllCase(text)) return;
+
+  const senderUsername = message.from?.username?.toLowerCase() || "";
+  if (!senderUsername) return;
+
+  // Kéo mảng ctvUsernames từ pending_batches (-9001).
+  const { data: batchData } = await deps.supabase
+    .from("pending_batches")
+    .select("items")
+    .eq("admin_id", -9001)
+    .single();
+
+  const allCtvs = (batchData?.items?.ctvUsernames || []).map((u: string) =>
+    u.toLowerCase().replace(/^@/, "")
+  );
+  const cleanSender = senderUsername.replace(/^@/, "");
+
+  // Người gửi là CTV -> bỏ qua (không lưu). Chỉ lưu case từ non-CTV.
+  if (allCtvs.includes(cleanSender)) {
+    console.log(`🛡️ [QLL TRACKING] Chặn tin nhắn của CTV @${cleanSender}.`);
+    return;
+  }
+
+  await insertQllCase(deps.supabase, {
+    message_id: scopedCaseId(message.chat.id, message.message_id),
+    content: text,
+    sender_name: message.from?.first_name || message.from?.username || "QLL",
+    shift_name: getCurrentShift(),
+  });
+  console.log(`✅ [QLL TRACKING] Đã lưu case từ non-CTV: @${cleanSender}`);
 }

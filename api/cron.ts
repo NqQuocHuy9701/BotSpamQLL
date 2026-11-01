@@ -12,6 +12,7 @@ import {
   fetchNextUnsent,
   getClient,
   releaseRow,
+  purgeOldPerformanceData,
 } from "../lib/supabase.js";
 import { createTelegramClient, type TelegramClient } from "../lib/telegram.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -167,6 +168,21 @@ export default async function handler(
     await checkUnansweredMessages(deps.telegram, deps.supabase);
   } catch (err) {
     console.error("SLA Check error:", err);
+  }
+
+  // DỌN DỮ LIỆU HIỆU SUẤT CŨ — chạy 1 lần/giờ (khi phút == 0) để không xóa mỗi
+  // phút gây tốn query. Chống phình shift_interactions / qll_tracking.
+  try {
+    if (new Date().getUTCMinutes() === 0) {
+      const purged = await purgeOldPerformanceData(deps.supabase);
+      if (purged.ok && (purged.interactions > 0 || purged.cases > 0)) {
+        console.log(
+          `🧹 Purge: shift_interactions -${purged.interactions}, qll_tracking -${purged.cases}`
+        );
+      }
+    }
+  } catch (err) {
+    console.error("Purge error:", err);
   }
 
   res.status(200).json({ ok: true });
