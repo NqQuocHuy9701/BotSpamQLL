@@ -13,7 +13,11 @@ const NOW_LATE = new Date("2026-11-02T16:00:00.000Z").getTime();
 const NOW_EARLY = new Date("2026-11-01T22:00:00.000Z").getTime();
 
 // Mock supabase bot: qll_tracking trả 1 case quá hạn; update reported no-op.
-function makeSupabase(expired: { message_id: number; created_at: string }[]) {
+// configItems: override cho loadMonitorConfig (vd slaExclude/slaExcludeDate).
+function makeSupabase(
+  expired: { message_id: number; created_at: string }[],
+  configItems: Record<string, unknown> = { userTitles: { op_huynq5: "anh" } }
+) {
   const update = vi.fn(() => ({ in: async () => ({ error: null }) }));
   const from = vi.fn((table: string) => {
     if (table === "qll_tracking") {
@@ -34,7 +38,7 @@ function makeSupabase(expired: { message_id: number; created_at: string }[]) {
         select: () => ({
           eq: () => ({
             maybeSingle: async () => ({
-              data: { items: { userTitles: { op_huynq5: "anh" } } },
+              data: { items: configItems },
               error: null,
             }),
           }),
@@ -117,5 +121,55 @@ describe("checkUnansweredMessages - nguồn CTV = check-in", () => {
     const telegram = { sendMessage: send } as unknown as TelegramClient;
     await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkUnansweredMessages - loai tru /slaoff", () => {
+  it("KHÔNG tag CTV nằm trong slaExclude của hôm nay", async () => {
+    // check-in có op_huynq5; slaExclude hôm nay có op_huynq5 -> còn rỗng -> ko tag.
+    const { client } = makeSupabase(EXPIRED, {
+      userTitles: { op_huynq5: "anh" },
+      slaExclude: ["op_huynq5"],
+      slaExcludeDate: "2026-11-02",
+    });
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW, makeCheckinClient(["op_huynq5"]));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("tag CTV còn lại sau khi loại trừ", async () => {
+    // check-in có 2 người, loại 1 -> tag người còn lại (vh_minhlt).
+    const { client } = makeSupabase(EXPIRED, {
+      userTitles: {},
+      slaExclude: ["op_huynq5"],
+      slaExcludeDate: "2026-11-02",
+    });
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(
+      telegram,
+      client,
+      NOW_IN_WINDOW,
+      makeCheckinClient(["op_huynq5", "vh_minhlt"])
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    const call = send.mock.calls[0] as unknown as [number, string, number];
+    expect(call[1]).toContain("@vh_minhlt");
+    expect(call[1]).not.toContain("@op_huynq5");
+  });
+
+  it("slaExclude của NGÀY KHÁC bị bỏ qua (không loại trừ)", async () => {
+    const { client } = makeSupabase(EXPIRED, {
+      userTitles: { op_huynq5: "anh" },
+      slaExclude: ["op_huynq5"],
+      slaExcludeDate: "2026-10-30", // ngày cũ -> không áp dụng
+    });
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW, makeCheckinClient(["op_huynq5"]));
+    expect(send).toHaveBeenCalledTimes(1);
+    const call = send.mock.calls[0] as unknown as [number, string, number];
+    expect(call[1]).toContain("@op_huynq5");
   });
 });

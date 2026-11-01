@@ -17,6 +17,10 @@ export interface ShiftCoordinatorConfig {
   // Ngày (giờ VN, YYYY-MM-DD) ứng với các list ctvSang/chieu/toi hiện tại.
   // Dùng để tự reset list CTV theo ca mỗi khi sang ngày mới (từ form check-in).
   ctvShiftDate?: string;
+  // Danh sách CTV LOẠI TRỪ khỏi SLA tag ở nhóm QLL (CTV trực nhóm khác). Tự
+  // reset theo ngày qua slaExcludeDate. Quản lý bằng lệnh /slaoff /slaon.
+  slaExclude?: string[];
+  slaExcludeDate?: string;
 }
 
 const CONFIG_ROW_ID = -9001;
@@ -157,6 +161,8 @@ export async function loadMonitorConfig(
       ctvToi: Array.isArray(raw.ctvToi) ? raw.ctvToi : [],
       userTitles: raw.userTitles && typeof raw.userTitles === "object" ? raw.userTitles : {},
       ctvShiftDate: typeof raw.ctvShiftDate === "string" ? raw.ctvShiftDate : undefined,
+      slaExclude: Array.isArray(raw.slaExclude) ? raw.slaExclude : [],
+      slaExcludeDate: typeof raw.slaExcludeDate === "string" ? raw.slaExcludeDate : undefined,
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -277,6 +283,8 @@ export async function maybeHandleCoordinatorCommands(
           "/delctvca <sang|chieu|toi> @username",
           "💡 Cú pháp cài đặt danh xưng (anh/chị):",
           "/settitle @username anh (hoặc chị)",
+          "💡 Tắt/bật SLA tag nhóm QLL (theo ngày):",
+          "/slaoff @user1 @user2  |  /slaon @user  |  /slaoff (xem ds)",
         ].join("\n")
       );
       return true;
@@ -447,6 +455,88 @@ export async function maybeHandleCoordinatorCommands(
       `♻️ Đã xóa @${targetUname} khỏi ca **${shiftType.toUpperCase()}**. Còn lại (${updatedList.length}): ${
         updatedList.length > 0 ? updatedList.map((u) => `@${u}`).join(", ") : "(trống)"
       }`
+    );
+    return true;
+  }
+
+  // --- LỆNH /slaoff: loại trừ CTV khỏi SLA tag ở nhóm QLL (hôm nay) ---
+  // "/slaoff" (không tham số) -> xem danh sách; "/slaoff @u1 @u2" -> thêm.
+  // Danh sách tự reset theo ngày (slaExcludeDate).
+  if (lower === "/slaoff" || lower.startsWith("/slaoff ")) {
+    const rest = trimmed.slice("/slaoff".length).trim();
+    const config = await loadMonitorConfig(supabase);
+    const today = getVnDateString(new Date());
+
+    // Reset danh sách nếu sang ngày mới.
+    let list =
+      config.slaExcludeDate === today && Array.isArray(config.slaExclude)
+        ? config.slaExclude.map((u) => u.replace(/^@/, "").trim().toLowerCase())
+        : [];
+
+    if (rest === "") {
+      await telegram.sendMessage(
+        message.chat.id,
+        list.length > 0
+          ? `🚫 CTV đang TẮT SLA hôm nay (${today}) (${list.length}): ${list
+              .map((u) => `@${u}`)
+              .join(", ")}`
+          : `🚫 Chưa có CTV nào tắt SLA hôm nay (${today}).`
+      );
+      return true;
+    }
+
+    const tokens = rest
+      .split(/[\s,]+/)
+      .map((t) => t.replace(/^@/, "").trim().toLowerCase())
+      .filter(Boolean);
+    const set = new Set(list);
+    for (const t of tokens) set.add(t);
+    list = Array.from(set);
+
+    config.slaExclude = list;
+    config.slaExcludeDate = today;
+    await saveMonitorConfig(supabase, config);
+    await telegram.sendMessage(
+      message.chat.id,
+      `🚫 Đã TẮT SLA tag (nhóm QLL) cho: ${tokens
+        .map((u) => `@${u}`)
+        .join(", ")}.\nDanh sách hôm nay (${list.length}): ${list
+        .map((u) => `@${u}`)
+        .join(", ")}`
+    );
+    return true;
+  }
+
+  // --- LỆNH /slaon: gỡ CTV khỏi danh sách loại trừ SLA (bật lại tag) ---
+  if (lower.startsWith("/slaon")) {
+    const rest = trimmed.slice("/slaon".length).trim();
+    if (rest === "") {
+      await telegram.sendMessage(
+        message.chat.id,
+        "Cú pháp: /slaon @username (bật lại SLA tag cho CTV)"
+      );
+      return true;
+    }
+    const config = await loadMonitorConfig(supabase);
+    const today = getVnDateString(new Date());
+    let list =
+      config.slaExcludeDate === today && Array.isArray(config.slaExclude)
+        ? config.slaExclude.map((u) => u.replace(/^@/, "").trim().toLowerCase())
+        : [];
+    const tokens = rest
+      .split(/[\s,]+/)
+      .map((t) => t.replace(/^@/, "").trim().toLowerCase())
+      .filter(Boolean);
+    list = list.filter((u) => !tokens.includes(u));
+
+    config.slaExclude = list;
+    config.slaExcludeDate = today;
+    await saveMonitorConfig(supabase, config);
+    await telegram.sendMessage(
+      message.chat.id,
+      `✅ Đã BẬT lại SLA tag cho: ${tokens.map((u) => `@${u}`).join(", ")}.\nCòn tắt (${
+        list.length
+      }): ${list.length > 0 ? list.map((u) => `@${u}`).join(", ") : "(trống)"}`
     );
     return true;
   }
@@ -713,7 +803,17 @@ export async function checkUnansweredMessages(
       currentShiftCtv = [];
     }
   }
-  if (currentShiftCtv.length === 0) return; // không có CTV check-in -> không tag
+
+  // Loại trừ CTV trong danh sách /slaoff của HÔM NAY (CTV trực nhóm khác).
+  const today = getVnDateString(new Date(nowMs));
+  if (config.slaExcludeDate === today && Array.isArray(config.slaExclude)) {
+    const excl = new Set(
+      config.slaExclude.map((u) => u.replace(/^@/, "").trim().toLowerCase())
+    );
+    currentShiftCtv = currentShiftCtv.filter((u) => !excl.has(u));
+  }
+
+  if (currentShiftCtv.length === 0) return; // không còn CTV nào để tag -> không tag
 
   const processedIds: number[] = [];
   const TARGET_GROUP_ID = -1002273179613;
