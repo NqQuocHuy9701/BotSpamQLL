@@ -120,6 +120,7 @@ describe("recordCtvReply", () => {
       chatId: GROUP_ID,
       caseMessageId: 1,
       replierUsername: "vh_canhnt6",
+      checkinClient: makeCheckinClient(["vh_canhnt6", "vh_minhit"]),
       now: NOW_TOI,
     });
 
@@ -139,13 +140,14 @@ describe("recordCtvReply", () => {
     expect(onConflict).toEqual({ onConflict: "chat_id,message_id,kind" });
   });
 
-  it("does NOT record when the replier is not a CTV of this shift", async () => {
+  it("does NOT record when the replier is not in today's check-in list", async () => {
     const upsert = vi.fn(async () => ({ error: null }));
     const supabase = makeSupabase({ caseExists: true, upsertSpy: upsert });
     await recordCtvReply(supabase, {
       chatId: GROUP_ID,
       caseMessageId: 1,
       replierUsername: "nguoi_la",
+      checkinClient: makeCheckinClient(["vh_canhnt6", "vh_minhit"]), // không có nguoi_la
       now: NOW_TOI,
     });
     expect(upsert).not.toHaveBeenCalled();
@@ -158,6 +160,7 @@ describe("recordCtvReply", () => {
       chatId: GROUP_ID,
       caseMessageId: 999,
       replierUsername: "vh_canhnt6",
+      checkinClient: makeCheckinClient(["vh_canhnt6"]),
       now: NOW_TOI,
     });
     expect(upsert).not.toHaveBeenCalled();
@@ -170,9 +173,23 @@ describe("recordCtvReply", () => {
       chatId: GROUP_ID,
       caseMessageId: 1,
       replierUsername: undefined,
+      checkinClient: makeCheckinClient(["vh_canhnt6"]),
       now: NOW_TOI,
     });
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("fail-soft: vẫn ghi khi KHÔNG có checkinClient (không chặn)", async () => {
+    const upsert = vi.fn(async () => ({ error: null }));
+    const supabase = makeSupabase({ caseExists: true, upsertSpy: upsert });
+    await recordCtvReply(supabase, {
+      chatId: GROUP_ID,
+      caseMessageId: 1,
+      replierUsername: "bat_ky_ai",
+      // không truyền checkinClient
+      now: NOW_TOI,
+    });
+    expect(upsert).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -185,6 +202,7 @@ describe("recordCtvReaction", () => {
       chatId: GROUP_ID,
       caseMessageId: 1,
       reactorUsername: "vh_minhit",
+      checkinClient: makeCheckinClient(["vh_canhnt6", "vh_minhit"]),
       now: NOW_TOI,
     });
 
@@ -211,6 +229,20 @@ describe("recordCtvReaction", () => {
       chatId: GROUP_ID,
       caseMessageId: 999,
       reactorUsername: "vh_minhit",
+      checkinClient: makeCheckinClient(["vh_minhit"]),
+      now: NOW_TOI,
+    });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record a react when reactor not in check-in list", async () => {
+    const upsert = vi.fn(async () => ({ error: null }));
+    const supabase = makeSupabase({ caseExists: true, upsertSpy: upsert });
+    await recordCtvReaction(supabase, {
+      chatId: GROUP_ID,
+      caseMessageId: 1,
+      reactorUsername: "nguoi_la",
+      checkinClient: makeCheckinClient(["vh_minhit"]),
       now: NOW_TOI,
     });
     expect(upsert).not.toHaveBeenCalled();

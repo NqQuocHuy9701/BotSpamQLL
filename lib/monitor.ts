@@ -835,20 +835,8 @@ function getVnDateString(now: Date = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
-// Trả về danh sách CTV (đã gọt @, lowercase) của ca ứng với thời điểm `now`.
-function ctvListOfCurrentShift(
-  config: ShiftCoordinatorConfig,
-  now: Date = new Date()
-): string[] {
-  const { key } = getCurrentShiftVn(now);
-  const raw =
-    key === "sang"
-      ? config.ctvSang
-      : key === "chieu"
-      ? config.ctvChieu
-      : config.ctvToi;
-  return (raw || []).map((u) => u.replace(/^@/, "").trim().toLowerCase());
-}
+// (Đã gỡ ctvListOfCurrentShift: nguồn danh sách CTV ca giờ là check-in thực tế
+//  qua getCurrentShiftCheckins / isCtvOfCurrentCheckinShift.)
 
 // Ghi nhận 1 reply của CTV lên 1 case hợp lệ. Chỉ ghi khi:
 //  - Người reply có username VÀ thuộc danh sách CTV của ca hiện tại.
@@ -861,6 +849,7 @@ export async function recordCtvReply(
     chatId: number;
     caseMessageId: number; // message_id của tin gốc được reply
     replierUsername: string | undefined;
+    checkinClient?: SupabaseClient; // nguồn danh sách CTV ca = check-in thực tế
     now?: Date;
   }
 ): Promise<void> {
@@ -870,10 +859,10 @@ export async function recordCtvReply(
 
   try {
     const now = opts.now ?? new Date();
-    const config = await loadMonitorConfig(supabase);
-    const ctvsOfShift = ctvListOfCurrentShift(config, now);
-    // Chỉ đếm nếu người reply là CTV của ca hiện tại.
-    if (!ctvsOfShift.includes(uname)) return;
+    // Danh sách CTV ca = CHECK-IN THỰC TẾ (một nguồn duy nhất). Fail-soft: nếu
+    // thiếu checkinClient hoặc lỗi -> không chặn (vẫn ghi), tránh mất dữ liệu.
+    const allowed = await isCtvOfCurrentCheckinShift(opts.checkinClient, uname, now);
+    if (!allowed) return;
 
     // Tin gốc phải là case hợp lệ đang theo dõi (đã lọc rule khi insert).
     const { data: caseRow } = await supabase
@@ -916,6 +905,7 @@ export async function recordCtvReaction(
     chatId: number;
     caseMessageId: number; // message_id của tin được react
     reactorUsername: string | undefined;
+    checkinClient?: SupabaseClient; // nguồn danh sách CTV ca = check-in thực tế
     now?: Date;
   }
 ): Promise<void> {
@@ -925,9 +915,8 @@ export async function recordCtvReaction(
 
   try {
     const now = opts.now ?? new Date();
-    const config = await loadMonitorConfig(supabase);
-    const ctvsOfShift = ctvListOfCurrentShift(config, now);
-    if (!ctvsOfShift.includes(uname)) return;
+    const allowed = await isCtvOfCurrentCheckinShift(opts.checkinClient, uname, now);
+    if (!allowed) return;
 
     const { data: caseRow } = await supabase
       .from("qll_tracking")
@@ -1293,6 +1282,23 @@ export async function getCurrentShiftCheckins(
     result.push(uname);
   }
   return result;
+}
+
+// Kiểm tra 1 username có thuộc danh sách CHECK-IN THỰC TẾ của ca hiện tại.
+// FAIL-SOFT: nếu không có checkinClient hoặc query lỗi -> trả true (không chặn),
+// để việc ghi reply/react không bị mất dữ liệu khi nguồn check-in tạm trục trặc.
+async function isCtvOfCurrentCheckinShift(
+  checkinClient: SupabaseClient | undefined,
+  username: string,
+  now: Date
+): Promise<boolean> {
+  if (!checkinClient) return true; // không cấu hình -> không chặn
+  try {
+    const list = await getCurrentShiftCheckins(checkinClient, now);
+    return list.includes(username);
+  } catch {
+    return true; // lỗi -> fail-soft, không chặn
+  }
 }
 
 // Dựng text danh sách CTV đã check-in thực tế cho ca hiện tại.

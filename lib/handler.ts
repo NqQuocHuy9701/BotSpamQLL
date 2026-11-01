@@ -185,6 +185,7 @@ export async function handleUpdate(
             chatId: reactionUpdate.chat.id,
             caseMessageId: targetMessageId,
             reactorUsername: reactionUpdate.user?.username,
+            checkinClient: deps.checkinSupabase,
           });
         }
       } catch (e) {
@@ -263,6 +264,7 @@ const message = update.message;
       chatId: message.chat.id,
       caseMessageId: message.reply_to_message.message_id,
       replierUsername: message.from?.username,
+      checkinClient: deps.checkinSupabase,
     });
   }
 
