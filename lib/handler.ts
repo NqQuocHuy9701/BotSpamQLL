@@ -276,9 +276,10 @@ const message = update.message;
           checkinClient: deps.checkinSupabase,
         });
       }
-      // 2) Quét & đẩy case hợp lệ vào qll_tracking (cùng rule + cùng cách chặn
-      //    CTV như nhóm QLL: chỉ lưu case từ NON-CTV).
-      await trackQllCase(message, deps);
+      // 2) Quét & đẩy case vào qll_tracking: CHỈ khi tin là FORWARD + khớp rule.
+      //    KHÔNG áp chặn non-CTV ở đây (người forward chính là CTV VHHS). Việc
+      //    "chỉ tính CTV VHHS" nằm ở bước đếm React/Reply (lọc theo check-in).
+      await trackHtktCase(message, deps);
       // 3) Gom user thụ động (như mọi nhóm).
       await collectUsers(message, deps);
       return;
@@ -971,6 +972,18 @@ function isQllCase(text: string): boolean {
   return hasNumber || hasClassCode;
 }
 
+// Tin có PHẢI forward không. Hỗ trợ cả field mới (forward_origin, Bot API>=7.0)
+// lẫn field cũ (forward_date / forward_from / forward_from_chat / sender_name).
+export function isForwarded(message: TelegramMessage): boolean {
+  return (
+    message.forward_origin !== undefined ||
+    message.forward_date !== undefined ||
+    message.forward_from !== undefined ||
+    message.forward_from_chat !== undefined ||
+    message.forward_sender_name !== undefined
+  );
+}
+
 // qll_tracking dùng khóa message_id ĐƠN (không có chat_id). Telegram đánh
 // message_id RIÊNG theo từng nhóm -> HTKT có thể trùng id với QLL. Để tách
 // không gian khóa mà KHÔNG đổi schema: nhóm QLL giữ NGUYÊN message_id (dương),
@@ -1019,4 +1032,26 @@ async function trackQllCase(message: TelegramMessage, deps: Deps): Promise<void>
     shift_name: getCurrentShift(),
   });
   console.log(`✅ [QLL TRACKING] Đã lưu case từ non-CTV: @${cleanSender}`);
+}
+
+// Tracking case riêng cho NHÓM HTKT: case đến từ tin do CTV FORWARD lại (bot
+// "Trợ Lý Lớp Học" gốc bot ta không nhận được). Vì vậy:
+//  - CHỈ tạo case khi tin là FORWARD (isForwarded) + khớp rule (isQllCase).
+//  - KHÔNG chặn theo người gửi (người forward là CTV VHHS). Việc chỉ-tính-CTV
+//    VHHS được áp ở bước đếm React/Reply (lọc theo danh sách check-in VHHS).
+//  - Khóa case dùng scopedCaseId (HTKT -> id âm, không đụng QLL).
+async function trackHtktCase(message: TelegramMessage, deps: Deps): Promise<void> {
+  const text = message.text ?? message.caption ?? "";
+  if (!isForwarded(message)) return; // chỉ tính tin forward
+  if (!isQllCase(text)) return;
+
+  await insertQllCase(deps.supabase, {
+    message_id: scopedCaseId(message.chat.id, message.message_id),
+    content: text,
+    sender_name: message.from?.first_name || message.from?.username || "HTKT",
+    shift_name: getCurrentShift(),
+  });
+  console.log(
+    `✅ [HTKT TRACKING] Đã lưu case forward (msg ${message.message_id}).`
+  );
 }

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { scopedCaseId } from "../lib/handler.js";
+import { scopedCaseId, isForwarded } from "../lib/handler.js";
 import { purgeOldPerformanceData } from "../lib/supabase.js";
+import type { TelegramMessage } from "../lib/types.js";
 
 const QLL = -1002273179613;
 const HTKT = -1002458492731;
@@ -28,6 +29,32 @@ describe("scopedCaseId", () => {
     const scoped = scopedCaseId(HTKT, mid); // -(mid*10+1)
     const recovered = (-scoped - 1) / 10;
     expect(recovered).toBe(mid);
+  });
+});
+
+describe("isForwarded", () => {
+  function msg(extra: Partial<TelegramMessage>): TelegramMessage {
+    return {
+      message_id: 1,
+      date: 0,
+      chat: { id: -1002458492731, type: "supergroup" },
+      text: "#hths TCLC.2025.0002 ...",
+      ...extra,
+    } as TelegramMessage;
+  }
+
+  it("true khi có forward_origin (Bot API >= 7.0)", () => {
+    expect(isForwarded(msg({ forward_origin: { type: "user" } }))).toBe(true);
+  });
+
+  it("true với field forward cũ (forward_date / forward_from)", () => {
+    expect(isForwarded(msg({ forward_date: 123 }))).toBe(true);
+    expect(isForwarded(msg({ forward_from: { id: 9 } }))).toBe(true);
+    expect(isForwarded(msg({ forward_sender_name: "X" }))).toBe(true);
+  });
+
+  it("false với tin thường (không forward)", () => {
+    expect(isForwarded(msg({}))).toBe(false);
   });
 });
 

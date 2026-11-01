@@ -34,6 +34,14 @@ export interface TelegramMessage {
   // the right check-in topic).
   message_thread_id?: number;
   reply_to_message?: TelegramMessage;
+  // Forward markers (Bot API). forward_origin là field mới (>= Bot API 7.0);
+  // forward_date / forward_from / forward_from_chat là các field cũ. Dùng để
+  // nhận biết 1 tin có PHẢI forward không (nhóm HTKT chỉ tính case từ tin fw).
+  forward_origin?: unknown;
+  forward_date?: number;
+  forward_from?: TelegramUser;
+  forward_from_chat?: TelegramChat;
+  forward_sender_name?: string;
   // Present when the message carries a file attachment (batch feature).
   document?: TelegramDocument;
   // Present when one or more users join the group. Used by the passive
