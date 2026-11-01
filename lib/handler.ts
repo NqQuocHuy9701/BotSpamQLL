@@ -31,6 +31,7 @@ import {
   maybeHandleCoordinatorCommands,
   updateConfig,
   recordCtvReply,
+  recordCtvReaction,
   maybeHandleReportCommand,
   maybeHandleCheckinCommand,
 } from "./monitor.js";
@@ -173,6 +174,22 @@ export async function handleUpdate(
       } else {
         console.log(`✅ [SUCCESS] Đã cập nhật handled = TRUE qua REACTION thành công cho message_id: ${targetMessageId}`, data);
       }
+
+      // GHI NHẬN HIỆU SUẤT (React) — HOÀN TOÀN TÁCH BIỆT khỏi luồng SLA ở trên.
+      // Bọc try/catch riêng + recordCtvReaction fail-soft: mọi lỗi ở đây KHÔNG
+      // được ảnh hưởng tới việc cập nhật handled đã chạy xong. Chỉ áp cho nhóm
+      // QLL (nơi có case trong qll_tracking).
+      try {
+        if (reactionUpdate.chat?.id === SPAMTEST_TARGET_CHAT_ID) {
+          await recordCtvReaction(deps.supabase, {
+            chatId: reactionUpdate.chat.id,
+            caseMessageId: targetMessageId,
+            reactorUsername: reactionUpdate.user?.username,
+          });
+        }
+      } catch (e) {
+        console.error("Lỗi ghi React (bỏ qua, không ảnh hưởng SLA):", e);
+      }
     } else {
       console.log(`ℹ️ [REACTION INFO] Hành động gỡ reaction hoặc thiếu thông tin, bỏ qua.`);
     }
@@ -197,7 +214,8 @@ const message = update.message;
           message,
           deps.telegram,
           deps.supabase,
-          SPAMTEST_ADMIN_IDS
+          SPAMTEST_ADMIN_IDS,
+          deps.checkinSupabase
         )
       ) {
           return;

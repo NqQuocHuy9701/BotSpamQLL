@@ -903,12 +903,69 @@ export async function recordCtvReply(
   }
 }
 
-// Dựng text báo cáo hiệu suất ca hiện tại.
-// total_valid_cases: tổng case hợp lệ của ca+ngày (từ qll_tracking theo shift_name).
-// Mỗi CTV: số case đã reply (đếm distinct case trong shift_interactions).
-// coverage = (số case được 1 CTV reply) / (tổng case) * 100.
+// Ghi nhận 1 REACT của CTV lên 1 case hợp lệ. Đối xứng với recordCtvReply
+// nhưng kind='react'. Chỉ ghi khi:
+//  - Người react có username VÀ thuộc danh sách CTV của ca hiện tại (config).
+//  - Tin được react là case hợp lệ (có trong qll_tracking).
+// Upsert theo (chat_id, message_id, kind='react') => mỗi case 1 dòng react,
+// giữ người react cuối. KHÔNG throw (fail-soft) — gọi trong nhánh reaction
+// nên tuyệt đối không được làm vỡ luồng SLA.
+export async function recordCtvReaction(
+  supabase: SupabaseClient,
+  opts: {
+    chatId: number;
+    caseMessageId: number; // message_id của tin được react
+    reactorUsername: string | undefined;
+    now?: Date;
+  }
+): Promise<void> {
+  if (!supabase || typeof supabase.from !== "function") return;
+  const uname = (opts.reactorUsername ?? "").replace(/^@/, "").trim().toLowerCase();
+  if (uname === "") return;
+
+  try {
+    const now = opts.now ?? new Date();
+    const config = await loadMonitorConfig(supabase);
+    const ctvsOfShift = ctvListOfCurrentShift(config, now);
+    if (!ctvsOfShift.includes(uname)) return;
+
+    const { data: caseRow } = await supabase
+      .from("qll_tracking")
+      .select("message_id")
+      .eq("message_id", opts.caseMessageId)
+      .maybeSingle();
+    if (!caseRow) return;
+
+    const { key } = getCurrentShiftVn(now);
+    await supabase.from("shift_interactions").upsert(
+      {
+        chat_id: opts.chatId,
+        message_id: opts.caseMessageId,
+        ctv_username: uname,
+        kind: "react",
+        shift: key,
+        shift_date: getVnDateString(now),
+        created_at: new Date().toISOString(),
+      },
+      { onConflict: "chat_id,message_id,kind" }
+    );
+  } catch (e) {
+    console.error("Lỗi recordCtvReaction:", e);
+  }
+}
+
+// Dựng text báo cáo hiệu suất ca hiện tại (React + Reply + Tổng hỗ trợ).
+// - Danh sách CTV = danh sách CHECK-IN THỰC TẾ của ca (từ checkin_logs).
+// - Với mỗi CTV: đếm số tin DISTINCT có React hợp lệ, số tin DISTINCT có Reply
+//   hợp lệ (mỗi loại tối đa 1 lượt/tin vì PK theo (chat_id,message_id,kind)),
+//   và Tổng hỗ trợ = số tin DISTINCT có ÍT NHẤT 1 tương tác (react HOẶC reply)
+//   -> cùng CTV vừa react vừa reply 1 tin chỉ tính 1 lượt tổng.
+// - Tổng số case: giữ nguyên cách cũ (qll_tracking theo nhãn ca + created_at
+//   >= mốc đầu ca hôm nay) để không đổi logic hiện tại.
+// checkinClient undefined -> không lấy được danh sách CTV ca -> báo cáo trống.
 export async function buildShiftReport(
   supabase: SupabaseClient,
+  checkinClient?: SupabaseClient,
   now: Date = new Date()
 ): Promise<string> {
   const { key, label } = getCurrentShiftVn(now);
@@ -923,7 +980,7 @@ export async function buildShiftReport(
   // Mốc BẮT ĐẦU ca HÔM NAY (giờ VN) quy ra UTC ISO. qll_tracking.shift_name chỉ
   // lưu nhãn ca (gộp nhiều ngày), nên để đếm ĐÚNG case của ca hôm nay ta lọc
   // theo created_at >= mốc đầu ca. Giờ đầu ca VN: sáng 08:00, chiều 13:30,
-  // tối 17:30. UTC = giờ VN - 7h.
+  // tối 17:30. UTC = giờ VN - 7h. (GIỮ NGUYÊN mốc cũ cho tổng case.)
   const vnNow = new Date(now.getTime() + VN_OFFSET_MS);
   const startHourVn = key === "sang" ? 8 : key === "chieu" ? 13 : 17;
   const startMinVn = key === "chieu" || key === "toi" ? 30 : 0;
@@ -951,45 +1008,73 @@ export async function buildShiftReport(
     totalCases = 0;
   }
 
-  // Các reply của CTV trong ca+ngày.
-  let rows: { ctv_username: string | null }[] = [];
+  // Danh sách CTV check-in thực tế của ca (giao để chỉ thống kê người này).
+  let ctvShiftList: string[] = [];
+  if (checkinClient) {
+    try {
+      ctvShiftList = await getCurrentShiftCheckins(checkinClient, now);
+    } catch {
+      ctvShiftList = [];
+    }
+  }
+  const ctvSet = new Set(ctvShiftList);
+
+  // Toàn bộ tương tác (reply + react) của ca+ngày.
+  let rows: { ctv_username: string | null; kind: string | null; message_id: number | null }[] = [];
   try {
     const { data } = await supabase
       .from("shift_interactions")
-      .select("ctv_username")
-      .eq("kind", "reply")
+      .select("ctv_username, kind, message_id")
       .eq("shift", key)
       .eq("shift_date", shiftDate);
-    rows = (data as { ctv_username: string | null }[] | null) ?? [];
+    rows = (data as typeof rows | null) ?? [];
   } catch {
     rows = [];
   }
 
-  // Đếm số case mỗi CTV đã reply (mỗi dòng = 1 case vì PK theo case).
-  const perCtv = new Map<string, number>();
+  // Gom theo CTV: tập tin React, tập tin Reply (distinct message_id).
+  type Agg = { react: Set<number>; reply: Set<number> };
+  const perCtv = new Map<string, Agg>();
   for (const r of rows) {
     const u = (r.ctv_username ?? "").trim().toLowerCase();
     if (u === "") continue;
-    perCtv.set(u, (perCtv.get(u) ?? 0) + 1);
+    // Chỉ thống kê CTV thuộc danh sách check-in thực tế của ca.
+    if (!ctvSet.has(u)) continue;
+    const mid = r.message_id;
+    if (mid === null || mid === undefined) continue;
+    let agg = perCtv.get(u);
+    if (!agg) {
+      agg = { react: new Set<number>(), reply: new Set<number>() };
+      perCtv.set(u, agg);
+    }
+    if (r.kind === "react") agg.react.add(mid);
+    else if (r.kind === "reply") agg.reply.add(mid);
   }
-  const coveredCases = rows.length; // mỗi case tối đa 1 dòng -> = số case có CTV reply
-  const coverage =
-    totalCases > 0 ? Math.round((coveredCases / totalCases) * 100) : 0;
 
   const lines: string[] = [];
   lines.push(`📊 BÁO CÁO HIỆU SUẤT CA [${label.toUpperCase()}] (${shiftWindow})`);
+  lines.push(`👥 CTV trong ca: ${ctvShiftList.length}`);
   lines.push(`Tổng số case phát sinh: ${totalCases}`);
+  lines.push("------------------------");
+
   if (perCtv.size === 0) {
-    lines.push("(Chưa có CTV nào reply case trong ca này)");
+    lines.push("(Chưa có CTV nào React/Reply case trong ca này)");
   } else {
-    // Sắp xếp giảm dần theo số case.
-    const sorted = [...perCtv.entries()].sort((a, b) => b[1] - a[1]);
-    sorted.forEach(([uname, n], i) => {
-      lines.push(`${i + 1}. CTV @${uname}: ${n} Reply`);
+    // Mỗi CTV: React, Reply, Tổng hỗ trợ (distinct tin có >=1 tương tác).
+    const computed = [...perCtv.entries()].map(([uname, agg]) => {
+      const react = agg.react.size;
+      const reply = agg.reply.size;
+      const union = new Set<number>([...agg.react, ...agg.reply]);
+      return { uname, react, reply, total: union.size };
+    });
+    // Sắp xếp giảm dần theo Tổng hỗ trợ.
+    computed.sort((a, b) => b.total - a.total);
+    computed.forEach((c, i) => {
+      lines.push(
+        `${i + 1}. @${c.uname} — React: ${c.react} | Reply: ${c.reply} | Tổng: ${c.total}`
+      );
     });
   }
-  lines.push("------------------------");
-  lines.push(`Tỷ lệ bao phủ: ${coverage}%`);
   return lines.join("\n");
 }
 
@@ -999,7 +1084,8 @@ export async function maybeHandleReportCommand(
   message: TelegramMessage,
   telegram: TelegramClient,
   supabase: SupabaseClient,
-  adminIds: number[]
+  adminIds: number[],
+  checkinClient?: SupabaseClient
 ): Promise<boolean> {
   const text = (message.text ?? "").trim().toLowerCase();
   if (text !== "/baocao") return false;
@@ -1012,7 +1098,7 @@ export async function maybeHandleReportCommand(
   ) {
     return true; // nuốt lệnh, không làm gì nếu không đúng quyền/chat
   }
-  const report = await buildShiftReport(supabase);
+  const report = await buildShiftReport(supabase, checkinClient);
   await telegram.sendMessage(message.chat.id, report);
   return true;
 }
