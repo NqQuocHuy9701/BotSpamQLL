@@ -677,9 +677,15 @@ export async function handleGroupQllMessage(
 export async function checkUnansweredMessages(
   telegram: TelegramClient,
   supabase: SupabaseClient,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  checkinClient?: SupabaseClient
 ): Promise<void> {
   if (!supabase || typeof supabase.from !== "function") return;
+
+  // CHỈ nhắc SLA trong khung 07:00–21:59 giờ VN. Quá 22h hoặc trước 7h sáng ->
+  // ngừng tag (case giữ nguyên reported=false để nhắc lại từ 7h sáng hôm sau).
+  const vnHour = new Date(nowMs + VN_OFFSET_MS).getUTCHours();
+  if (vnHour >= 22 || vnHour < 7) return;
 
   // Lấy mốc 5 phút trước
   const fiveMinsAgo = new Date(nowMs - SLA_TIMEOUT_MS).toISOString();
@@ -695,27 +701,32 @@ export async function checkUnansweredMessages(
   if (error || !expiredCases || expiredCases.length === 0) return;
 
   const config = await loadMonitorConfig(supabase);
-  const { username } = getActiveCoordinator(config, new Date(nowMs));
-  const currentShift = getCurrentShiftVn(new Date(nowMs));
   const titles = config.userTitles || {};
 
+  // Danh sách CTV ca hiện tại = CHECK-IN THỰC TẾ (bỏ danh sách import tay
+  // ctvSang/chieu/toi). Rỗng -> KHÔNG tag ai (giữ case lại, không đánh dấu).
   let currentShiftCtv: string[] = [];
-  if (currentShift.key === "sang") currentShiftCtv = config.ctvSang || [];
-  else if (currentShift.key === "chieu") currentShiftCtv = config.ctvChieu || [];
-  else currentShiftCtv = config.ctvToi || [];
+  if (checkinClient) {
+    try {
+      currentShiftCtv = await getCurrentShiftCheckins(checkinClient, new Date(nowMs));
+    } catch {
+      currentShiftCtv = [];
+    }
+  }
+  if (currentShiftCtv.length === 0) return; // không có CTV check-in -> không tag
 
   const processedIds: number[] = [];
-  const TARGET_GROUP_ID = -1002273179613; 
+  const TARGET_GROUP_ID = -1002273179613;
 
   for (const item of expiredCases) {
-    if (currentShiftCtv.length > 0) {
-      const randomCtv = currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
-      const title = titles[randomCtv.toLowerCase()] || "anh/chị";
-      await telegram.sendMessage(TARGET_GROUP_ID, `Dạ ${title} @${randomCtv} ơi case này cần hỗ trợ ạ !`, item.message_id);
-    } else {
-      const dpTitle = titles[username.toLowerCase()] || "anh/chị";
-      await telegram.sendMessage(TARGET_GROUP_ID, `Dạ ${dpTitle} @${username} ơi case này cần hỗ trợ ạ !`, item.message_id);
-    }
+    const randomCtv =
+      currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
+    const title = titles[randomCtv.toLowerCase()] || "anh/chị";
+    await telegram.sendMessage(
+      TARGET_GROUP_ID,
+      `Dạ ${title} @${randomCtv} ơi case này cần hỗ trợ ạ !`,
+      item.message_id
+    );
     processedIds.push(item.message_id);
   }
 

@@ -155,6 +155,12 @@ export default async function handler(
     supabase: getClient(config.supabaseUrl, config.supabaseKey),
   };
 
+  // Client project check-in (nếu đã cấu hình) để SLA lấy CTV ca theo check-in.
+  const checkinSupabase =
+    config.checkinSupabaseUrl && config.checkinSupabaseKey
+      ? getClient(config.checkinSupabaseUrl, config.checkinSupabaseKey)
+      : undefined;
+
   // Catch everything so a single failure never crashes the cron.
   try {
     await runCron(deps);
@@ -165,7 +171,7 @@ export default async function handler(
 
   // TIẾN TRÌNH QUÉT SLA ĐỘC LẬP HOÀN TOÀN (Đảm bảo bên trong monitor.ts có query .eq("handled", false))
   try {
-    await checkUnansweredMessages(deps.telegram, deps.supabase);
+    await checkUnansweredMessages(deps.telegram, deps.supabase, Date.now(), checkinSupabase);
   } catch (err) {
     console.error("SLA Check error:", err);
   }
