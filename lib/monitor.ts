@@ -916,13 +916,32 @@ export async function buildShiftReport(
       ? "13:30 - 17:00"
       : "17:30 - 21:30";
 
-  // Tổng case hợp lệ của ca này trong ngày (qll_tracking lưu shift_name = label).
+  // Mốc BẮT ĐẦU ca HÔM NAY (giờ VN) quy ra UTC ISO. qll_tracking.shift_name chỉ
+  // lưu nhãn ca (gộp nhiều ngày), nên để đếm ĐÚNG case của ca hôm nay ta lọc
+  // theo created_at >= mốc đầu ca. Giờ đầu ca VN: sáng 08:00, chiều 13:30,
+  // tối 17:30. UTC = giờ VN - 7h.
+  const vnNow = new Date(now.getTime() + VN_OFFSET_MS);
+  const startHourVn = key === "sang" ? 8 : key === "chieu" ? 13 : 17;
+  const startMinVn = key === "chieu" || key === "toi" ? 30 : 0;
+  const shiftStartUtcIso = new Date(
+    Date.UTC(
+      vnNow.getUTCFullYear(),
+      vnNow.getUTCMonth(),
+      vnNow.getUTCDate(),
+      startHourVn - 7,
+      startMinVn,
+      0
+    )
+  ).toISOString();
+
+  // Tổng case hợp lệ phát sinh trong ca hôm nay (từ mốc đầu ca tới hiện tại).
   let totalCases = 0;
   try {
     const { count } = await supabase
       .from("qll_tracking")
       .select("message_id", { count: "exact", head: true })
-      .eq("shift_name", label);
+      .eq("shift_name", label)
+      .gte("created_at", shiftStartUtcIso);
     totalCases = count ?? 0;
   } catch {
     totalCases = 0;

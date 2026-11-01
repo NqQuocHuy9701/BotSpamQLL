@@ -50,18 +50,18 @@ function makeSupabase(opts: {
       };
     }
     if (table === "qll_tracking") {
+      const countResult = { count: opts.caseCount ?? 0, error: null };
       return {
         // recordCtvReply: .select("message_id").eq("message_id",x).maybeSingle()
-        // buildShiftReport: .select("message_id",{count,head}).eq("shift_name",label)
+        // buildShiftReport: .select(...,{count,head}).eq("shift_name",label).gte("created_at",iso)
         select: (_cols?: unknown, _o?: unknown) => ({
           eq: () => ({
             maybeSingle: async () => ({
               data: opts.caseExists ? { message_id: 1 } : null,
               error: null,
             }),
-            // buildShiftReport awaits the eq() result directly for the count.
-            then: (resolve: (v: { count: number; error: null }) => unknown) =>
-              resolve({ count: opts.caseCount ?? 0, error: null }),
+            // buildShiftReport now chains .gte(...) after .eq(...) for the count.
+            gte: async () => countResult,
           }),
         }),
       };
@@ -100,10 +100,11 @@ describe("recordCtvReply", () => {
     });
 
     expect(upsert).toHaveBeenCalledTimes(1);
-    const [row, onConflict] = upsert.mock.calls[0] as [
+    const call = upsert.mock.calls[0] as unknown as [
       Record<string, unknown>,
       Record<string, unknown>
     ];
+    const [row, onConflict] = call;
     expect(row).toMatchObject({
       chat_id: GROUP_ID,
       message_id: 1,
@@ -212,8 +213,9 @@ describe("maybeHandleReportCommand", () => {
 
     expect(handled).toBe(true);
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
-    expect(String(sendMessage.mock.calls[0][1])).toContain("BÁO CÁO HIỆU SUẤT");
+    const call = sendMessage.mock.calls[0] as unknown as [number, string];
+    expect(call[0]).toBe(ADMIN_ID);
+    expect(String(call[1])).toContain("BÁO CÁO HIỆU SUẤT");
   });
 
   it("ignores non-/baocao text (returns false)", async () => {
