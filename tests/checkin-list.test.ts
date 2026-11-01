@@ -56,17 +56,23 @@ function makeCheckinClient(rows: CheckinRow[]) {
 }
 
 // 01/11/2026 các mốc giờ VN (bảng checkin_logs lưu giờ VN gắn +00:00).
+// RANH GIỚI CHECK-IN: sáng <13:30, chiều 13:30-<17:00, tối >=17:00.
 const TS_TOI_2252 = "2026-11-01T22:52:13.000000+00:00"; // ca tối
 const TS_TOI_2244 = "2026-11-01T22:44:33.000000+00:00"; // ca tối
+const TS_TOI_1700 = "2026-11-01T17:00:00.000000+00:00"; // ĐÚNG mốc 17:00 -> tối
+const TS_TOI_1727 = "2026-11-01T17:27:00.000000+00:00"; // 17:27 -> tối (theo rule mới)
 const TS_CHIEU_1500 = "2026-11-01T15:00:00.000000+00:00"; // ca chiều
+const TS_CHIEU_1659 = "2026-11-01T16:59:00.000000+00:00"; // 16:59 -> vẫn chiều
 const TS_SANG_0900 = "2026-11-01T09:00:00.000000+00:00"; // ca sáng
 const TS_HOMQUA_TOI = "2026-10-31T20:00:00.000000+00:00"; // tối hôm qua
 
-// "now" cố định để quy ca xác định. getCurrentShiftVn cộng +7h vào now.
+// "now" cố định để quy ca xác định. getCheckinShiftVn cộng +7h vào now.
 // 01/11/2026 20:00 VN == 13:00 UTC -> ca TỐI.
 const NOW_TOI = new Date("2026-11-01T13:00:00.000Z");
 // 01/11/2026 09:00 VN == 02:00 UTC -> ca SÁNG.
 const NOW_SANG = new Date("2026-11-01T02:00:00.000Z");
+// 01/11/2026 15:00 VN == 08:00 UTC -> ca CHIỀU.
+const NOW_CHIEU = new Date("2026-11-01T08:00:00.000Z");
 
 describe("getCurrentShiftCheckins", () => {
   it("lấy CTV VHHS check-in ĐÚNG ca hiện tại (tối), dedupe", async () => {
@@ -78,6 +84,25 @@ describe("getCurrentShiftCheckins", () => {
     ]);
     const out = await getCurrentShiftCheckins(client, NOW_TOI);
     expect(out).toEqual(["op_huynq5"]);
+  });
+
+  it("tối bắt đầu từ 17:00: gồm 17:00 và 17:27, loại 16:59 (chiều)", async () => {
+    const { client } = makeCheckinClient([
+      { username: "VH_A17", created_at: TS_TOI_1700 }, // 17:00 -> tối
+      { username: "VH_B1727", created_at: TS_TOI_1727 }, // 17:27 -> tối
+      { username: "VH_C1659", created_at: TS_CHIEU_1659 }, // 16:59 -> chiều, loại
+    ]);
+    const out = await getCurrentShiftCheckins(client, NOW_TOI);
+    expect(out).toEqual(["vh_a17", "vh_b1727"]);
+  });
+
+  it("ca chiều kết thúc trước 17:00: 16:59 là chiều, 17:00 không phải", async () => {
+    const { client } = makeCheckinClient([
+      { username: "VH_C1659", created_at: TS_CHIEU_1659 }, // 16:59 -> chiều
+      { username: "VH_A17", created_at: TS_TOI_1700 }, // 17:00 -> tối, loại khỏi chiều
+    ]);
+    const out = await getCurrentShiftCheckins(client, NOW_CHIEU);
+    expect(out).toEqual(["vh_c1659"]);
   });
 
   it("loại check-in của NGÀY KHÁC (hôm qua)", async () => {

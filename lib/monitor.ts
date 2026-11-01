@@ -1127,14 +1127,32 @@ export async function addCtvFromCheckin(
 //
 // Quy tắc: lọc team='VHHS' + loai='Check in' + created_at trong NGÀY VN hôm nay
 // + đúng CA hiện tại. Bỏ qua Check out. Dedupe theo username (lowercase).
+// Ranh giới ca RIÊNG cho check-in: tối từ 17:00 (xem CHECKIN_TOI_START).
 // =====================================================================
 
-// Khung giờ ca (giờ VN, dạng thập phân) để lọc check-in theo ca.
-// Sáng: < 13:30 ; Chiều: 13:30 - < 17:30 ; Tối: >= 17:30.
+// RANH GIỚI CA RIÊNG CHO CHECK-IN (CHỈ áp dụng ở đây, KHÔNG đụng
+// getCurrentShiftVn / hệ thống điều phối cũ):
+//   Sáng: < 13:30 ; Chiều: 13:30 - < 17:00 ; Tối: >= 17:00.
+// (Theo yêu cầu: CTV ca tối check-in từ 17g trở đi.)
+const CHECKIN_TOI_START = 17; // mốc bắt đầu ca tối cho check-in (17:00)
+
 function shiftBoundsVn(key: "sang" | "chieu" | "toi"): { lo: number; hi: number } {
   if (key === "sang") return { lo: 0, hi: 13.5 };
-  if (key === "chieu") return { lo: 13.5, hi: 17.5 };
-  return { lo: 17.5, hi: 24 };
+  if (key === "chieu") return { lo: 13.5, hi: CHECKIN_TOI_START };
+  return { lo: CHECKIN_TOI_START, hi: 24 };
+}
+
+// Quy ca cho CHECK-IN theo thời điểm `now` (giờ VN), dùng ranh giới riêng
+// ở trên. Tách khỏi getCurrentShiftVn để không ảnh hưởng hệ thống cũ.
+function getCheckinShiftVn(now: Date = new Date()): {
+  key: "sang" | "chieu" | "toi";
+  label: string;
+} {
+  const vn = new Date(now.getTime() + VN_OFFSET_MS);
+  const timeVal = vn.getUTCHours() + vn.getUTCMinutes() / 60;
+  if (timeVal < 13.5) return { key: "sang", label: "Sáng" };
+  if (timeVal < CHECKIN_TOI_START) return { key: "chieu", label: "Chiều" };
+  return { key: "toi", label: "Tối" };
 }
 
 // Lấy danh sách username CTV VHHS đã check-in trong CA HIỆN TẠI của ngày hôm
@@ -1144,7 +1162,7 @@ export async function getCurrentShiftCheckins(
   checkinClient: SupabaseClient,
   now: Date = new Date()
 ): Promise<string[]> {
-  const { key } = getCurrentShiftVn(now);
+  const { key } = getCheckinShiftVn(now);
   const today = getVnDateString(now); // YYYY-MM-DD giờ VN
   const { lo, hi } = shiftBoundsVn(key);
 
@@ -1196,7 +1214,7 @@ export async function buildCheckinList(
   checkinClient: SupabaseClient,
   now: Date = new Date()
 ): Promise<string> {
-  const { label } = getCurrentShiftVn(now);
+  const { label } = getCheckinShiftVn(now);
   const today = getVnDateString(now);
   const list = await getCurrentShiftCheckins(checkinClient, now);
 
