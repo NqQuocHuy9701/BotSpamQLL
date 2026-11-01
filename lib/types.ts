@@ -30,6 +30,9 @@ export interface TelegramMessage {
   from?: TelegramUser;
   text?: string;
   caption?: string;
+  // Forum/topic id when the message is posted inside a topic (used to target
+  // the right check-in topic).
+  message_thread_id?: number;
   reply_to_message?: TelegramMessage;
   // Present when the message carries a file attachment (batch feature).
   document?: TelegramDocument;

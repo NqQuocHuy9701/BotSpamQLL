@@ -180,6 +180,18 @@ const message = update.message;
     return;
   }
 
+  // --- TẠM: lệnh /id -> bot trả về chat.id + message_thread_id của chỗ gõ.
+  // Dùng để lấy id nhóm + id topic Check-in. Đặt TRƯỚC mọi chốt chặn nhóm.
+  // Sẽ gỡ sau khi lấy xong id.
+  if ((message.text ?? "").trim().toLowerCase() === "/id") {
+    const threadId = message.message_thread_id ?? "(không có topic)";
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      `chat.id = ${message.chat.id}\nmessage_thread_id = ${threadId}\nchat.type = ${message.chat.type}`
+    );
+    return;
+  }
+
   // --- MỚI THÊM: Ưu tiên xử lý tin nhắn Private (lệnh Admin) ---
   if (message.chat.type === "private") {
       // 7b. /baocao -> gửi báo cáo hiệu suất ca hiện tại cho admin (chat riêng).
