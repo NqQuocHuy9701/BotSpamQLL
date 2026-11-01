@@ -17,16 +17,36 @@ type CheckinRow = {
 
 // Mock client cho project checkin_logs. getCurrentShiftCheckins gọi:
 //   .from("checkin_logs").select(...).eq("team","VHHS").eq("loai","Check in")
-// Mock bỏ qua điều kiện team/loai ở tầng JS (giả định đã lọc), trả thẳng rows
-// ta cấp -> nên rows ta cấp PHẢI là các dòng đã team=VHHS & loai=Check in.
+//     .gte("created_at", startIso).lt("created_at", endIso).order(...)
+// Mock HONOR .gte/.lt trên created_at (so sánh chuỗi ISO cùng offset +00:00 là
+// hợp lệ về thứ tự thời gian) để thực sự kiểm tra lọc ngày + ca. rows ta cấp
+// PHẢI là các dòng đã team=VHHS & loai=Check in.
 function makeCheckinClient(rows: CheckinRow[]) {
   const from = vi.fn((table: string) => {
     if (table === "checkin_logs") {
+      let gteVal: string | null = null;
+      let ltVal: string | null = null;
       const builder = {
         select: () => builder,
         eq: () => builder,
-        then: (resolve: (v: { data: CheckinRow[]; error: null }) => unknown) =>
-          resolve({ data: rows, error: null }),
+        gte: (_col: string, v: string) => {
+          gteVal = v;
+          return builder;
+        },
+        lt: (_col: string, v: string) => {
+          ltVal = v;
+          return builder;
+        },
+        order: () => builder,
+        then: (resolve: (v: { data: CheckinRow[]; error: null }) => unknown) => {
+          const filtered = rows.filter((r) => {
+            if (!r.created_at) return false;
+            if (gteVal !== null && r.created_at < gteVal) return false;
+            if (ltVal !== null && r.created_at >= ltVal) return false;
+            return true;
+          });
+          return resolve({ data: filtered, error: null });
+        },
       };
       return builder;
     }

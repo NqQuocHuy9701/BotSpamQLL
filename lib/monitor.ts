@@ -1137,18 +1137,6 @@ function shiftBoundsVn(key: "sang" | "chieu" | "toi"): { lo: number; hi: number 
   return { lo: 17.5, hi: 24 };
 }
 
-// Trích ngày (YYYY-MM-DD) và giờ thập phân từ created_at của checkin_logs.
-// created_at là giờ VN gắn nhãn +00:00 -> dùng các getter UTC làm giờ VN.
-function vnPartsFromCheckinTs(createdAt: string): { date: string; timeVal: number } | null {
-  const d = new Date(createdAt);
-  if (isNaN(d.getTime())) return null;
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const timeVal = d.getUTCHours() + d.getUTCMinutes() / 60;
-  return { date: `${y}-${m}-${day}`, timeVal };
-}
-
 // Lấy danh sách username CTV VHHS đã check-in trong CA HIỆN TẠI của ngày hôm
 // nay (theo giờ VN), đã dedupe + lowercase. Trả [] nếu chưa cấu hình client
 // hoặc có lỗi (fail-soft, không ném).
@@ -1157,17 +1145,36 @@ export async function getCurrentShiftCheckins(
   now: Date = new Date()
 ): Promise<string[]> {
   const { key } = getCurrentShiftVn(now);
-  const today = getVnDateString(now);
+  const today = getVnDateString(now); // YYYY-MM-DD giờ VN
   const { lo, hi } = shiftBoundsVn(key);
 
-  let rows: { username: string | null; created_at: string | null }[] = [];
+  // created_at là GIỜ VN gắn nhãn +00:00. Nên mốc đầu/cuối CA của ngày hôm nay
+  // cũng viết dạng "<today>THH:MM:SS+00:00" (giờ VN) để lọc THẲNG ở tầng DB.
+  // Việc này tránh giới hạn mặc định 1000 dòng của Supabase (nếu kéo hết lịch
+  // sử rồi lọc JS, các dòng hôm nay có thể bị cắt mất -> trả rỗng sai).
+  const toHHMM = (dec: number): string => {
+    const h = Math.floor(dec);
+    const m = Math.round((dec - h) * 60);
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  };
+  const startIso = `${today}T${toHHMM(lo)}:00+00:00`;
+  // hi có thể = 24 (ca tối) -> dùng mốc cuối ngày 23:59:59.999.
+  const endIso =
+    hi >= 24
+      ? `${today}T23:59:59.999+00:00`
+      : `${today}T${toHHMM(hi)}:00+00:00`;
+
+  let rows: { username: string | null }[] = [];
   try {
     const { data } = await checkinClient
       .from("checkin_logs")
       .select("username, created_at")
       .eq("team", "VHHS")
-      .eq("loai", "Check in");
-    rows = (data as { username: string | null; created_at: string | null }[] | null) ?? [];
+      .eq("loai", "Check in")
+      .gte("created_at", startIso)
+      .lt("created_at", endIso)
+      .order("created_at", { ascending: false });
+    rows = (data as { username: string | null }[] | null) ?? [];
   } catch {
     rows = [];
   }
@@ -1176,11 +1183,7 @@ export async function getCurrentShiftCheckins(
   const result: string[] = [];
   for (const r of rows) {
     const uname = (r.username ?? "").trim().replace(/^@/, "").toLowerCase();
-    if (uname === "" || !r.created_at) continue;
-    const parts = vnPartsFromCheckinTs(r.created_at);
-    if (!parts) continue;
-    if (parts.date !== today) continue; // chỉ ngày hôm nay
-    if (parts.timeVal < lo || parts.timeVal >= hi) continue; // đúng ca hiện tại
+    if (uname === "") continue;
     if (seen.has(uname)) continue;
     seen.add(uname);
     result.push(uname);
