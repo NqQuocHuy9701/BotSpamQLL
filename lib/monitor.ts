@@ -812,3 +812,184 @@ export async function handleMessageReaction(
     }
   }
 }
+
+
+// =====================================================================
+// BÁO CÁO HIỆU SUẤT CTV TRONG CA (Reply-only)
+// Đếm số case hợp lệ (đã nằm trong qll_tracking) mà CTV của ca hiện tại
+// reply. Mỗi case chỉ tính cho ĐÚNG MỘT CTV = người reply cuối cùng
+// (upsert ghi đè theo case trong bảng shift_interactions, PK đã đổi thành
+// (chat_id, message_id, kind)). Báo cáo gửi riêng cho admin qua /baocao.
+// =====================================================================
+
+// Ngày hiện tại theo giờ VN dạng YYYY-MM-DD (dùng làm shift_date).
+function getVnDateString(now: Date = new Date()): string {
+  const vn = new Date(now.getTime() + VN_OFFSET_MS);
+  const y = vn.getUTCFullYear();
+  const m = String(vn.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(vn.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+// Trả về danh sách CTV (đã gọt @, lowercase) của ca ứng với thời điểm `now`.
+function ctvListOfCurrentShift(
+  config: ShiftCoordinatorConfig,
+  now: Date = new Date()
+): string[] {
+  const { key } = getCurrentShiftVn(now);
+  const raw =
+    key === "sang"
+      ? config.ctvSang
+      : key === "chieu"
+      ? config.ctvChieu
+      : config.ctvToi;
+  return (raw || []).map((u) => u.replace(/^@/, "").trim().toLowerCase());
+}
+
+// Ghi nhận 1 reply của CTV lên 1 case hợp lệ. Chỉ ghi khi:
+//  - Người reply có username VÀ thuộc danh sách CTV của ca hiện tại.
+//  - Tin gốc được reply là case hợp lệ (có trong qll_tracking).
+// Upsert theo (chat_id, message_id, kind='reply') => mỗi case chỉ 1 dòng,
+// luôn là CTV reply cuối cùng. Không throw (nuốt lỗi như các helper khác).
+export async function recordCtvReply(
+  supabase: SupabaseClient,
+  opts: {
+    chatId: number;
+    caseMessageId: number; // message_id của tin gốc được reply
+    replierUsername: string | undefined;
+    now?: Date;
+  }
+): Promise<void> {
+  if (!supabase || typeof supabase.from !== "function") return;
+  const uname = (opts.replierUsername ?? "").replace(/^@/, "").trim().toLowerCase();
+  if (uname === "") return;
+
+  try {
+    const now = opts.now ?? new Date();
+    const config = await loadMonitorConfig(supabase);
+    const ctvsOfShift = ctvListOfCurrentShift(config, now);
+    // Chỉ đếm nếu người reply là CTV của ca hiện tại.
+    if (!ctvsOfShift.includes(uname)) return;
+
+    // Tin gốc phải là case hợp lệ đang theo dõi (đã lọc rule khi insert).
+    const { data: caseRow } = await supabase
+      .from("qll_tracking")
+      .select("message_id")
+      .eq("message_id", opts.caseMessageId)
+      .maybeSingle();
+    if (!caseRow) return;
+
+    const { key, label } = getCurrentShiftVn(now);
+    // Ghi đè theo case: 2 CTV reply cùng case -> giữ người reply cuối.
+    await supabase.from("shift_interactions").upsert(
+      {
+        chat_id: opts.chatId,
+        message_id: opts.caseMessageId,
+        ctv_username: uname,
+        kind: "reply",
+        shift: key,
+        shift_date: getVnDateString(now),
+        created_at: new Date().toISOString(),
+      },
+      { onConflict: "chat_id,message_id,kind" }
+    );
+    void label; // label chỉ dùng cho báo cáo, không lưu
+  } catch (e) {
+    console.error("Lỗi recordCtvReply:", e);
+  }
+}
+
+// Dựng text báo cáo hiệu suất ca hiện tại.
+// total_valid_cases: tổng case hợp lệ của ca+ngày (từ qll_tracking theo shift_name).
+// Mỗi CTV: số case đã reply (đếm distinct case trong shift_interactions).
+// coverage = (số case được 1 CTV reply) / (tổng case) * 100.
+export async function buildShiftReport(
+  supabase: SupabaseClient,
+  now: Date = new Date()
+): Promise<string> {
+  const { key, label } = getCurrentShiftVn(now);
+  const shiftDate = getVnDateString(now);
+  const shiftWindow =
+    key === "sang"
+      ? "08:00 - 12:00"
+      : key === "chieu"
+      ? "13:30 - 17:00"
+      : "17:30 - 21:30";
+
+  // Tổng case hợp lệ của ca này trong ngày (qll_tracking lưu shift_name = label).
+  let totalCases = 0;
+  try {
+    const { count } = await supabase
+      .from("qll_tracking")
+      .select("message_id", { count: "exact", head: true })
+      .eq("shift_name", label);
+    totalCases = count ?? 0;
+  } catch {
+    totalCases = 0;
+  }
+
+  // Các reply của CTV trong ca+ngày.
+  let rows: { ctv_username: string | null }[] = [];
+  try {
+    const { data } = await supabase
+      .from("shift_interactions")
+      .select("ctv_username")
+      .eq("kind", "reply")
+      .eq("shift", key)
+      .eq("shift_date", shiftDate);
+    rows = (data as { ctv_username: string | null }[] | null) ?? [];
+  } catch {
+    rows = [];
+  }
+
+  // Đếm số case mỗi CTV đã reply (mỗi dòng = 1 case vì PK theo case).
+  const perCtv = new Map<string, number>();
+  for (const r of rows) {
+    const u = (r.ctv_username ?? "").trim().toLowerCase();
+    if (u === "") continue;
+    perCtv.set(u, (perCtv.get(u) ?? 0) + 1);
+  }
+  const coveredCases = rows.length; // mỗi case tối đa 1 dòng -> = số case có CTV reply
+  const coverage =
+    totalCases > 0 ? Math.round((coveredCases / totalCases) * 100) : 0;
+
+  const lines: string[] = [];
+  lines.push(`📊 BÁO CÁO HIỆU SUẤT CA [${label.toUpperCase()}] (${shiftWindow})`);
+  lines.push(`Tổng số case phát sinh: ${totalCases}`);
+  if (perCtv.size === 0) {
+    lines.push("(Chưa có CTV nào reply case trong ca này)");
+  } else {
+    // Sắp xếp giảm dần theo số case.
+    const sorted = [...perCtv.entries()].sort((a, b) => b[1] - a[1]);
+    sorted.forEach(([uname, n], i) => {
+      lines.push(`${i + 1}. CTV @${uname}: ${n} Reply`);
+    });
+  }
+  lines.push("------------------------");
+  lines.push(`Tỷ lệ bao phủ: ${coverage}%`);
+  return lines.join("\n");
+}
+
+// Xử lý lệnh /baocao (admin, chat riêng): dựng báo cáo ca hiện tại và trả về
+// chat riêng của admin. Trả true nếu đã xử lý lệnh này.
+export async function maybeHandleReportCommand(
+  message: TelegramMessage,
+  telegram: TelegramClient,
+  supabase: SupabaseClient,
+  adminIds: number[]
+): Promise<boolean> {
+  const text = (message.text ?? "").trim().toLowerCase();
+  if (text !== "/baocao") return false;
+  // Chỉ admin trong chat riêng.
+  const fromId = message.from?.id;
+  if (
+    message.chat.type !== "private" ||
+    fromId === undefined ||
+    !adminIds.includes(fromId)
+  ) {
+    return true; // nuốt lệnh, không làm gì nếu không đúng quyền/chat
+  }
+  const report = await buildShiftReport(supabase);
+  await telegram.sendMessage(message.chat.id, report);
+  return true;
+}

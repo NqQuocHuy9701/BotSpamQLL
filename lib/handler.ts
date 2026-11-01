@@ -30,6 +30,8 @@ import {
   handleGroupQllMessage,
   maybeHandleCoordinatorCommands,
   updateConfig,
+  recordCtvReply,
+  maybeHandleReportCommand,
 } from "./monitor.js";
 
 
@@ -180,6 +182,17 @@ const message = update.message;
 
   // --- MỚI THÊM: Ưu tiên xử lý tin nhắn Private (lệnh Admin) ---
   if (message.chat.type === "private") {
+      // 7b. /baocao -> gửi báo cáo hiệu suất ca hiện tại cho admin (chat riêng).
+      if (
+        await maybeHandleReportCommand(
+          message,
+          deps.telegram,
+          deps.supabase,
+          SPAMTEST_ADMIN_IDS
+        )
+      ) {
+          return;
+      }
       // 8. Batch announcement & Các lệnh Admin (/dp, /addctvca, v.v.)
       if (await maybeHandleBatch(message, deps)) {
           return;
@@ -205,6 +218,13 @@ const message = update.message;
   // 1. Xử lý Reply -> Đánh dấu tin nhắn gốc đã được phản hồi
   if (message.reply_to_message) {
     await markCaseHandled(deps.supabase, message.reply_to_message.message_id);
+    // 1b. Ghi nhận hiệu suất: nếu người reply là CTV của ca hiện tại và tin
+    // gốc là case hợp lệ, tính cho CTV đó (ghi đè theo case -> CTV reply cuối).
+    await recordCtvReply(deps.supabase, {
+      chatId: message.chat.id,
+      caseMessageId: message.reply_to_message.message_id,
+      replierUsername: message.from?.username,
+    });
   }
 
   // 2. Kiểm tra tag đích danh để forward nhóm Xếp lớp (-1002493556435)
