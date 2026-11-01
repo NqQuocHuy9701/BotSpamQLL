@@ -32,6 +32,7 @@ import {
   updateConfig,
   recordCtvReply,
   maybeHandleReportCommand,
+  addCtvFromCheckin,
 } from "./monitor.js";
 
 
@@ -88,6 +89,10 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
+
+// Nhóm + topic check-in VHHS: bot đọc form điểm danh để tự thêm CTV vào ca.
+const CHECKIN_GROUP_ID = -1003627743103; // [VHHS] CTV ĐIỂM DANH TỰ ĐỘNG
+const CHECKIN_TOPIC_ID = 4; // topic "Check in"
 
 // --- TÍNH NĂNG FW VẮNG: ID Nhóm gốc hỗ trợ kĩ thuật ---
 //const SOURCE_ABSENT_GROUP_ID = -1002458492731; // Nhóm Gốc Hỗ Trợ Kỹ Thuật
@@ -180,15 +185,14 @@ const message = update.message;
     return;
   }
 
-  // --- TẠM: lệnh /id -> bot trả về chat.id + message_thread_id của chỗ gõ.
-  // Dùng để lấy id nhóm + id topic Check-in. Đặt TRƯỚC mọi chốt chặn nhóm.
-  // Sẽ gỡ sau khi lấy xong id.
-  if ((message.text ?? "").trim().toLowerCase() === "/id") {
-    const threadId = message.message_thread_id ?? "(không có topic)";
-    await deps.telegram.sendMessage(
-      message.chat.id,
-      `chat.id = ${message.chat.id}\nmessage_thread_id = ${threadId}\nchat.type = ${message.chat.type}`
-    );
+  // --- NHÓM CHECK-IN VHHS: tự thêm CTV vào ca từ form điểm danh ---
+  // Chỉ xử lý đúng nhóm check-in + đúng topic "Check in" (thread 4).
+  // Đặt TRƯỚC mọi chốt chặn nhóm QLL để không bị return sớm.
+  if (
+    message.chat.id === CHECKIN_GROUP_ID &&
+    message.message_thread_id === CHECKIN_TOPIC_ID
+  ) {
+    await addCtvFromCheckin(deps.supabase, message.text ?? message.caption ?? "");
     return;
   }
 

@@ -14,6 +14,9 @@ export interface ShiftCoordinatorConfig {
   ctvChieu?: string[];
   ctvToi?: string[];
   userTitles?: Record<string, "anh" | "chị">;
+  // Ngày (giờ VN, YYYY-MM-DD) ứng với các list ctvSang/chieu/toi hiện tại.
+  // Dùng để tự reset list CTV theo ca mỗi khi sang ngày mới (từ form check-in).
+  ctvShiftDate?: string;
 }
 
 const CONFIG_ROW_ID = -9001;
@@ -153,6 +156,7 @@ export async function loadMonitorConfig(
       ctvChieu: Array.isArray(raw.ctvChieu) ? raw.ctvChieu : [],
       ctvToi: Array.isArray(raw.ctvToi) ? raw.ctvToi : [],
       userTitles: raw.userTitles && typeof raw.userTitles === "object" ? raw.userTitles : {},
+      ctvShiftDate: typeof raw.ctvShiftDate === "string" ? raw.ctvShiftDate : undefined,
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -1011,4 +1015,103 @@ export async function maybeHandleReportCommand(
   const report = await buildShiftReport(supabase);
   await telegram.sendMessage(message.chat.id, report);
   return true;
+}
+
+
+// =====================================================================
+// TỰ THÊM CTV VÀO CA TỪ FORM CHECK-IN (nhóm VHHS điểm danh tự động)
+// Bot đọc form check-in trong topic điểm danh, trích @username + giờ,
+// quy ca theo giờ, thêm CTV vào ca tương ứng. List CTV ca tự reset mỗi
+// ngày (dựa trên ctvShiftDate). Chỉ nhận form chứa key "VHHS" + "Check in".
+// =====================================================================
+
+export interface ParsedCheckin {
+  username: string; // đã gọt @, lowercase
+  shiftKey: "sang" | "chieu" | "toi";
+}
+
+// parseCheckinForm(text): trích CTV + ca từ form check-in.
+// Yêu cầu form chứa "VHHS" VÀ "Check in" (không phân biệt hoa thường, bỏ dấu),
+// có dòng "CTV: @username" và "Thời gian: HH:MM". Trả null nếu không khớp
+// (vd Check out, hoặc thiếu trường) -> bỏ qua.
+export function parseCheckinForm(text: string): ParsedCheckin | null {
+  const raw = text ?? "";
+  const noAccentLower = stripDiacritics(raw);
+
+  // Chỉ nhận đúng key team VHHS.
+  if (!noAccentLower.includes("vhhs")) return null;
+  // Chỉ nhận CHECK IN (loại check out). "check in" sau khi bỏ dấu/thường.
+  if (!noAccentLower.includes("check in")) return null;
+  if (noAccentLower.includes("check out")) return null;
+
+  // Trích username sau "CTV:" (có thể có @). Lấy token username hợp lệ.
+  const ctvMatch = raw.match(/CTV\s*:\s*@?([A-Za-z0-9_]{3,})/i);
+  if (!ctvMatch) return null;
+  const username = ctvMatch[1].trim().toLowerCase();
+  if (username === "") return null;
+
+  // Trích giờ "HH:MM" sau "Thời gian:" (ưu tiên), fallback: HH:MM đầu tiên.
+  let hh: number | null = null;
+  let mm: number | null = null;
+  const timeLabeled = raw.match(/Th[ờo]i\s*gian\s*:\s*(\d{1,2}):(\d{2})/i);
+  const timeAny = raw.match(/\b(\d{1,2}):(\d{2})\b/);
+  const picked = timeLabeled ?? timeAny;
+  if (picked) {
+    hh = parseInt(picked[1], 10);
+    mm = parseInt(picked[2], 10);
+  }
+  if (hh === null || mm === null || isNaN(hh) || isNaN(mm)) return null;
+
+  // Quy ca theo giờ form: sáng <13:30, chiều 13:30-<17:30, tối >=17:30.
+  const t = hh + mm / 60;
+  const shiftKey: "sang" | "chieu" | "toi" =
+    t < 13.5 ? "sang" : t < 17.5 ? "chieu" : "toi";
+
+  return { username, shiftKey };
+}
+
+// addCtvFromCheckin(supabase, text, now): nếu text là form check-in hợp lệ,
+// thêm CTV vào list ca tương ứng trong config (-9001). Tự reset toàn bộ list
+// ca khi sang ngày mới (ctvShiftDate != hôm nay). Trả về true nếu đã xử lý
+// (dù thêm mới hay đã có), false nếu không phải form check-in.
+export async function addCtvFromCheckin(
+  supabase: SupabaseClient,
+  text: string,
+  now: Date = new Date()
+): Promise<boolean> {
+  const parsed = parseCheckinForm(text);
+  if (!parsed) return false;
+  if (!supabase || typeof supabase.from !== "function") return true;
+
+  try {
+    const config = await loadMonitorConfig(supabase);
+    const today = getVnDateString(now);
+
+    // Reset list ca khi sang ngày mới.
+    if (config.ctvShiftDate !== today) {
+      config.ctvSang = [];
+      config.ctvChieu = [];
+      config.ctvToi = [];
+      config.ctvShiftDate = today;
+    }
+
+    const key =
+      parsed.shiftKey === "sang"
+        ? "ctvSang"
+        : parsed.shiftKey === "chieu"
+        ? "ctvChieu"
+        : "ctvToi";
+    const current = (config[key] || []).map((u) =>
+      u.replace(/^@/, "").trim().toLowerCase()
+    );
+    if (!current.includes(parsed.username)) {
+      current.push(parsed.username);
+      config[key] = current;
+      await saveMonitorConfig(supabase, config);
+    }
+    return true;
+  } catch (e) {
+    console.error("Lỗi addCtvFromCheckin:", e);
+    return true;
+  }
 }
