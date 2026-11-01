@@ -9,6 +9,11 @@ export interface Config {
   // is explicitly set to "true". While false the bot only passively collects
   // users into telegram_users_qll.
   relayEnabled: boolean;
+  // OPTIONAL: kết nối tới project Supabase KHÁC chứa bảng checkin_logs (điểm
+  // danh VHHS). Khi cả hai có giá trị, bot đọc check-in thực tế từ đó cho
+  // lệnh /checkin. Thiếu một trong hai -> tính năng check-in tắt (không crash).
+  checkinSupabaseUrl?: string;
+  checkinSupabaseKey?: string;
 }
 
 // Throws an Error naming the FIRST missing/empty variable.
@@ -33,5 +38,16 @@ export function loadConfig(): Config {
   const relayEnabled =
     (process.env.RELAY_ENABLED ?? "").trim().toLowerCase() === "true";
 
-  return { botToken, supabaseUrl, supabaseKey, relayEnabled };
+  // Optional: cả hai phải cùng có giá trị thì mới bật tính năng check-in.
+  const checkinSupabaseUrl = (process.env.CHECKIN_SUPABASE_URL ?? "").trim() || undefined;
+  const checkinSupabaseKey = (process.env.CHECKIN_SUPABASE_KEY ?? "").trim() || undefined;
+
+  return {
+    botToken,
+    supabaseUrl,
+    supabaseKey,
+    relayEnabled,
+    checkinSupabaseUrl,
+    checkinSupabaseKey,
+  };
 }

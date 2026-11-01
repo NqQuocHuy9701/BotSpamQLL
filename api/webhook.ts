@@ -27,10 +27,17 @@ export default async function handler(
 
   const update = parseUpdate(req.body);
 
+  // Client thứ 2 trỏ sang project Supabase chứa checkin_logs (nếu đã cấu hình).
+  const checkinSupabase =
+    config.checkinSupabaseUrl && config.checkinSupabaseKey
+      ? getClient(config.checkinSupabaseUrl, config.checkinSupabaseKey)
+      : undefined;
+
   const deps: Deps = {
     telegram: createTelegramClient(config.botToken),
     supabase: getClient(config.supabaseUrl, config.supabaseKey),
     relayEnabled: config.relayEnabled,
+    checkinSupabase,
   };
 
   // Always return HTTP 200 for handled message-processing outcomes so Telegram

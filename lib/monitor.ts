@@ -1117,31 +1117,85 @@ export async function addCtvFromCheckin(
 }
 
 // =====================================================================
-// LỆNH /checkin (admin, chat riêng): liệt kê CTV ĐÃ CHECK-IN của CA HIỆN TẠI.
-// Đọc config (-9001). List CTV ca tự reset theo ngày (ctvShiftDate): nếu
-// ctvShiftDate != hôm nay thì coi như chưa ai check-in (list cũ đã hết hạn).
+// LỆNH /checkin (admin, chat riêng): liệt kê CTV ĐÃ CHECK-IN THỰC TẾ của CA
+// HIỆN TẠI, đọc trực tiếp từ bảng checkin_logs ở PROJECT SUPABASE KHÁC.
+//
+// Bảng checkin_logs (project check-in): username, loai ("Check in"/"Check out"),
+// team ("VHHS"...), created_at timestamptz. LƯU Ý QUAN TRỌNG: created_at lưu
+// GIỜ VN nhưng gắn nhãn +00:00 -> KHÔNG cộng offset; đọc thẳng các field UTC
+// của chuỗi ISO coi như giờ VN.
+//
+// Quy tắc: lọc team='VHHS' + loai='Check in' + created_at trong NGÀY VN hôm nay
+// + đúng CA hiện tại. Bỏ qua Check out. Dedupe theo username (lowercase).
 // =====================================================================
 
-// Dựng text danh sách CTV đã check-in cho ca hiện tại.
+// Khung giờ ca (giờ VN, dạng thập phân) để lọc check-in theo ca.
+// Sáng: < 13:30 ; Chiều: 13:30 - < 17:30 ; Tối: >= 17:30.
+function shiftBoundsVn(key: "sang" | "chieu" | "toi"): { lo: number; hi: number } {
+  if (key === "sang") return { lo: 0, hi: 13.5 };
+  if (key === "chieu") return { lo: 13.5, hi: 17.5 };
+  return { lo: 17.5, hi: 24 };
+}
+
+// Trích ngày (YYYY-MM-DD) và giờ thập phân từ created_at của checkin_logs.
+// created_at là giờ VN gắn nhãn +00:00 -> dùng các getter UTC làm giờ VN.
+function vnPartsFromCheckinTs(createdAt: string): { date: string; timeVal: number } | null {
+  const d = new Date(createdAt);
+  if (isNaN(d.getTime())) return null;
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const timeVal = d.getUTCHours() + d.getUTCMinutes() / 60;
+  return { date: `${y}-${m}-${day}`, timeVal };
+}
+
+// Lấy danh sách username CTV VHHS đã check-in trong CA HIỆN TẠI của ngày hôm
+// nay (theo giờ VN), đã dedupe + lowercase. Trả [] nếu chưa cấu hình client
+// hoặc có lỗi (fail-soft, không ném).
+export async function getCurrentShiftCheckins(
+  checkinClient: SupabaseClient,
+  now: Date = new Date()
+): Promise<string[]> {
+  const { key } = getCurrentShiftVn(now);
+  const today = getVnDateString(now);
+  const { lo, hi } = shiftBoundsVn(key);
+
+  let rows: { username: string | null; created_at: string | null }[] = [];
+  try {
+    const { data } = await checkinClient
+      .from("checkin_logs")
+      .select("username, created_at")
+      .eq("team", "VHHS")
+      .eq("loai", "Check in");
+    rows = (data as { username: string | null; created_at: string | null }[] | null) ?? [];
+  } catch {
+    rows = [];
+  }
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const r of rows) {
+    const uname = (r.username ?? "").trim().replace(/^@/, "").toLowerCase();
+    if (uname === "" || !r.created_at) continue;
+    const parts = vnPartsFromCheckinTs(r.created_at);
+    if (!parts) continue;
+    if (parts.date !== today) continue; // chỉ ngày hôm nay
+    if (parts.timeVal < lo || parts.timeVal >= hi) continue; // đúng ca hiện tại
+    if (seen.has(uname)) continue;
+    seen.add(uname);
+    result.push(uname);
+  }
+  return result;
+}
+
+// Dựng text danh sách CTV đã check-in thực tế cho ca hiện tại.
 export async function buildCheckinList(
-  supabase: SupabaseClient,
+  checkinClient: SupabaseClient,
   now: Date = new Date()
 ): Promise<string> {
-  const config = await loadMonitorConfig(supabase);
-  const { key, label } = getCurrentShiftVn(now);
+  const { label } = getCurrentShiftVn(now);
   const today = getVnDateString(now);
-
-  // List ca chỉ hợp lệ nếu thuộc về hôm nay; nếu khác ngày -> đã hết hạn.
-  let list: string[] = [];
-  if (config.ctvShiftDate === today) {
-    const raw =
-      key === "sang"
-        ? config.ctvSang
-        : key === "chieu"
-        ? config.ctvChieu
-        : config.ctvToi;
-    list = (raw || []).map((u) => u.replace(/^@/, "").trim().toLowerCase());
-  }
+  const list = await getCurrentShiftCheckins(checkinClient, now);
 
   const lines: string[] = [];
   lines.push(`📋 CTV đã check-in ca [${label.toUpperCase()}] hôm nay (${today}):`);
@@ -1158,11 +1212,12 @@ export async function buildCheckinList(
 }
 
 // Xử lý lệnh /checkin (admin, chat riêng): liệt kê CTV đã check-in ca hiện
-// tại và trả về chat riêng của admin. Trả true nếu đã xử lý lệnh này.
+// tại (từ checkin_logs) và trả về chat riêng của admin. Trả true nếu đã xử lý
+// lệnh này. checkinClient undefined -> báo tính năng chưa bật.
 export async function maybeHandleCheckinCommand(
   message: TelegramMessage,
   telegram: TelegramClient,
-  supabase: SupabaseClient,
+  checkinClient: SupabaseClient | undefined,
   adminIds: number[]
 ): Promise<boolean> {
   const text = (message.text ?? "").trim().toLowerCase();
@@ -1176,7 +1231,14 @@ export async function maybeHandleCheckinCommand(
   ) {
     return true; // nuốt lệnh, không làm gì nếu không đúng quyền/chat
   }
-  const list = await buildCheckinList(supabase);
+  if (!checkinClient) {
+    await telegram.sendMessage(
+      message.chat.id,
+      "⚠️ Tính năng check-in chưa được cấu hình (thiếu CHECKIN_SUPABASE_URL/KEY)."
+    );
+    return true;
+  }
+  const list = await buildCheckinList(checkinClient);
   await telegram.sendMessage(message.chat.id, list);
   return true;
 }

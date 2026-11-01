@@ -33,7 +33,6 @@ import {
   recordCtvReply,
   maybeHandleReportCommand,
   maybeHandleCheckinCommand,
-  addCtvFromCheckin,
 } from "./monitor.js";
 
 
@@ -91,10 +90,6 @@ const SPAMTEST_ADMIN_IDS: number[] = [
 // The single target group the announcement is posted into (Kiểu 1: pinned).
 const SPAMTEST_TARGET_CHAT_ID = -1002273179613; // [BU VUIHOC VH] VH - QLL Support
 
-// Nhóm + topic check-in VHHS: bot đọc form điểm danh để tự thêm CTV vào ca.
-const CHECKIN_GROUP_ID = -1003627743103; // [VHHS] CTV ĐIỂM DANH TỰ ĐỘNG
-const CHECKIN_TOPIC_ID = 4; // topic "Check in"
-
 // --- TÍNH NĂNG FW VẮNG: ID Nhóm gốc hỗ trợ kĩ thuật ---
 //const SOURCE_ABSENT_GROUP_ID = -1002458492731; // Nhóm Gốc Hỗ Trợ Kỹ Thuật
 
@@ -140,6 +135,9 @@ export interface Deps {
   // When false, the credential relay flow is fully disabled: the bot never
   // deletes, sends to inbox, or replies. It only passively collects users.
   relayEnabled: boolean;
+  // OPTIONAL: client tới project Supabase chứa checkin_logs. undefined khi
+  // chưa cấu hình env -> lệnh /checkin báo chưa bật tính năng.
+  checkinSupabase?: SupabaseClient;
 }
 
 export async function handleUpdate(
@@ -186,16 +184,10 @@ const message = update.message;
     return;
   }
 
-  // --- NHÓM CHECK-IN VHHS: tự thêm CTV vào ca từ form điểm danh ---
-  // Chỉ xử lý đúng nhóm check-in + đúng topic "Check in" (thread 4).
-  // Đặt TRƯỚC mọi chốt chặn nhóm QLL để không bị return sớm.
-  if (
-    message.chat.id === CHECKIN_GROUP_ID &&
-    message.message_thread_id === CHECKIN_TOPIC_ID
-  ) {
-    await addCtvFromCheckin(deps.supabase, message.text ?? message.caption ?? "");
-    return;
-  }
+  // Ghi chú: trước đây có nhánh đọc form check-in trong nhóm VHHS (topic 4),
+  // nhưng form đó do một BOT khác đăng, mà Telegram KHÔNG gửi tin của bot khác
+  // cho bot này -> nhánh không bao giờ chạy. Đã thay bằng đọc trực tiếp bảng
+  // checkin_logs ở project Supabase khác cho lệnh /checkin.
 
   // --- MỚI THÊM: Ưu tiên xử lý tin nhắn Private (lệnh Admin) ---
   if (message.chat.type === "private") {
@@ -210,12 +202,13 @@ const message = update.message;
       ) {
           return;
       }
-      // 7c. /checkin -> liệt kê CTV đã check-in ca hiện tại cho admin (chat riêng).
+      // 7c. /checkin -> liệt kê CTV đã check-in thực tế ca hiện tại (đọc từ
+      // bảng checkin_logs ở project Supabase khác) cho admin (chat riêng).
       if (
         await maybeHandleCheckinCommand(
           message,
           deps.telegram,
-          deps.supabase,
+          deps.checkinSupabase,
           SPAMTEST_ADMIN_IDS
         )
       ) {
