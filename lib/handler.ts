@@ -332,9 +332,10 @@ const message = update.message;
     }).catch(console.error);
   }
   
-// 3. Quét và đẩy vào qll_tracking (dùng chung cho nhóm QLL & HTKT).
-  await trackQllCase(message, deps);
-
+  // 3. Quét & đẩy case QLL vào qll_tracking + theo dõi SLA 5 phút.
+  //    DÙNG LOGIC CŨ handleGroupQllMessage (insert message_id THẬT, reply SLA
+  //    đúng tin). KHÔNG dùng trackQllCase cho QLL — nó ghi trùng/lệch message_id
+  //    khiến SLA reply hỏng (chỉ HTKT mới dùng trackHtktCase).
   await handleGroupQllMessage(
     message,
     deps.telegram,
@@ -996,43 +997,8 @@ export function scopedCaseId(chatId: number, messageId: number): number {
   return messageId; // nhóm khác (không dùng tới) — giữ nguyên
 }
 
-// Quét 1 tin nhắn nhóm và đẩy vào qll_tracking nếu là case hợp lệ. Dùng CHUNG
-// cho nhóm QLL và nhóm HTKT (cùng rule isQllCase, cùng cách chặn: chỉ lưu case
-// từ NON-CTV — người gửi KHÔNG nằm trong mảng ctvUsernames của config -9001).
-// Giữ nguyên hành vi gốc của khối tracking nhóm QLL.
-async function trackQllCase(message: TelegramMessage, deps: Deps): Promise<void> {
-  const text = message.text ?? "";
-  if (!isQllCase(text)) return;
-
-  const senderUsername = message.from?.username?.toLowerCase() || "";
-  if (!senderUsername) return;
-
-  // Kéo mảng ctvUsernames từ pending_batches (-9001).
-  const { data: batchData } = await deps.supabase
-    .from("pending_batches")
-    .select("items")
-    .eq("admin_id", -9001)
-    .single();
-
-  const allCtvs = (batchData?.items?.ctvUsernames || []).map((u: string) =>
-    u.toLowerCase().replace(/^@/, "")
-  );
-  const cleanSender = senderUsername.replace(/^@/, "");
-
-  // Người gửi là CTV -> bỏ qua (không lưu). Chỉ lưu case từ non-CTV.
-  if (allCtvs.includes(cleanSender)) {
-    console.log(`🛡️ [QLL TRACKING] Chặn tin nhắn của CTV @${cleanSender}.`);
-    return;
-  }
-
-  await insertQllCase(deps.supabase, {
-    message_id: scopedCaseId(message.chat.id, message.message_id),
-    content: text,
-    sender_name: message.from?.first_name || message.from?.username || "QLL",
-    shift_name: getCurrentShift(),
-  });
-  console.log(`✅ [QLL TRACKING] Đã lưu case từ non-CTV: @${cleanSender}`);
-}
+// (Đã gỡ trackQllCase: nhóm QLL dùng handleGroupQllMessage như logic cũ để
+//  insert message_id THẬT + SLA reply đúng tin. Chỉ HTKT dùng trackHtktCase.)
 
 // Tracking case riêng cho NHÓM HTKT. Case ở HTKT có thể là tin FORWARD (đa số,
 // CTV forward lại từ bot "Trợ Lý Lớp Học") HOẶC tin người thật gõ tay. Vì vậy:
