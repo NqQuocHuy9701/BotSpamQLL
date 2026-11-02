@@ -21,11 +21,18 @@ function makeSupabase(
   const update = vi.fn(() => ({ in: async () => ({ error: null }) }));
   const from = vi.fn((table: string) => {
     if (table === "qll_tracking") {
+      // Chain thật: .select().eq().eq().gt("message_id",0).lte(...)
       return {
         select: () => ({
           eq: () => ({
             eq: () => ({
-              lte: async () => ({ data: expired, error: null }),
+              gt: (_col: string, v: number) => ({
+                // Mô phỏng lọc id > 0 ở tầng DB.
+                lte: async () => ({
+                  data: expired.filter((r) => r.message_id > v),
+                  error: null,
+                }),
+              }),
             }),
           }),
         }),
@@ -121,6 +128,27 @@ describe("checkUnansweredMessages - nguồn CTV = check-in", () => {
     const telegram = { sendMessage: send } as unknown as TelegramClient;
     await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkUnansweredMessages - bo qua case HTKT (id am)", () => {
+  it("KHÔNG nhắc case HTKT (message_id âm)", async () => {
+    const htktCase = [{ message_id: -1474971, created_at: "2026-11-02T02:50:00.000Z" }];
+    const { client } = makeSupabase(htktCase);
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW, makeCheckinClient(["op_huynq5"]));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("reply ĐÚNG message_id dương (nhóm QLL) khi tag", async () => {
+    const { client } = makeSupabase(EXPIRED); // message_id 555 (dương)
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW, makeCheckinClient(["op_huynq5"]));
+    expect(send).toHaveBeenCalledTimes(1);
+    const call = send.mock.calls[0] as unknown as [number, string, number];
+    expect(call[2]).toBe(555); // reply_to đúng case
   });
 });
 

@@ -827,12 +827,15 @@ export async function checkUnansweredMessages(
   // Lấy mốc 5 phút trước
   const fiveMinsAgo = new Date(nowMs - SLA_TIMEOUT_MS).toISOString();
 
-  // Truy vấn trực tiếp db: Chưa handled, chưa reported, quá 5 phút
+  // Truy vấn: Chưa handled, chưa reported, quá 5 phút. CHỈ case NHÓM QLL
+  // (message_id > 0). Case HTKT lưu dưới id ÂM (scopedCaseId) -> KHÔNG nhắc SLA
+  // (và cũng tránh reply hỏng vì id âm không tồn tại ở nhóm QLL).
   const { data: expiredCases, error } = await supabase
     .from("qll_tracking")
     .select("message_id, created_at")
     .eq("handled", false)
     .eq("reported", false)
+    .gt("message_id", 0)
     .lte("created_at", fiveMinsAgo);
 
   if (error || !expiredCases || expiredCases.length === 0) return;
