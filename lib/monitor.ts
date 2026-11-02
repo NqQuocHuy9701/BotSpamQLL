@@ -21,6 +21,8 @@ export interface ShiftCoordinatorConfig {
   // reset theo ngày qua slaExcludeDate. Quản lý bằng lệnh /slaoff /slaon.
   slaExclude?: string[];
   slaExcludeDate?: string;
+  // Dấu chống gửi trùng báo cáo cuối ca tự động: "<YYYY-MM-DD>-<sang|chieu|toi>".
+  lastShiftReportKey?: string;
 }
 
 const CONFIG_ROW_ID = -9001;
@@ -163,6 +165,8 @@ export async function loadMonitorConfig(
       ctvShiftDate: typeof raw.ctvShiftDate === "string" ? raw.ctvShiftDate : undefined,
       slaExclude: Array.isArray(raw.slaExclude) ? raw.slaExclude : [],
       slaExcludeDate: typeof raw.slaExcludeDate === "string" ? raw.slaExcludeDate : undefined,
+      lastShiftReportKey:
+        typeof raw.lastShiftReportKey === "string" ? raw.lastShiftReportKey : undefined,
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -1251,6 +1255,76 @@ export async function maybeHandleReportCommand(
   const report = await buildShiftReport(supabase, checkinClient);
   await telegram.sendMessage(message.chat.id, report);
   return true;
+}
+
+// =====================================================================
+// TỰ ĐỘNG GỬI BÁO CÁO CUỐI CA cho admin (gọi trong cron mỗi phút).
+// Mốc cuối ca (giờ VN): Sáng 12:00, Chiều 17:00, Tối 21:30. Tại mốc (cửa sổ
+// 5 phút để cron chắc chắn bắt), dựng báo cáo CỦA CA VỪA KẾT THÚC và gửi cho
+// tất cả adminIds. Chống gửi trùng bằng config.lastShiftReportKey =
+// "<YYYY-MM-DD>-<shiftKey>" -> mỗi ca/ngày chỉ gửi đúng 1 lần.
+// =====================================================================
+export async function maybeSendShiftReports(
+  telegram: TelegramClient,
+  supabase: SupabaseClient,
+  adminIds: number[],
+  nowMs: number = Date.now(),
+  checkinClient?: SupabaseClient
+): Promise<void> {
+  if (!supabase || typeof supabase.from !== "function") return;
+
+  const vn = new Date(nowMs + VN_OFFSET_MS);
+  const vnHour = vn.getUTCHours();
+  const vnMin = vn.getUTCMinutes();
+  const t = vnHour + vnMin / 60;
+
+  // Xác định ca VỪA KẾT THÚC nếu đang trong cửa sổ 5 phút sau mốc cuối ca.
+  // Sáng xong 12:00; Chiều xong 17:00; Tối xong 21:30.
+  let endedShift: "sang" | "chieu" | "toi" | null = null;
+  if (t >= 12 && t < 12 + 5 / 60) endedShift = "sang";
+  else if (t >= 17 && t < 17 + 5 / 60) endedShift = "chieu";
+  else if (t >= 21.5 && t < 21.5 + 5 / 60) endedShift = "toi";
+  if (!endedShift) return;
+
+  const today = getVnDateString(new Date(nowMs));
+  const key = `${today}-${endedShift}`;
+
+  const config = await loadMonitorConfig(supabase);
+  if (config.lastShiftReportKey === key) return; // đã gửi ca này hôm nay
+
+  // Dựng báo cáo CỦA CA VỪA KẾT THÚC: lùi now vào giữa ca để getCurrentShiftVn
+  // trả đúng ca đó (mốc cuối ca có thể đã rơi sang ranh giới ca sau).
+  const midShiftMs =
+    endedShift === "sang"
+      ? atVnTimeMs(nowMs, 10, 0)
+      : endedShift === "chieu"
+      ? atVnTimeMs(nowMs, 15, 0)
+      : atVnTimeMs(nowMs, 19, 0);
+
+  const report = await buildShiftReport(supabase, checkinClient, new Date(midShiftMs));
+  for (const adminId of adminIds) {
+    try {
+      await telegram.sendMessage(adminId, `🕗 [BÁO CÁO CUỐI CA tự động]\n\n${report}`);
+    } catch {
+      // bỏ qua lỗi gửi 1 admin, không chặn admin còn lại
+    }
+  }
+
+  // Lưu dấu chống trùng.
+  await updateConfig(supabase, { lastShiftReportKey: key });
+}
+
+// Trả về mốc UTC ms ứng với giờ:phút VN của ngày chứa `nowMs`.
+function atVnTimeMs(nowMs: number, vnHour: number, vnMin: number): number {
+  const vn = new Date(nowMs + VN_OFFSET_MS);
+  return Date.UTC(
+    vn.getUTCFullYear(),
+    vn.getUTCMonth(),
+    vn.getUTCDate(),
+    vnHour - 7,
+    vnMin,
+    0
+  );
 }
 
 

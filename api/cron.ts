@@ -3,7 +3,7 @@
 // ~15s apart so the group is never flooded. The HTTP boundary only builds the
 // real deps and enforces the cron auth guard; the testable work lives in the
 // exported runCron() so tests can inject a fake sleep (no real 15s wait).
-import { checkUnansweredMessages } from "../lib/monitor.js";
+import { checkUnansweredMessages, maybeSendShiftReports } from "../lib/monitor.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { loadConfig } from "../lib/config.js";
 import {
@@ -174,6 +174,21 @@ export default async function handler(
     await checkUnansweredMessages(deps.telegram, deps.supabase, Date.now(), checkinSupabase);
   } catch (err) {
     console.error("SLA Check error:", err);
+  }
+
+  // TỰ ĐỘNG GỬI BÁO CÁO CUỐI CA cho admin (12:00 / 17:00 / 21:30 giờ VN).
+  // Chống trùng nằm trong hàm (config.lastShiftReportKey).
+  try {
+    const SHIFT_REPORT_ADMIN_IDS = [6532155675, 6410818714]; // = SPAMTEST_ADMIN_IDS
+    await maybeSendShiftReports(
+      deps.telegram,
+      deps.supabase,
+      SHIFT_REPORT_ADMIN_IDS,
+      Date.now(),
+      checkinSupabase
+    );
+  } catch (err) {
+    console.error("Shift report error:", err);
   }
 
   // DỌN DỮ LIỆU HIỆU SUẤT CŨ — chạy 1 lần/giờ (khi phút == 0) để không xóa mỗi
