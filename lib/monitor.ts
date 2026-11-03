@@ -1292,6 +1292,12 @@ export async function maybeSendShiftReports(
   const config = await loadMonitorConfig(supabase);
   if (config.lastShiftReportKey === key) return; // đã gửi ca này hôm nay
 
+  // CHỐNG TRÙNG kiểu CLAIM-THEN-SEND: cron-job.org gọi /api/cron MỖI PHÚT, nên
+  // trong cửa sổ 5 phút hàm chạy ~5 lần. Nếu gửi xong mới lưu key thì lần cron
+  // kế có thể vào trước khi key được lưu -> gửi TRÙNG. Vì vậy LƯU KEY TRƯỚC
+  // (claim), rồi mới gửi. Lần sau thấy key đã có -> thoát ngay.
+  await updateConfig(supabase, { lastShiftReportKey: key });
+
   // Dựng báo cáo CỦA CA VỪA KẾT THÚC: lùi now vào giữa ca để getCurrentShiftVn
   // trả đúng ca đó (mốc cuối ca có thể đã rơi sang ranh giới ca sau).
   const midShiftMs =
@@ -1309,9 +1315,6 @@ export async function maybeSendShiftReports(
       // bỏ qua lỗi gửi 1 admin, không chặn admin còn lại
     }
   }
-
-  // Lưu dấu chống trùng.
-  await updateConfig(supabase, { lastShiftReportKey: key });
 }
 
 // Trả về mốc UTC ms ứng với giờ:phút VN của ngày chứa `nowMs`.

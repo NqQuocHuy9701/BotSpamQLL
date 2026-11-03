@@ -39,6 +39,42 @@ function makeSupabase(configItems: Record<string, unknown>) {
   return { client: { from } as unknown as SupabaseClient, upsert };
 }
 
+// Mock CÓ STATE: upsert(items) merge vào state, maybeSingle/single trả state
+// hiện tại. Dùng để mô phỏng 2 lần cron gọi liên tiếp (claim-then-send).
+function makeStatefulSupabase(initial: Record<string, unknown>) {
+  const state: Record<string, unknown> = { ...initial };
+  const from = vi.fn((table: string) => {
+    if (table === "pending_batches") {
+      return {
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: { items: state }, error: null }),
+            single: async () => ({ data: { items: state }, error: null }),
+          }),
+        }),
+        upsert: async (row: { items?: Record<string, unknown> }) => {
+          Object.assign(state, row.items ?? {});
+          return { error: null };
+        },
+      };
+    }
+    if (table === "qll_tracking") {
+      return {
+        select: (_c?: unknown, _o?: unknown) => ({
+          eq: () => ({ gte: async () => ({ count: 0, error: null }) }),
+        }),
+      };
+    }
+    if (table === "shift_interactions") {
+      return {
+        select: () => ({ eq: () => ({ eq: async () => ({ data: [], error: null }) }) }),
+      };
+    }
+    return {};
+  });
+  return { client: { from } as unknown as SupabaseClient };
+}
+
 // checkin client rỗng (không cần cho test mốc giờ / dedup).
 function makeCheckin(): SupabaseClient {
   const from = vi.fn(() => {
@@ -112,5 +148,16 @@ describe("maybeSendShiftReports - mốc cuối ca", () => {
     expect(send).toHaveBeenCalledTimes(2);
     const cs = send.mock.calls[0] as unknown as [number, string];
     expect(cs[1]).toContain("SÁNG");
+  });
+
+  it("CHỐNG TRÙNG: 2 lần cron liên tiếp cùng mốc -> chỉ gửi 1 lần (claim-then-send)", async () => {
+    const { client } = makeStatefulSupabase({});
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    const at1700 = vnMs("2026-11-02T10:00:00Z"); // 17:00 VN -> ca chiều
+    // Lần 1: gửi (2 admin) + claim key. Lần 2: thấy key -> không gửi.
+    await maybeSendShiftReports(telegram, client, ADMINS, at1700, makeCheckin());
+    await maybeSendShiftReports(telegram, client, ADMINS, at1700, makeCheckin());
+    expect(send).toHaveBeenCalledTimes(2); // CHỈ 2 (1 ca x 2 admin), không phải 4
   });
 });
