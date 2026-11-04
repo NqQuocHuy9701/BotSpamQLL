@@ -1287,16 +1287,14 @@ export async function maybeSendShiftReports(
   if (!endedShift) return;
 
   const today = getVnDateString(new Date(nowMs));
-  const key = `${today}-${endedShift}`;
 
-  const config = await loadMonitorConfig(supabase);
-  if (config.lastShiftReportKey === key) return; // đã gửi ca này hôm nay
-
-  // CHỐNG TRÙNG kiểu CLAIM-THEN-SEND: cron-job.org gọi /api/cron MỖI PHÚT, nên
-  // trong cửa sổ 5 phút hàm chạy ~5 lần. Nếu gửi xong mới lưu key thì lần cron
-  // kế có thể vào trước khi key được lưu -> gửi TRÙNG. Vì vậy LƯU KEY TRƯỚC
-  // (claim), rồi mới gửi. Lần sau thấy key đã có -> thoát ngay.
-  await updateConfig(supabase, { lastShiftReportKey: key });
+  // CHỐNG TRÙNG NGUYÊN TỬ: đọc-rồi-ghi config (cách cũ) vẫn lọt khi 2 lần gọi
+  // /api/cron chạy GẦN NHƯ ĐỒNG THỜI (cả 2 cùng đọc thấy "chưa gửi"). Giờ dùng
+  // INSERT 1 dòng claim vào pending_batches với admin_id riêng cho (ngày, ca):
+  // khóa chính của bảng đảm bảo CHỈ 1 lần insert thành công; lần còn lại bị
+  // từ chối 23505 -> không gửi.
+  const claimed = await claimShiftReport(supabase, today, endedShift);
+  if (!claimed) return;
 
   // Dựng báo cáo CỦA CA VỪA KẾT THÚC: lùi now vào giữa ca để getCurrentShiftVn
   // trả đúng ca đó (mốc cuối ca có thể đã rơi sang ranh giới ca sau).
@@ -1314,6 +1312,33 @@ export async function maybeSendShiftReports(
     } catch {
       // bỏ qua lỗi gửi 1 admin, không chặn admin còn lại
     }
+  }
+}
+
+// Claim nguyên tử quyền gửi báo cáo cuối ca cho (ngày, ca). Insert 1 dòng vào
+// pending_batches với admin_id = -(YYYYMMDD*10 + chỉ số ca), vd 04/11/2026 ca
+// chiều = -202611042. Không đụng -9001/-9002 hay id admin thật (dương).
+// Trả true nếu claim thành công (được gửi), false nếu đã có người claim (23505)
+// hoặc lỗi (không gửi để tránh trùng; lỗi được log ra).
+async function claimShiftReport(
+  supabase: SupabaseClient,
+  vnDate: string,
+  shift: "sang" | "chieu" | "toi"
+): Promise<boolean> {
+  const idx = shift === "sang" ? 1 : shift === "chieu" ? 2 : 3;
+  const claimId = -(Number(vnDate.replace(/-/g, "")) * 10 + idx);
+  try {
+    const { error } = await supabase
+      .from("pending_batches")
+      .insert({ admin_id: claimId, items: { shiftReportClaim: `${vnDate}-${shift}` } });
+    if (!error) return true;
+    if (error.code !== "23505") {
+      console.error("Lỗi claim báo cáo cuối ca:", error.message);
+    }
+    return false;
+  } catch (e) {
+    console.error("Lỗi claim báo cáo cuối ca:", e);
+    return false;
   }
 }
 
