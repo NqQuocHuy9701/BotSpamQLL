@@ -60,8 +60,13 @@ describe("mẫu câu", () => {
       rng: () => 0, // câu 1
     });
     expect(text).toBe(
-      "Dạ chị @vh_minhlt ơi, case của Thu Hảo đang chờ, chị hỗ trợ giúp em với ạ!"
+      "Dạ chị @vh_minhlt ơi, case của Thu Hảo đang chờ, chị hỗ trợ giúp em với ạ! 🥺"
     );
+  });
+
+  it("mọi câu khẩn có mặt khóc, mọi câu SLA có icon mặt", () => {
+    for (const t of URGENT_TEMPLATES) expect(t).toMatch(/😭|😢|😥/u);
+    for (const t of SLA_TEMPLATES) expect(t).toMatch(/🥺|😊|😅|🥹/u);
   });
 
   it("thiếu danh xưng -> 'anh/chị'", () => {
