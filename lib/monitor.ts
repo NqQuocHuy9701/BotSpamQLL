@@ -2,6 +2,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { TelegramClient } from "./telegram.js";
 import type { TelegramMessage } from "./types.js";
+import { buildSlaReminder, buildUrgentReminder } from "./messages.js";
 
 // --- CẤU HÌNH VÀ CA LÀM VIỆC ---
 export interface ShiftCoordinatorConfig {
@@ -804,11 +805,13 @@ export async function handleGroupQllMessage(
     const { username } = getActiveCoordinator(config);
     const titles = config.userTitles || {};
     const dpTitle = titles[username.toLowerCase()] || "anh/chị";
-    await telegram.sendMessage(
-      message.chat.id,
-      `Dạ ${dpTitle} @${username} ơi case này cần hỗ trợ ạ !`,
-      message.message_id
-    );
+    // v5: câu nhắc tin khẩn đa dạng (chỉ đổi chữ, giữ nguyên người tag + reply).
+    const { text: urgentText } = buildUrgentReminder({
+      title: dpTitle,
+      username,
+      qllName: senderName,
+    });
+    await telegram.sendMessage(message.chat.id, urgentText, message.message_id);
   }
 
   if (watchedChanged) {
@@ -836,7 +839,7 @@ export async function checkUnansweredMessages(
   // (và cũng tránh reply hỏng vì id âm không tồn tại ở nhóm QLL).
   const { data: expiredCases, error } = await supabase
     .from("qll_tracking")
-    .select("message_id, created_at")
+    .select("message_id, created_at, sender_name")
     .eq("handled", false)
     .eq("reported", false)
     .gt("message_id", 0)
@@ -872,15 +875,20 @@ export async function checkUnansweredMessages(
   const processedIds: number[] = [];
   const TARGET_GROUP_ID = -1002273179613;
 
+  let lastIdx: number | undefined; // tránh lặp câu liền kề trong cùng lượt
   for (const item of expiredCases) {
     const randomCtv =
       currentShiftCtv[Math.floor(Math.random() * currentShiftCtv.length)];
     const title = titles[randomCtv.toLowerCase()] || "anh/chị";
-    await telegram.sendMessage(
-      TARGET_GROUP_ID,
-      `Dạ ${title} @${randomCtv} ơi case này cần hỗ trợ ạ !`,
-      item.message_id
-    );
+    // v5: câu nhắc SLA đa dạng (chỉ đổi chữ, giữ nguyên người tag + reply).
+    const { text, index } = buildSlaReminder({
+      title,
+      username: randomCtv,
+      qllName: (item as { sender_name?: string | null }).sender_name,
+      avoidIndex: lastIdx,
+    });
+    lastIdx = index;
+    await telegram.sendMessage(TARGET_GROUP_ID, text, item.message_id);
     processedIds.push(item.message_id);
   }
 

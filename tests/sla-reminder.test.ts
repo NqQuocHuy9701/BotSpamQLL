@@ -201,3 +201,46 @@ describe("checkUnansweredMessages - loai tru /slaoff", () => {
     expect(call[1]).toContain("@op_huynq5");
   });
 });
+
+describe("checkUnansweredMessages - v5 cau nhac da dang", () => {
+  it("dùng mẫu câu SLA mới, điền tên QLL, reply đúng case", async () => {
+    const { SLA_TEMPLATES } = await import("../lib/messages.js");
+    const withName = [
+      { message_id: 555, created_at: "2026-11-02T02:50:00.000Z", sender_name: "Thu Hảo" },
+    ];
+    const { client } = makeSupabase(withName as never);
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW, makeCheckinClient(["op_huynq5"]));
+    expect(send).toHaveBeenCalledTimes(1);
+    const call = send.mock.calls[0] as unknown as [number, string, number];
+    expect(call[1]).toContain("@op_huynq5");
+    expect(call[1]).not.toContain("{");
+    expect(call[2]).toBe(555);
+    // Câu thuộc bộ mẫu A (so khớp sau khi bỏ phần đã điền).
+    const matched = SLA_TEMPLATES.some((t) => {
+      const re = new RegExp(
+        "^" +
+          t
+            .replace(/[.*+?^$()|[\]\\]/g, "\\$&")
+            .replace(/\{title\}/g, ".+?")
+            .replace(/\{user\}/g, "op_huynq5")
+            .replace(/\{qll\}/g, "Thu Hảo") +
+          "$"
+      );
+      return re.test(call[1]);
+    });
+    expect(matched).toBe(true);
+  });
+
+  it("thiếu sender_name vẫn gửi được (không lỗi, không còn placeholder)", async () => {
+    const { client } = makeSupabase(EXPIRED); // không có sender_name
+    const send = vi.fn(async () => ({ ok: true }));
+    const telegram = { sendMessage: send } as unknown as TelegramClient;
+    await checkUnansweredMessages(telegram, client, NOW_IN_WINDOW, makeCheckinClient(["op_huynq5"]));
+    expect(send).toHaveBeenCalledTimes(1);
+    const call = send.mock.calls[0] as unknown as [number, string, number];
+    expect(call[1]).not.toMatch(/[{}]/);
+    expect(call[1]).not.toContain("undefined");
+  });
+});
