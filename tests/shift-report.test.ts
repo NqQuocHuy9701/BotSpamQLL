@@ -36,7 +36,8 @@ function makeSupabase(opts: {
   config?: unknown;
   caseExists?: boolean; // qll_tracking maybeSingle for record*
   upsertSpy?: ReturnType<typeof vi.fn>;
-  caseCount?: number; // qll_tracking count for buildShiftReport
+  caseCount?: number; // số case QLL (id > 0) cho buildShiftReport
+  caseRows?: { message_id: number; content: string }[]; // ghi đè toàn bộ dòng case
   interactionRows?: InteractionRow[];
 }): SupabaseClient {
   const from = vi.fn((table: string) => {
@@ -53,7 +54,12 @@ function makeSupabase(opts: {
       };
     }
     if (table === "qll_tracking") {
-      const countResult = { count: opts.caseCount ?? 0, error: null };
+      const caseRows =
+        opts.caseRows ??
+        Array.from({ length: opts.caseCount ?? 0 }, (_, i) => ({
+          message_id: i + 1,
+          content: `case ${i + 1}`,
+        }));
       return {
         select: (_cols?: unknown, _o?: unknown) => ({
           eq: () => ({
@@ -61,7 +67,7 @@ function makeSupabase(opts: {
               data: opts.caseExists ? { message_id: 1 } : null,
               error: null,
             }),
-            gte: async () => countResult,
+            gte: async () => ({ data: caseRows, error: null }),
           }),
         }),
       };
@@ -354,5 +360,58 @@ describe("maybeHandleReportCommand", () => {
     );
     expect(handled).toBe(true);
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildShiftReport - tách QLL/HTKT + gộp mã trùng HTKT", () => {
+  it("tách tổng case theo nhóm, HTKT gộp tin cùng mã", async () => {
+    const supabase = makeSupabase({
+      caseRows: [
+        // QLL: 2 case (id dương), kể cả cùng nội dung vẫn là 2 tin riêng.
+        { message_id: 101, content: "210049 xin tk" },
+        { message_id: 102, content: "210049 xin tk" },
+        // HTKT (id âm): "210049" x2 -> 1 case; "207671" -> 1; mã lớp x2 -> 1.
+        { message_id: -11, content: "210049 oa" },
+        { message_id: -21, content: "210049 oa ạ" },
+        { message_id: -31, content: "207671 oa" },
+        { message_id: -41, content: "TOAN.2025.1482 ạ" },
+        { message_id: -51, content: "HS TOAN.2025.1482 out lớp" },
+      ],
+      interactionRows: [],
+    });
+    const report = await buildShiftReport(supabase, makeCheckinClient([]), NOW_TOI);
+    expect(report).toContain("Tổng số case phát sinh: 5");
+    expect(report).toContain("• QLL: 2");
+    expect(report).toContain("• HTKT: 3 (đã gộp mã trùng)");
+  });
+
+  it("dòng CTV tách Tổng theo QLL/HTKT", async () => {
+    const supabase = makeSupabase({
+      caseCount: 1,
+      interactionRows: [
+        { ctv_username: "vh_canhnt6", kind: "react", message_id: 10 }, // QLL
+        { ctv_username: "vh_canhnt6", kind: "reply", message_id: -11 }, // HTKT
+        { ctv_username: "vh_canhnt6", kind: "react", message_id: -21 }, // HTKT
+      ],
+    });
+    const report = await buildShiftReport(supabase, makeCheckinClient(["vh_canhnt6"]), NOW_TOI);
+    expect(report).toContain(
+      "@vh_canhnt6 — React: 2 | Reply: 1 | Tổng: 3 (QLL 1 · HTKT 2)"
+    );
+  });
+});
+
+describe("htktCaseKey", () => {
+  it("ưu tiên mã lớp, không phân biệt hoa thường", async () => {
+    const { htktCaseKey } = await import("../lib/monitor.js");
+    expect(htktCaseKey("#hths MOET.2025.0815 bot gọi bạn Vương")).toBe("MOET.2025.0815");
+    expect(htktCaseKey("moet_th.2025.0221, bạn Bảo thoát lớp")).toBe("MOET_TH.2025.0221");
+  });
+
+  it("không có mã lớp thì lấy dãy số đầu >= 3 chữ số", async () => {
+    const { htktCaseKey } = await import("../lib/monitor.js");
+    expect(htktCaseKey("210049 oa")).toBe("210049");
+    expect(htktCaseKey("208231  oa ạ")).toBe("208231");
+    expect(htktCaseKey("210049 oa")).not.toBe(htktCaseKey("207671 oa"));
   });
 });

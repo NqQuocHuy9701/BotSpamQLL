@@ -1157,18 +1157,30 @@ export async function buildShiftReport(
     )
   ).toISOString();
 
-  // Tổng case hợp lệ phát sinh trong ca hôm nay (từ mốc đầu ca tới hiện tại).
-  let totalCases = 0;
+  // Case phát sinh trong ca hôm nay, TÁCH theo nhóm:
+  //  - QLL (message_id > 0): mỗi dòng = 1 case.
+  //  - HTKT (message_id < 0, scopedCaseId): gộp theo MÃ (htktCaseKey) -> 2 tin
+  //    cùng mã chỉ tính 1 case, 2 mã khác nhau là 2 case.
+  let qllCases = 0;
+  let htktCases = 0;
   try {
-    const { count } = await supabase
+    const { data } = await supabase
       .from("qll_tracking")
-      .select("message_id", { count: "exact", head: true })
+      .select("message_id, content")
       .eq("shift_name", label)
       .gte("created_at", shiftStartUtcIso);
-    totalCases = count ?? 0;
+    const caseRows = (data as { message_id: number; content: string | null }[] | null) ?? [];
+    const htktKeys = new Set<string>();
+    for (const r of caseRows) {
+      if (r.message_id > 0) qllCases++;
+      else if (r.message_id < 0) htktKeys.add(htktCaseKey(r.content ?? ""));
+    }
+    htktCases = htktKeys.size;
   } catch {
-    totalCases = 0;
+    qllCases = 0;
+    htktCases = 0;
   }
+  const totalCases = qllCases + htktCases;
 
   // Danh sách CTV check-in thực tế của ca (giao để chỉ thống kê người này).
   let ctvShiftList: string[] = [];
@@ -1217,27 +1229,48 @@ export async function buildShiftReport(
   lines.push(`📊 BÁO CÁO HIỆU SUẤT CA [${label.toUpperCase()}] (${shiftWindow})`);
   lines.push(`👥 CTV trong ca: ${ctvShiftList.length}`);
   lines.push(`Tổng số case phát sinh: ${totalCases}`);
+  lines.push(`  • QLL: ${qllCases}`);
+  lines.push(`  • HTKT: ${htktCases} (đã gộp mã trùng)`);
   lines.push("------------------------");
 
   if (perCtv.size === 0) {
     lines.push("(Chưa có CTV nào React/Reply case trong ca này)");
   } else {
-    // Mỗi CTV: React, Reply, Tổng hỗ trợ (distinct tin có >=1 tương tác).
+    // Mỗi CTV: React, Reply, Tổng hỗ trợ (distinct tin có >=1 tương tác),
+    // kèm tách Tổng theo nhóm (id > 0 = QLL, id < 0 = HTKT).
     const computed = [...perCtv.entries()].map(([uname, agg]) => {
       const react = agg.react.size;
       const reply = agg.reply.size;
       const union = new Set<number>([...agg.react, ...agg.reply]);
-      return { uname, react, reply, total: union.size };
+      let qll = 0;
+      let htkt = 0;
+      for (const id of union) {
+        if (id > 0) qll++;
+        else if (id < 0) htkt++;
+      }
+      return { uname, react, reply, total: union.size, qll, htkt };
     });
     // Sắp xếp giảm dần theo Tổng hỗ trợ.
     computed.sort((a, b) => b.total - a.total);
     computed.forEach((c, i) => {
       lines.push(
-        `${i + 1}. @${c.uname} — React: ${c.react} | Reply: ${c.reply} | Tổng: ${c.total}`
+        `${i + 1}. @${c.uname} — React: ${c.react} | Reply: ${c.reply} | Tổng: ${c.total} (QLL ${c.qll} · HTKT ${c.htkt})`
       );
     });
   }
   return lines.join("\n");
+}
+
+// Khóa gộp case HTKT theo MÃ: ưu tiên mã lớp (vd TOAN.2025.1482,
+// MOET_TH.2025.0221), không có thì lấy dãy số đầu tiên >= 3 chữ số (mã HS,
+// CID, SĐT). Không có mã nào thì dùng nội dung đã chuẩn hóa.
+export function htktCaseKey(content: string): string {
+  const c = (content ?? "").toUpperCase();
+  const cls = c.match(/[A-Z][A-Z_]*\.\d{4}\.\d{3,4}/);
+  if (cls) return cls[0];
+  const num = c.match(/\d{3,}/);
+  if (num) return num[0];
+  return c.replace(/\s+/g, " ").trim();
 }
 
 // Xử lý lệnh /baocao (admin, chat riêng): dựng báo cáo ca hiện tại và trả về

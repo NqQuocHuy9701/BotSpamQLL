@@ -34,6 +34,7 @@ import {
   recordCtvReaction,
   maybeHandleReportCommand,
   maybeHandleCheckinCommand,
+  loadMonitorConfig,
 } from "./monitor.js";
 
 
@@ -1006,9 +1007,32 @@ export function scopedCaseId(chatId: number, messageId: number): number {
 //  - KHÔNG chặn theo người gửi (người đăng/forward thường là CTV VHHS). Việc
 //    chỉ-tính-CTV VHHS được áp ở bước đếm React/Reply (lọc theo check-in VHHS).
 //  - Khóa case dùng scopedCaseId (HTKT -> id âm, không đụng QLL).
-async function trackHtktCase(message: TelegramMessage, deps: Deps): Promise<void> {
+export async function trackHtktCase(message: TelegramMessage, deps: Deps): Promise<void> {
   const text = message.text ?? message.caption ?? "";
   if (!isQllCase(text)) return;
+
+  // Loại tin của CTV giống nhóm QLL (username nằm trong danh sách CTV vận hành
+  // hoặc CTV trực ca). NGOẠI LỆ: tin FORWARD vẫn giữ, vì case HTKT chủ yếu là
+  // CTV forward lại từ bot "Trợ Lý Lớp Học".
+  if (!isForwarded(message)) {
+    const sender = (message.from?.username ?? "").replace(/^@/, "").trim().toLowerCase();
+    if (sender !== "") {
+      try {
+        const cfg = await loadMonitorConfig(deps.supabase);
+        const norm = (l: string[] | undefined) =>
+          (l ?? []).map((u) => u.replace(/^@/, "").trim().toLowerCase());
+        const ctvs = new Set([
+          ...norm(cfg.ctvUsernames),
+          ...norm(cfg.ctvSang),
+          ...norm(cfg.ctvChieu),
+          ...norm(cfg.ctvToi),
+        ]);
+        if (ctvs.has(sender)) return;
+      } catch {
+        // lỗi đọc config -> không chặn (giữ hành vi cũ)
+      }
+    }
+  }
 
   await insertQllCase(deps.supabase, {
     message_id: scopedCaseId(message.chat.id, message.message_id),
