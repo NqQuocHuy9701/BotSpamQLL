@@ -191,16 +191,16 @@ export default async function handler(
     console.error("Shift report error:", err);
   }
 
-  // DỌN DỮ LIỆU HIỆU SUẤT CŨ — chạy 1 lần/giờ (khi phút == 0) để không xóa mỗi
-  // phút gây tốn query. Chống phình shift_interactions / qll_tracking.
+  // DỌN DỮ LIỆU HIỆU SUẤT CŨ — chạy MỖI lần cron (mỗi phút). Trước đây chỉ chạy
+  // khi phút == 0 nên dễ lỡ (cron trễ/hỏng) -> data cũ tồn đọng. Lệnh DELETE
+  // theo created_at rất nhẹ, đa số lần xóa 0 dòng. Giữ qll_tracking 3 ngày,
+  // shift_interactions 2 ngày (tính lùi từ thời điểm hiện tại).
   try {
-    if (new Date().getUTCMinutes() === 0) {
-      const purged = await purgeOldPerformanceData(deps.supabase);
-      if (purged.ok && (purged.interactions > 0 || purged.cases > 0)) {
-        console.log(
-          `🧹 Purge: shift_interactions -${purged.interactions}, qll_tracking -${purged.cases}`
-        );
-      }
+    const purged = await purgeOldPerformanceData(deps.supabase);
+    if (purged.ok && (purged.interactions > 0 || purged.cases > 0)) {
+      console.log(
+        `🧹 Purge: shift_interactions -${purged.interactions}, qll_tracking -${purged.cases}`
+      );
     }
   } catch (err) {
     console.error("Purge error:", err);
