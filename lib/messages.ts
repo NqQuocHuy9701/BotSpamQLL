@@ -6,7 +6,7 @@
 export const SLA_TEMPLATES: readonly string[] = [
   "Dạ {title} @{user} ơi, case của {qll} đang chờ, {title} hỗ trợ giúp em với ạ! 🥺",
   "Dạ {title} @{user} ạ, case này chưa có ai nhận, {title} xem giúp em nha! 😊",
-  "Dạ {title} @{user} ơi, {qll} đang đợi phản hồi ạ 🥺🙏",
+  "Dạ {title} @{user} ơi, {qll} đang đợi phản hồi ạ 🥺",
   "@{user} ơi, case này chưa ai xử lý, {title} check giúp em với ạ! 😅",
   "Dạ {title} @{user}, mình còn case này đang chờ ạ, nhờ {title} hỗ trợ nha! 🥹",
   "Dạ {title} @{user}, {title} rảnh tay hỗ trợ giúp {qll} case này với ạ! 😊",
@@ -18,7 +18,7 @@ export const SLA_TEMPLATES: readonly string[] = [
 export const URGENT_TEMPLATES: readonly string[] = [
   "Dạ {title} @{user} ơi, {qll} đang cần hỗ trợ gấp, {title} xem giúp em ngay với ạ! 😭",
   "Dạ {title} @{user} ạ, có case gấp từ {qll}, nhờ {title} hỗ trợ sớm nha! 😢",
-  "Dạ {title} @{user} ơi, case này khẩn ạ, {title} check giúp em với 😭🙏",
+  "Dạ {title} @{user} ơi, case này khẩn ạ, {title} check giúp em với 😭",
   "Dạ {title} @{user}, {qll} đang cần xử lý gấp, {title} hỗ trợ giúp em nha ạ! 😥",
   "Dạ {title} @{user} ơi, case này cần xử lý sớm ạ, {title} vào hỗ trợ giúp em với ạ! 😢",
   "Dạ {title} @{user} ơi, có case gấp ạ, nhờ {title} nhận giúp em nhé! 😭",

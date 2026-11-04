@@ -64,9 +64,16 @@ describe("mẫu câu", () => {
     );
   });
 
-  it("mọi câu khẩn có mặt khóc, mọi câu SLA có icon mặt", () => {
-    for (const t of URGENT_TEMPLATES) expect(t).toMatch(/😭|😢|😥/u);
-    for (const t of SLA_TEMPLATES) expect(t).toMatch(/🥺|😊|😅|🥹/u);
+  it("mỗi câu có ĐÚNG 1 icon mặt (khẩn: mặt khóc), không kèm 🙏", () => {
+    const count = (t: string) => (t.match(/\p{Extended_Pictographic}/gu) ?? []).length;
+    for (const t of URGENT_TEMPLATES) {
+      expect(t).toMatch(/😭|😢|😥/u);
+      expect(count(t)).toBe(1);
+    }
+    for (const t of SLA_TEMPLATES) {
+      expect(t).toMatch(/🥺|😊|😅|🥹/u);
+      expect(count(t)).toBe(1);
+    }
   });
 
   it("thiếu danh xưng -> 'anh/chị'", () => {
