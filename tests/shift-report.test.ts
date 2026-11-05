@@ -400,9 +400,10 @@ describe("buildShiftReport - tách QLL/HTKT + gộp mã trùng HTKT", () => {
       ],
     });
     const report = await buildShiftReport(supabase, makeCheckinClient(["vh_canhnt6"]), NOW_TOI);
-    // 1 dòng/CTV: Tổng React Reply QLL HTKT = 3 2 1 1 2.
+    // Bảng 1: vh_canhnt6 | Tổng 3 | ❤ 2 | 💬 1. Bảng 2: vh_canhnt6 | QLL 1 | HTKT 2.
     expect(report).toContain("vh_canhnt6");
-    expect(report).toMatch(/vh_canhnt6\s+3\s+2\s+1\s+1\s+2/);
+    expect(report).toMatch(/vh_canhnt6\s+3\s+2\s+1\b/); // bảng 1
+    expect(report).toMatch(/vh_canhnt6\s+1\s+2\b/); // bảng 2 QLL/HTKT
   });
 });
 

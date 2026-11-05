@@ -1260,25 +1260,46 @@ export async function buildShiftReport(
   const padR = (s: string, w: number) => (s.length >= w ? s : s + " ".repeat(w - s.length));
   const padL = (s: string, w: number) => (s.length >= w ? s : " ".repeat(w - s.length) + s);
 
-  // Tiêu đề cột dùng CHỮ THUẦN (không emoji) để thẳng hàng với số bên dưới —
-  // emoji rộng gấp đôi ký tự thường nên gây lệch cột trong <pre>.
-  // Cột: STT | CTV | Tổng | React | Reply | QLL | HTKT (gộp 1 bảng cho gọn).
-  const NAME_W = 13; // bề rộng cột tên (cắt gọn nếu dài hơn)
+  // 2 BẢNG riêng (trong <pre> nên cột thẳng hàng). Mỗi cột số rộng CỐ ĐỊNH và
+  // CĂN PHẢI; tiêu đề số cũng căn phải cùng bề rộng -> thẳng với số bên dưới.
+  // Tiêu đề 2 cột cuối bảng 1 dùng CHỮ (React/Reply) thay emoji để không lệch,
+  // nhưng vẫn giữ emoji ở hàng đầu để nhìn trực quan (emoji đặt cuối, không
+  // nằm trong vùng canh cột).
+  const NAME_W = 12; // bề rộng cột tên
+  const W_TONG = 5;
+  const W_RE = 5;
+  const W_REP = 5;
+
   const tableRows: string[] = [];
+  // Bảng 1: # | CTV | Tổng | React(❤) | Reply(💬)
   tableRows.push(
-    `${padR("#", 2)} ${padR("CTV", NAME_W)} ${padL("Tong", 4)} ${padL("Re", 3)} ${padL("Rep", 3)} ${padL("QLL", 4)} ${padL("HTKT", 4)}`
+    `${padR("#", 2)} ${padR("CTV", NAME_W)} ${padL("Tổng", W_TONG)} ${padL("❤", W_RE)} ${padL("💬", W_REP)}`
   );
   computed.forEach((c, i) => {
     const name = c.uname.length > NAME_W ? c.uname.slice(0, NAME_W - 1) + "…" : c.uname;
     tableRows.push(
-      `${padR(String(i + 1), 2)} ${padR(name, NAME_W)} ${padL(String(c.total), 4)} ${padL(
+      `${padR(String(i + 1), 2)} ${padR(name, NAME_W)} ${padL(String(c.total), W_TONG)} ${padL(
         String(c.react),
-        3
-      )} ${padL(String(c.reply), 3)} ${padL(String(c.qll), 4)} ${padL(String(c.htkt), 4)}`
+        W_RE
+      )} ${padL(String(c.reply), W_REP)}`
     );
   });
 
-  const table = esc(tableRows.join("\n"));
+  // Bảng 2: CTV | QLL | HTKT
+  const W_QLL = 5;
+  const W_HTKT = 5;
+  const detail: string[] = [];
+  detail.push("");
+  detail.push(`${padR("CTV", NAME_W + 3)} ${padL("QLL", W_QLL)} ${padL("HTKT", W_HTKT)}`);
+  computed.forEach((c) => {
+    const name =
+      c.uname.length > NAME_W + 3 ? c.uname.slice(0, NAME_W + 2) + "…" : c.uname;
+    detail.push(
+      `${padR(name, NAME_W + 3)} ${padL(String(c.qll), W_QLL)} ${padL(String(c.htkt), W_HTKT)}`
+    );
+  });
+
+  const table = esc([...tableRows, ...detail].join("\n"));
   return `${head.join("\n")}\n<pre>${table}</pre>`;
 }
 
