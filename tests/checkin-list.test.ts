@@ -64,6 +64,8 @@ const TS_TOI_1727 = "2026-11-01T17:27:00.000000+00:00"; // 17:27 -> tối (theo 
 const TS_CHIEU_1500 = "2026-11-01T15:00:00.000000+00:00"; // ca chiều
 const TS_CHIEU_1659 = "2026-11-01T16:59:00.000000+00:00"; // 16:59 -> vẫn chiều
 const TS_SANG_0900 = "2026-11-01T09:00:00.000000+00:00"; // ca sáng
+const TS_SANG_0800 = "2026-11-01T08:00:00.000000+00:00"; // ĐÚNG mốc 08:00 -> sáng
+const TS_TRUOC8_0730 = "2026-11-01T07:30:00.000000+00:00"; // 07:30 -> NGOÀI ca
 const TS_HOMQUA_TOI = "2026-10-31T20:00:00.000000+00:00"; // tối hôm qua
 
 // "now" cố định để quy ca xác định. getCheckinShiftVn cộng +7h vào now.
@@ -73,6 +75,8 @@ const NOW_TOI = new Date("2026-11-01T13:00:00.000Z");
 const NOW_SANG = new Date("2026-11-01T02:00:00.000Z");
 // 01/11/2026 15:00 VN == 08:00 UTC -> ca CHIỀU.
 const NOW_CHIEU = new Date("2026-11-01T08:00:00.000Z");
+// 01/11/2026 07:30 VN == 00:30 UTC -> NGOÀI ca (trước 8h).
+const NOW_TRUOC8 = new Date("2026-11-01T00:30:00.000Z");
 
 describe("getCurrentShiftCheckins", () => {
   it("lấy CTV VHHS check-in ĐÚNG ca hiện tại (tối), dedupe", async () => {
@@ -120,6 +124,23 @@ describe("getCurrentShiftCheckins", () => {
     ]);
     const out = await getCurrentShiftCheckins(client, NOW_SANG);
     expect(out).toEqual(["vh_thunb"]);
+  });
+
+  it("sáng bắt đầu từ 08:00: gồm 08:00, loại check-in 07:30 (ngoài ca)", async () => {
+    const { client } = makeCheckinClient([
+      { username: "VH_S0800", created_at: TS_SANG_0800 }, // 08:00 -> sáng
+      { username: "VH_Som", created_at: TS_TRUOC8_0730 }, // 07:30 -> ngoài, loại
+    ]);
+    const out = await getCurrentShiftCheckins(client, NOW_SANG);
+    expect(out).toEqual(["vh_s0800"]);
+  });
+
+  it("NGOÀI giờ ca (gõ lúc 07:30) -> trả rỗng", async () => {
+    const { client } = makeCheckinClient([
+      { username: "VH_S0800", created_at: TS_SANG_0800 },
+    ]);
+    const out = await getCurrentShiftCheckins(client, NOW_TRUOC8);
+    expect(out).toEqual([]);
   });
 
   it("chuẩn hóa username bỏ @ + lowercase", async () => {

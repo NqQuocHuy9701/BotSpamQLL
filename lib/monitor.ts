@@ -1512,25 +1512,28 @@ export async function addCtvFromCheckin(
 
 // RANH GIỚI CA RIÊNG CHO CHECK-IN (CHỈ áp dụng ở đây, KHÔNG đụng
 // getCurrentShiftVn / hệ thống điều phối cũ):
-//   Sáng: < 13:30 ; Chiều: 13:30 - < 17:00 ; Tối: >= 17:00.
-// (Theo yêu cầu: CTV ca tối check-in từ 17g trở đi.)
+//   Sáng: 08:00 - < 13:00 ; Chiều: 13:00 - < 17:00 ; Tối: >= 17:00.
+// (Theo yêu cầu: sáng từ 8g, chiều từ 13g, tối từ 17g. Trước 8h = ngoài ca.)
+const CHECKIN_SANG_START = 8; // mốc bắt đầu ca sáng cho check-in (08:00)
+const CHECKIN_CHIEU_START = 13; // mốc bắt đầu ca chiều cho check-in (13:00)
 const CHECKIN_TOI_START = 17; // mốc bắt đầu ca tối cho check-in (17:00)
 
 function shiftBoundsVn(key: "sang" | "chieu" | "toi"): { lo: number; hi: number } {
-  if (key === "sang") return { lo: 0, hi: 13.5 };
-  if (key === "chieu") return { lo: 13.5, hi: CHECKIN_TOI_START };
+  if (key === "sang") return { lo: CHECKIN_SANG_START, hi: CHECKIN_CHIEU_START };
+  if (key === "chieu") return { lo: CHECKIN_CHIEU_START, hi: CHECKIN_TOI_START };
   return { lo: CHECKIN_TOI_START, hi: 24 };
 }
 
 // Quy ca cho CHECK-IN theo thời điểm `now` (giờ VN), dùng ranh giới riêng
 // ở trên. Tách khỏi getCurrentShiftVn để không ảnh hưởng hệ thống cũ.
-function getCheckinShiftVn(now: Date = new Date()): {
-  key: "sang" | "chieu" | "toi";
-  label: string;
-} {
+// Trả null khi NGOÀI giờ ca (trước 08:00 giờ VN) — không ca nào đang diễn ra.
+function getCheckinShiftVn(now: Date = new Date()):
+  | { key: "sang" | "chieu" | "toi"; label: string }
+  | null {
   const vn = new Date(now.getTime() + VN_OFFSET_MS);
   const timeVal = vn.getUTCHours() + vn.getUTCMinutes() / 60;
-  if (timeVal < 13.5) return { key: "sang", label: "Sáng" };
+  if (timeVal < CHECKIN_SANG_START) return null; // trước 8h -> ngoài ca
+  if (timeVal < CHECKIN_CHIEU_START) return { key: "sang", label: "Sáng" };
   if (timeVal < CHECKIN_TOI_START) return { key: "chieu", label: "Chiều" };
   return { key: "toi", label: "Tối" };
 }
@@ -1542,9 +1545,10 @@ export async function getCurrentShiftCheckins(
   checkinClient: SupabaseClient,
   now: Date = new Date()
 ): Promise<string[]> {
-  const { key } = getCheckinShiftVn(now);
+  const shift = getCheckinShiftVn(now);
+  if (!shift) return []; // ngoài giờ ca (trước 8h) -> không có ca nào
   const today = getVnDateString(now); // YYYY-MM-DD giờ VN
-  const { lo, hi } = shiftBoundsVn(key);
+  const { lo, hi } = shiftBoundsVn(shift.key);
 
   // created_at là GIỜ VN gắn nhãn +00:00. Nên mốc đầu/cuối CA của ngày hôm nay
   // cũng viết dạng "<today>THH:MM:SS+00:00" (giờ VN) để lọc THẲNG ở tầng DB.
@@ -1611,12 +1615,15 @@ export async function buildCheckinList(
   checkinClient: SupabaseClient,
   now: Date = new Date()
 ): Promise<string> {
-  const { label } = getCheckinShiftVn(now);
+  const shift = getCheckinShiftVn(now);
   const today = getVnDateString(now);
+  if (!shift) {
+    return `⏰ Ngoài giờ ca (ca sáng bắt đầu từ 08:00). Chưa có ca nào đang diễn ra.`;
+  }
   const list = await getCurrentShiftCheckins(checkinClient, now);
 
   const lines: string[] = [];
-  lines.push(`📋 CTV đã check-in ca [${label.toUpperCase()}] hôm nay (${today}):`);
+  lines.push(`📋 CTV đã check-in ca [${shift.label.toUpperCase()}] hôm nay (${today}):`);
   if (list.length === 0) {
     lines.push("(Chưa có ai check-in)");
   } else {
