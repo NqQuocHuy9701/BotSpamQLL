@@ -1226,17 +1226,21 @@ export async function buildShiftReport(
     else if (r.kind === "reply") agg.reply.add(mid);
   }
 
+  const DIV = "━━━━━━━━━━━━━━━";
   const lines: string[] = [];
-  lines.push(`📊 BÁO CÁO HIỆU SUẤT CA [${label.toUpperCase()}] (${shiftWindow})`);
+  lines.push(`📊 BÁO CÁO HIỆU SUẤT CA — ${label.toUpperCase()}`);
+  lines.push(`🕒 ${shiftWindow}`);
+  lines.push(DIV);
   lines.push(`👥 CTV trong ca: ${ctvShiftList.length}`);
-  lines.push(`Tổng số case phát sinh: ${totalCases}`);
-  lines.push(`  • QLL: ${qllCases}`);
-  lines.push(`  • HTKT: ${htktCases} (đã gộp mã trùng)`);
-  lines.push("------------------------");
+  lines.push(`📨 Tổng case: ${totalCases}`);
+  lines.push(`   • QLL: ${qllCases}`);
+  lines.push(`   • HTKT: ${htktCases}`);
+  lines.push(DIV);
 
   if (perCtv.size === 0) {
-    lines.push("(Chưa có CTV nào React/Reply case trong ca này)");
+    lines.push("Chưa có CTV nào React/Reply case trong ca này.");
   } else {
+    lines.push("🏆 HIỆU SUẤT CTV");
     // Mỗi CTV: React, Reply, Tổng hỗ trợ (distinct tin có >=1 tương tác),
     // kèm tách Tổng theo nhóm (id > 0 = QLL, id < 0 = HTKT).
     const computed = [...perCtv.entries()].map(([uname, agg]) => {
@@ -1254,9 +1258,10 @@ export async function buildShiftReport(
     // Sắp xếp giảm dần theo Tổng hỗ trợ.
     computed.sort((a, b) => b.total - a.total);
     computed.forEach((c, i) => {
-      lines.push(
-        `${i + 1}. @${c.uname} — React: ${c.react} | Reply: ${c.reply} | Tổng: ${c.total} (QLL ${c.qll} · HTKT ${c.htkt})`
-      );
+      lines.push("");
+      lines.push(`${i + 1}. @${c.uname}`);
+      lines.push(`   ❤️ React ${c.react} · 💬 Reply ${c.reply} · ✅ Tổng ${c.total}`);
+      lines.push(`   └ QLL ${c.qll} · HTKT ${c.htkt}`);
     });
   }
   return lines.join("\n");
