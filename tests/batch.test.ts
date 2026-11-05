@@ -384,4 +384,31 @@ describe("buildSummary", () => {
     expect(summary).toContain("Không tìm thấy (0):");
     expect(summary).toContain("(không có)");
   });
+
+  it("gom QLL chưa map trùng tên + đếm số HS, kèm gợi ý /adduser", () => {
+    const summary = buildSummary(
+      8,
+      [],
+      [
+        "Nguyễn Khánh Uyên",
+        "Nguyễn Khánh Uyên",
+        "Nguyễn Khánh Uyên",
+        "Nguyễn Khánh Uyên",
+        "Nguyễn Khánh Uyên",
+        "Vũ Ngọc Lan",
+        "Nguyễn Khánh Uyên",
+      ]
+    );
+    // 2 QLL khác nhau, không in lặp 7 dòng.
+    expect(summary).toContain("Không tìm thấy (2):");
+    expect(summary).toContain("- Nguyễn Khánh Uyên (6 HS)");
+    expect(summary).toContain("- Vũ Ngọc Lan"); // 1 HS -> không có "(N HS)"
+    expect(summary).not.toContain("Vũ Ngọc Lan (1 HS)");
+    // Gợi ý cú pháp add cho đúng 2 QLL.
+    expect(summary).toContain("/adduser <username> Nguyễn Khánh Uyên");
+    expect(summary).toContain("/adduser <username> Vũ Ngọc Lan");
+    // Không lặp dòng gợi ý quá số QLL.
+    const addLines = summary.split("\n").filter((l) => l.startsWith("/adduser"));
+    expect(addLines).toHaveLength(2);
+  });
 });
