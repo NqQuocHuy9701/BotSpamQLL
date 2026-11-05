@@ -7,7 +7,8 @@ export interface TelegramClient {
   sendMessage(
     chatId: number,
     text: string,
-    replyToMessageId?: number
+    replyToMessageId?: number,
+    parseMode?: "HTML" | "MarkdownV2"
   ): Promise<SendResult>;
   deleteMessage(chatId: number, messageId: number): Promise<DeleteResult>;
   // Downloads a file by its Telegram file_id. Resolves a structured failure
@@ -87,9 +88,13 @@ export function createTelegramClient(botToken: string): TelegramClient {
   async function sendOne(
     chatId: number,
     text: string,
-    replyToMessageId?: number
+    replyToMessageId?: number,
+    parseMode?: "HTML" | "MarkdownV2"
   ): Promise<SendResult> {
     const body: Record<string, unknown> = { chat_id: chatId, text };
+    if (parseMode !== undefined) {
+      body.parse_mode = parseMode;
+    }
     if (replyToMessageId !== undefined) {
       body.reply_to_message_id = replyToMessageId;
       // Don't fail the whole send if the replied-to message was deleted.
@@ -122,7 +127,8 @@ export function createTelegramClient(botToken: string): TelegramClient {
   async function sendMessage(
     chatId: number,
     text: string,
-    replyToMessageId?: number
+    replyToMessageId?: number,
+    parseMode?: "HTML" | "MarkdownV2"
   ): Promise<SendResult> {
     try {
       const parts = splitForTelegram(text);
@@ -133,7 +139,8 @@ export function createTelegramClient(botToken: string): TelegramClient {
         last = await sendOne(
           chatId,
           parts[i],
-          i === 0 ? replyToMessageId : undefined
+          i === 0 ? replyToMessageId : undefined,
+          parseMode
         );
         if (!last.ok) {
           return last; // stop on first failure

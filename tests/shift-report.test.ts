@@ -275,14 +275,16 @@ describe("buildShiftReport", () => {
 
     const report = await buildShiftReport(supabase, checkin, NOW_TOI);
 
-    expect(report).toContain("BÁO CÁO HIỆU SUẤT CA — TỐI");
-    expect(report).toContain("CTV trong ca: 2");
+    expect(report).toContain("BÁO CÁO CA — TỐI");
+    expect(report).toContain("CTV: 2");
     expect(report).toContain("Case: 5");
-    expect(report).toContain("@vh_canhnt6  —  ✅ 2");
-    expect(report).toContain("❤️ 1   💬 2   ·   QLL");
-    expect(report).toContain("@vh_minhit  —  ✅ 1");
+    // Bảng monospace trong <pre>; cột thẳng hàng.
+    expect(report).toContain("<pre>");
+    expect(report).toContain("</pre>");
+    expect(report).toContain("vh_canhnt6");
+    expect(report).toContain("vh_minhit");
     // nguoi_la không thuộc check-in -> không xuất hiện.
-    expect(report).not.toContain("@nguoi_la");
+    expect(report).not.toContain("nguoi_la");
   });
 
   it("báo trống khi không có CTV check-in / không có tương tác", async () => {
@@ -290,15 +292,17 @@ describe("buildShiftReport", () => {
     const checkin = makeCheckinClient([]);
     const report = await buildShiftReport(supabase, checkin, NOW_TOI);
     expect(report).toContain("Case: 0");
-    expect(report).toContain("CTV trong ca: 0");
+    expect(report).toContain("CTV: 0");
     expect(report).toContain("Chưa có CTV nào React/Reply");
+    // Không có ai -> không dựng bảng <pre>.
+    expect(report).not.toContain("<pre>");
   });
 
   it("CTV check-in nhưng chưa tương tác -> không liệt kê (perCtv rỗng)", async () => {
     const supabase = makeSupabase({ caseCount: 3, interactionRows: [] });
     const checkin = makeCheckinClient(["vh_canhnt6"]);
     const report = await buildShiftReport(supabase, checkin, NOW_TOI);
-    expect(report).toContain("CTV trong ca: 1");
+    expect(report).toContain("CTV: 1");
     expect(report).toContain("Chưa có CTV nào React/Reply");
   });
 });
@@ -332,7 +336,7 @@ describe("maybeHandleReportCommand", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const call = sendMessage.mock.calls[0] as unknown as [number, string];
     expect(call[0]).toBe(ADMIN_ID);
-    expect(String(call[1])).toContain("BÁO CÁO HIỆU SUẤT");
+    expect(String(call[1])).toContain("BÁO CÁO CA");
   });
 
   it("ignores non-/baocao text (returns false)", async () => {
@@ -382,8 +386,8 @@ describe("buildShiftReport - tách QLL/HTKT + gộp mã trùng HTKT", () => {
     });
     const report = await buildShiftReport(supabase, makeCheckinClient([]), NOW_TOI);
     expect(report).toContain("Case: 5");
-    expect(report).toContain("QLL: 2");
-    expect(report).toContain("HTKT: 3");
+    expect(report).toContain("QLL 2");
+    expect(report).toContain("HTKT 3");
   });
 
   it("dòng CTV tách Tổng theo QLL/HTKT", async () => {
@@ -396,8 +400,9 @@ describe("buildShiftReport - tách QLL/HTKT + gộp mã trùng HTKT", () => {
       ],
     });
     const report = await buildShiftReport(supabase, makeCheckinClient(["vh_canhnt6"]), NOW_TOI);
-    expect(report).toContain("@vh_canhnt6  —  ✅ 3");
-    expect(report).toContain("❤️ 2   💬 1   ·   QLL 1 · HTKT 2");
+    // 1 dòng/CTV: Tổng React Reply QLL HTKT = 3 2 1 1 2.
+    expect(report).toContain("vh_canhnt6");
+    expect(report).toMatch(/vh_canhnt6\s+3\s+2\s+1\s+1\s+2/);
   });
 });
 

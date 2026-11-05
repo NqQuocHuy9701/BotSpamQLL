@@ -1226,44 +1226,60 @@ export async function buildShiftReport(
     else if (r.kind === "reply") agg.reply.add(mid);
   }
 
-  const DIV = "━━━━━━━━━━━━━━━━━━━━━━━";
-  const lines: string[] = [];
-  lines.push(`📊 BÁO CÁO HIỆU SUẤT CA — ${label.toUpperCase()}`);
-  lines.push(`🕒 ${shiftWindow}`);
-  lines.push(DIV);
-  lines.push(`👥 CTV trong ca: ${ctvShiftList.length}        📨 Case: ${totalCases}`);
-  lines.push(`📌 QLL: ${qllCases}        🛠 HTKT: ${htktCases}`);
-  lines.push(DIV);
+  // Phần tiêu đề (chữ thường, có emoji). Bảng CTV để trong <pre> (monospace)
+  // nên các cột thẳng hàng; gửi với parse_mode=HTML (xem maybeHandleReportCommand).
+  const head: string[] = [];
+  head.push(`📊 BÁO CÁO CA — ${label.toUpperCase()}`);
+  head.push(`🕒 ${shiftWindow}`);
+  head.push(`👥 CTV: ${ctvShiftList.length} · 📨 Case: ${totalCases}`);
+  head.push(`📌 QLL ${qllCases} · 🛠 HTKT ${htktCases}`);
 
   if (perCtv.size === 0) {
-    lines.push("Chưa có CTV nào React/Reply case trong ca này.");
-  } else {
-    lines.push("🏆 HIỆU SUẤT CTV");
-    lines.push("");
-    // Mỗi CTV: React, Reply, Tổng hỗ trợ (distinct tin có >=1 tương tác),
-    // kèm tách Tổng theo nhóm (id > 0 = QLL, id < 0 = HTKT).
-    const computed = [...perCtv.entries()].map(([uname, agg]) => {
-      const react = agg.react.size;
-      const reply = agg.reply.size;
-      const union = new Set<number>([...agg.react, ...agg.reply]);
-      let qll = 0;
-      let htkt = 0;
-      for (const id of union) {
-        if (id > 0) qll++;
-        else if (id < 0) htkt++;
-      }
-      return { uname, react, reply, total: union.size, qll, htkt };
-    });
-    // Sắp xếp giảm dần theo Tổng hỗ trợ.
-    computed.sort((a, b) => b.total - a.total);
-    computed.forEach((c, i) => {
-      // Dòng 1: thứ hạng + tên + TỔNG nổi bật. Dòng 2: chi tiết thụt lề.
-      lines.push(`${i + 1}. @${c.uname}  —  ✅ ${c.total}`);
-      lines.push(`     ❤️ ${c.react}   💬 ${c.reply}   ·   QLL ${c.qll} · HTKT ${c.htkt}`);
-      lines.push("");
-    });
+    head.push("");
+    head.push("Chưa có CTV nào React/Reply case trong ca này.");
+    return head.join("\n");
   }
-  return lines.join("\n").trimEnd();
+
+  const computed = [...perCtv.entries()].map(([uname, agg]) => {
+    const react = agg.react.size;
+    const reply = agg.reply.size;
+    const union = new Set<number>([...agg.react, ...agg.reply]);
+    let qll = 0;
+    let htkt = 0;
+    for (const id of union) {
+      if (id > 0) qll++;
+      else if (id < 0) htkt++;
+    }
+    return { uname, react, reply, total: union.size, qll, htkt };
+  });
+  computed.sort((a, b) => b.total - a.total);
+
+  // Dựng bảng monospace. Cột: # | CTV | Tổng | React | Reply.
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const padR = (s: string, w: number) => (s.length >= w ? s : s + " ".repeat(w - s.length));
+  const padL = (s: string, w: number) => (s.length >= w ? s : " ".repeat(w - s.length) + s);
+
+  // Tiêu đề cột dùng CHỮ THUẦN (không emoji) để thẳng hàng với số bên dưới —
+  // emoji rộng gấp đôi ký tự thường nên gây lệch cột trong <pre>.
+  // Cột: STT | CTV | Tổng | React | Reply | QLL | HTKT (gộp 1 bảng cho gọn).
+  const NAME_W = 13; // bề rộng cột tên (cắt gọn nếu dài hơn)
+  const tableRows: string[] = [];
+  tableRows.push(
+    `${padR("#", 2)} ${padR("CTV", NAME_W)} ${padL("Tong", 4)} ${padL("Re", 3)} ${padL("Rep", 3)} ${padL("QLL", 4)} ${padL("HTKT", 4)}`
+  );
+  computed.forEach((c, i) => {
+    const name = c.uname.length > NAME_W ? c.uname.slice(0, NAME_W - 1) + "…" : c.uname;
+    tableRows.push(
+      `${padR(String(i + 1), 2)} ${padR(name, NAME_W)} ${padL(String(c.total), 4)} ${padL(
+        String(c.react),
+        3
+      )} ${padL(String(c.reply), 3)} ${padL(String(c.qll), 4)} ${padL(String(c.htkt), 4)}`
+    );
+  });
+
+  const table = esc(tableRows.join("\n"));
+  return `${head.join("\n")}\n<pre>${table}</pre>`;
 }
 
 // Khóa gộp case HTKT theo MÃ: ưu tiên mã lớp (vd TOAN.2025.1482,
@@ -1299,7 +1315,7 @@ export async function maybeHandleReportCommand(
     return true; // nuốt lệnh, không làm gì nếu không đúng quyền/chat
   }
   const report = await buildShiftReport(supabase, checkinClient);
-  await telegram.sendMessage(message.chat.id, report);
+  await telegram.sendMessage(message.chat.id, report, undefined, "HTML");
   return true;
 }
 
@@ -1354,7 +1370,7 @@ export async function maybeSendShiftReports(
   const report = await buildShiftReport(supabase, checkinClient, new Date(midShiftMs));
   for (const adminId of adminIds) {
     try {
-      await telegram.sendMessage(adminId, `🕗 [BÁO CÁO CUỐI CA tự động]\n\n${report}`);
+      await telegram.sendMessage(adminId, `🕗 [BÁO CÁO CUỐI CA tự động]\n\n${report}`, undefined, "HTML");
     } catch {
       // bỏ qua lỗi gửi 1 admin, không chặn admin còn lại
     }
