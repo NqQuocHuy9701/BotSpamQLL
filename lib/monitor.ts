@@ -1226,21 +1226,20 @@ export async function buildShiftReport(
     else if (r.kind === "reply") agg.reply.add(mid);
   }
 
-  const DIV = "━━━━━━━━━━━━━━━";
+  const DIV = "━━━━━━━━━━━━━━━━━━━━━━━";
   const lines: string[] = [];
   lines.push(`📊 BÁO CÁO HIỆU SUẤT CA — ${label.toUpperCase()}`);
   lines.push(`🕒 ${shiftWindow}`);
   lines.push(DIV);
-  lines.push(`👥 CTV trong ca: ${ctvShiftList.length}`);
-  lines.push(`📨 Tổng case: ${totalCases}`);
-  lines.push(`   • QLL: ${qllCases}`);
-  lines.push(`   • HTKT: ${htktCases}`);
+  lines.push(`👥 CTV trong ca: ${ctvShiftList.length}        📨 Case: ${totalCases}`);
+  lines.push(`📌 QLL: ${qllCases}        🛠 HTKT: ${htktCases}`);
   lines.push(DIV);
 
   if (perCtv.size === 0) {
     lines.push("Chưa có CTV nào React/Reply case trong ca này.");
   } else {
     lines.push("🏆 HIỆU SUẤT CTV");
+    lines.push("");
     // Mỗi CTV: React, Reply, Tổng hỗ trợ (distinct tin có >=1 tương tác),
     // kèm tách Tổng theo nhóm (id > 0 = QLL, id < 0 = HTKT).
     const computed = [...perCtv.entries()].map(([uname, agg]) => {
@@ -1258,13 +1257,13 @@ export async function buildShiftReport(
     // Sắp xếp giảm dần theo Tổng hỗ trợ.
     computed.sort((a, b) => b.total - a.total);
     computed.forEach((c, i) => {
+      // Dòng 1: thứ hạng + tên + TỔNG nổi bật. Dòng 2: chi tiết thụt lề.
+      lines.push(`${i + 1}. @${c.uname}  —  ✅ ${c.total}`);
+      lines.push(`     ❤️ ${c.react}   💬 ${c.reply}   ·   QLL ${c.qll} · HTKT ${c.htkt}`);
       lines.push("");
-      lines.push(`${i + 1}. @${c.uname}`);
-      lines.push(`   ❤️ React ${c.react} · 💬 Reply ${c.reply} · ✅ Tổng ${c.total}`);
-      lines.push(`   └ QLL ${c.qll} · HTKT ${c.htkt}`);
     });
   }
-  return lines.join("\n");
+  return lines.join("\n").trimEnd();
 }
 
 // Khóa gộp case HTKT theo MÃ: ưu tiên mã lớp (vd TOAN.2025.1482,

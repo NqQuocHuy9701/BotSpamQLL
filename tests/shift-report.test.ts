@@ -277,11 +277,10 @@ describe("buildShiftReport", () => {
 
     expect(report).toContain("BÁO CÁO HIỆU SUẤT CA — TỐI");
     expect(report).toContain("CTV trong ca: 2");
-    expect(report).toContain("Tổng case: 5");
-    expect(report).toContain("@vh_canhnt6");
-    expect(report).toContain("❤️ React 1 · 💬 Reply 2 · ✅ Tổng 2");
-    expect(report).toContain("@vh_minhit");
-    expect(report).toContain("❤️ React 1 · 💬 Reply 0 · ✅ Tổng 1");
+    expect(report).toContain("Case: 5");
+    expect(report).toContain("@vh_canhnt6  —  ✅ 2");
+    expect(report).toContain("❤️ 1   💬 2   ·   QLL");
+    expect(report).toContain("@vh_minhit  —  ✅ 1");
     // nguoi_la không thuộc check-in -> không xuất hiện.
     expect(report).not.toContain("@nguoi_la");
   });
@@ -290,7 +289,7 @@ describe("buildShiftReport", () => {
     const supabase = makeSupabase({ caseCount: 0, interactionRows: [] });
     const checkin = makeCheckinClient([]);
     const report = await buildShiftReport(supabase, checkin, NOW_TOI);
-    expect(report).toContain("Tổng case: 0");
+    expect(report).toContain("Case: 0");
     expect(report).toContain("CTV trong ca: 0");
     expect(report).toContain("Chưa có CTV nào React/Reply");
   });
@@ -382,9 +381,9 @@ describe("buildShiftReport - tách QLL/HTKT + gộp mã trùng HTKT", () => {
       interactionRows: [],
     });
     const report = await buildShiftReport(supabase, makeCheckinClient([]), NOW_TOI);
-    expect(report).toContain("Tổng case: 5");
-    expect(report).toContain("• QLL: 2");
-    expect(report).toContain("• HTKT: 3");
+    expect(report).toContain("Case: 5");
+    expect(report).toContain("QLL: 2");
+    expect(report).toContain("HTKT: 3");
   });
 
   it("dòng CTV tách Tổng theo QLL/HTKT", async () => {
@@ -397,9 +396,8 @@ describe("buildShiftReport - tách QLL/HTKT + gộp mã trùng HTKT", () => {
       ],
     });
     const report = await buildShiftReport(supabase, makeCheckinClient(["vh_canhnt6"]), NOW_TOI);
-    expect(report).toContain("@vh_canhnt6");
-    expect(report).toContain("❤️ React 2 · 💬 Reply 1 · ✅ Tổng 3");
-    expect(report).toContain("└ QLL 1 · HTKT 2");
+    expect(report).toContain("@vh_canhnt6  —  ✅ 3");
+    expect(report).toContain("❤️ 2   💬 1   ·   QLL 1 · HTKT 2");
   });
 });
 
