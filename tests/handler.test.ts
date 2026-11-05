@@ -884,6 +884,8 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
       items: MappedItem[];
     };
     expect(saved.admin_id).toBe(ADMIN_ID);
+    // 2 dòng map được + 1 dòng CHƯA map (pending) đều được lưu (để /remap sau).
+    // Dòng đã map kèm qll gốc; dòng chưa map có username="" và pending=true.
     expect(saved.items).toEqual([
       {
         tenHS: "Vũ Xuân Kỳ (SID: 189064)",
@@ -891,6 +893,7 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
         ngayHoc: "15/10/2026",
         lichHoc: "T5 20:30-21:30",
         username: "SA_LanNT18",
+        qll: "Nông Thị Lan 18",
       },
       {
         tenHS: "Đặng Mai Vy (SID: 213054)",
@@ -898,6 +901,16 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
         ngayHoc: "15/10/2026",
         lichHoc: "",
         username: "SAAnhPTH5",
+        qll: "Phạm Thị Hải Anh 5",
+      },
+      {
+        tenHS: "Ai Đó",
+        maLop: "L9",
+        ngayHoc: "15/10/2026",
+        lichHoc: "T6",
+        username: "",
+        pending: true,
+        qll: "Trần Văn Khoa 9",
       },
     ]);
 

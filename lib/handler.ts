@@ -111,6 +111,8 @@ const BATCH_STOP_COMMAND = "/cancel";
 // Manual QLL-management commands (admin private DM only). Recognized BEFORE the
 // document / /ok / /huy logic so they can never be mis-eaten by those branches.
 const ADD_USER_COMMAND = "/adduser";
+// Map lại các dòng CHƯA map của danh sách trước đó (không cần gửi lại file).
+const REMAP_COMMAND = "/remap";
 const FIND_USER_COMMAND = "/finduser";
 const LIST_USERS_COMMAND = "/listusers";
 
@@ -582,6 +584,52 @@ async function maybeHandleQllCommands(
     return true;
   }
 
+  // /remap -> map LẠI các dòng CHƯA map của danh sách TRƯỚC ĐÓ (đã lưu trong
+  // pending_batches), dùng danh sách QLL mới nhất. KHÔNG cần gửi lại file.
+  if (lower === REMAP_COMMAND || lower.startsWith(REMAP_COMMAND + " ")) {
+    const adminId = message.from!.id;
+    const pending = await loadPendingBatch(deps.supabase, adminId);
+    const allItems = pending.items ?? [];
+    if (!pending.ok || allItems.length === 0) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Không có danh sách nào đang chờ để map lại. Gửi file trước nhé."
+      );
+      return true;
+    }
+    const pendingRows = allItems.filter((it) => it.pending);
+    if (pendingRows.length === 0) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "✅ Danh sách hiện tại đã map hết, không còn dòng nào cần map lại. Gõ /ok để gửi."
+      );
+      return true;
+    }
+
+    const { users: knownUsers } = await listKnownUsers(deps.supabase);
+    const mappedSummary: { tenHS: string; username: string }[] = [];
+    const stillUnmapped: string[] = [];
+    const updated: MappedItem[] = allItems.map((it) => {
+      if (!it.pending) return it; // dòng đã map giữ nguyên
+      const match = mapQllByUser(it.qll ?? "", knownUsers);
+      if (match.kind === "found") {
+        mappedSummary.push({ tenHS: it.tenHS, username: match.username });
+        return { ...it, username: match.username, pending: false };
+      }
+      stillUnmapped.push(it.qll ?? "");
+      return it; // vẫn pending
+    });
+
+    await savePendingBatch(deps.supabase, adminId, updated);
+    const mappedCount = allItems.filter((it) => !it.pending).length + mappedSummary.length;
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      buildSummary(allItems.length, mappedSummary, stillUnmapped) +
+        `\n\n(Map lại: +${mappedSummary.length} dòng. Tổng đã map: ${mappedCount}/${allItems.length}.)`
+    );
+    return true;
+  }
+
   // /finduser <full name...>
   if (lower.startsWith(FIND_USER_COMMAND)) {
     const name = text.slice(FIND_USER_COMMAND.length).trim();
@@ -747,17 +795,21 @@ async function maybeHandleBatch(
 
     for (const row of rows) {
       const match = mapQllByUser(row.qll, knownUsers);
+      const base = {
+        tenHS: row.tenHS,
+        maLop: row.maLop,
+        ngayHoc: row.ngayHoc,
+        lichHoc: row.lichHoc,
+        cauNhan: cauNhan === "" ? undefined : cauNhan,
+        qll: row.qll, // lưu tên QLL gốc để /remap dùng lại
+      };
       if (match.kind === "found") {
-        items.push({
-          tenHS: row.tenHS,
-          maLop: row.maLop,
-          ngayHoc: row.ngayHoc,
-          lichHoc: row.lichHoc,
-          username: match.username,
-          cauNhan: cauNhan === "" ? undefined : cauNhan,
-        });
+        items.push({ ...base, username: match.username });
         mappedSummary.push({ tenHS: row.tenHS, username: match.username });
       } else {
+        // Dòng CHƯA map: vẫn LƯU (pending) để /remap thử lại sau khi /adduser,
+        // không cần gửi lại file.
+        items.push({ ...base, username: "", pending: true });
         unmapped.push(row.qll);
       }
     }
@@ -783,11 +835,22 @@ async function maybeHandleBatch(
     }
 
     const pending = await loadPendingBatch(deps.supabase, adminId);
-    const items = pending.items ?? [];
-    if (!pending.ok || items.length === 0) {
+    const allItems = pending.items ?? [];
+    if (!pending.ok || allItems.length === 0) {
       await deps.telegram.sendMessage(
         message.chat.id,
         "Không có danh sách nào đang chờ."
+      );
+      return true;
+    }
+
+    // Chỉ gửi dòng ĐÃ map. Dòng còn pending (chưa map) -> bỏ qua, báo rõ.
+    const items = allItems.filter((it) => !it.pending && it.username);
+    const stillPending = allItems.filter((it) => it.pending);
+    if (items.length === 0) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        `⚠️ Chưa có dòng nào map được (còn ${stillPending.length} dòng chưa map). Dùng /adduser rồi /remap trước khi /ok.`
       );
       return true;
     }
@@ -814,15 +877,25 @@ async function maybeHandleBatch(
       send_after: sendAfter,
     }));
     await enqueueMessages(deps.supabase, rows);
-    await deletePendingBatch(deps.supabase, adminId);
+    // Xóa phần đã gửi; GIỮ lại các dòng chưa map để còn /remap sau. Hết pending
+    // thì xóa hẳn batch.
+    if (stillPending.length > 0) {
+      await savePendingBatch(deps.supabase, adminId, stillPending);
+    } else {
+      await deletePendingBatch(deps.supabase, adminId);
+    }
 
     const msgCount = groups.size;
-    const confirmation =
+    let confirmation =
       parsed.kind === "at"
         ? `✅ Đã lên lịch gửi ${msgCount} tin lúc ${formatVnDateTime(
             parsed.sendAfterIso
           )} (giờ VN). Bot sẽ tự gửi khi tới giờ.`
         : `✅ Đã xếp ${msgCount} tin vào hàng đợi. Bot sẽ gửi rải ~15-20s/tin, sẽ báo lại khi xong.`;
+    if (stillPending.length > 0) {
+      const names = Array.from(new Set(stillPending.map((it) => it.qll ?? "").filter(Boolean)));
+      confirmation += `\n\n⚠️ Bỏ qua ${stillPending.length} dòng CHƯA map (${names.join(", ")}). Nếu cần gửi: /adduser rồi /remap, sau đó /ok lại cho phần này.`;
+    }
     await deps.telegram.sendMessage(message.chat.id, confirmation);
     return true;
   }

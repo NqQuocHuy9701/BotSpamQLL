@@ -95,6 +95,12 @@ export interface MappedItem {
   // Optional custom closing line (from the file's caption). When absent, the
   // announcement uses the default closing line.
   cauNhan?: string;
+  // Tên QLL gốc từ file (để /remap map lại mà không cần gửi file). Dòng ĐÃ map
+  // vẫn lưu để remap biết bỏ qua; dòng CHƯA map lưu để thử lại.
+  qll?: string;
+  // true = dòng CHƯA map được username (giữ lại chờ /remap). Dòng đã map không
+  // set field này (hoặc false). /ok chỉ gửi dòng KHÔNG pending.
+  pending?: boolean;
 }
 
 // One row in the pending_batches table, keyed by the admin's telegram_id.

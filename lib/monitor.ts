@@ -253,6 +253,7 @@ export function buildHelpText(): string {
     "📨 THÔNG BÁO HS (gửi hàng loạt):",
     "• (gửi file Excel) — nạp danh sách HS",
     "• /ok — gửi ngay | /ok 21:00 | /ok 16/10 21:00 — hẹn giờ",
+    "• /remap — map lại QLL chưa nhận diện (sau khi /adduser, khỏi gửi lại file)",
     "• /huy — hủy batch đang chờ",
     "• /cancel — dừng/xóa các tin chưa gửi",
     "",
