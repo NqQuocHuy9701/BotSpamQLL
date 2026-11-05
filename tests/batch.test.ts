@@ -359,7 +359,7 @@ describe("buildGroupedAnnouncement", () => {
 });
 
 describe("buildSummary", () => {
-  it("lists mapped and unmapped and ends with the confirmation instruction", () => {
+  it("gọn: chỉ số đã map + liệt kê QLL CHƯA map, KHÔNG liệt kê từng dòng đã map", () => {
     const summary = buildSummary(
       3,
       [
@@ -369,20 +369,29 @@ describe("buildSummary", () => {
       ["Nguyễn Thị Quỳnh Trang 8"]
     );
 
-    expect(summary).toContain("Tổng số dòng: 3");
-    expect(summary).toContain("Đã map (2):");
-    expect(summary).toContain("- Vũ Xuân Kỳ (SID: 189064) -> @SA_LanNT18");
-    expect(summary).toContain("- Đặng Mai Vy (SID: 213054) -> @SAAnhPTH5");
-    expect(summary).toContain("Không tìm thấy (1):");
+    expect(summary).toContain("Tổng số dòng: 3 — đã map: 2");
+    // KHÔNG còn liệt kê từng HS đã map.
+    expect(summary).not.toContain("-> @SA_LanNT18");
+    expect(summary).not.toContain("-> @SAAnhPTH5");
+    // Chỉ liệt kê QLL chưa map.
+    expect(summary).toContain("⚠️ QLL chưa map (1):");
     expect(summary).toContain("- Nguyễn Thị Quỳnh Trang 8");
-    expect(summary.endsWith("Gõ /ok để gửi, /huy để huỷ.")).toBe(true);
+    expect(summary).toContain("/adduser <username> Nguyễn Thị Quỳnh Trang 8");
   });
 
-  it("shows (không có) when nothing mapped or unmapped", () => {
-    const summary = buildSummary(0, [], []);
-    expect(summary).toContain("Đã map (0):");
-    expect(summary).toContain("Không tìm thấy (0):");
-    expect(summary).toContain("(không có)");
+  it("map hết -> báo gọn, không liệt kê gì", () => {
+    const summary = buildSummary(
+      2,
+      [
+        { tenHS: "A", username: "sa_a" },
+        { tenHS: "B", username: "sa_b" },
+      ],
+      []
+    );
+    expect(summary).toContain("Tổng số dòng: 2 — đã map: 2");
+    expect(summary).toContain("✅ Đã map hết");
+    expect(summary).not.toContain("QLL chưa map");
+    expect(summary).not.toContain("-> @");
   });
 
   it("gom QLL chưa map trùng tên + đếm số HS, kèm gợi ý /adduser", () => {
@@ -400,7 +409,7 @@ describe("buildSummary", () => {
       ]
     );
     // 2 QLL khác nhau, không in lặp 7 dòng.
-    expect(summary).toContain("Không tìm thấy (2):");
+    expect(summary).toContain("⚠️ QLL chưa map (2):");
     expect(summary).toContain("- Nguyễn Khánh Uyên (6 HS)");
     expect(summary).toContain("- Vũ Ngọc Lan"); // 1 HS -> không có "(N HS)"
     expect(summary).not.toContain("Vũ Ngọc Lan (1 HS)");

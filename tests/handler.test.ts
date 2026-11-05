@@ -918,11 +918,10 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0][0]).toBe(ADMIN_ID);
     const summary = sendMessage.mock.calls[0][1] as string;
-    expect(summary).toContain("Tổng số dòng: 3");
-    expect(summary).toContain("Đã map (2):");
-    expect(summary).toContain("Không tìm thấy (1):");
+    expect(summary).toContain("Tổng số dòng: 3 — đã map: 2");
+    expect(summary).toContain("⚠️ QLL chưa map (1):");
     expect(summary).toContain("- Trần Văn Khoa 9");
-    expect(summary).toContain("Gõ /ok để gửi, /huy để huỷ.");
+    expect(summary).toContain("/adduser <username> Trần Văn Khoa 9");
     // Never posts to the target group during the preview step.
     const postedToGroup = sendMessage.mock.calls.some(
       (c) => c[0] === TARGET_GROUP

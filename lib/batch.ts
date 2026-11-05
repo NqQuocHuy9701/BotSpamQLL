@@ -227,41 +227,35 @@ export function buildSummary(
   mapped: { tenHS: string; username: string }[],
   unmapped: string[]
 ): string {
-  const lines: string[] = [];
-  lines.push(`Tổng số dòng: ${total}`);
-
-  lines.push(`Đã map (${mapped.length}):`);
-  if (mapped.length === 0) {
-    lines.push("(không có)");
-  } else {
-    for (const m of mapped) {
-      lines.push(`- ${m.tenHS} -> @${m.username}`);
-    }
-  }
-
-  // Gom tên trùng + đếm số HS, giữ thứ tự xuất hiện lần đầu (nhiều HS cùng 1
-  // QLL chưa map -> hiện 1 dòng "(N HS)" thay vì lặp tên N lần).
+  // Gom tên QLL chưa map trùng + đếm số HS (giữ thứ tự xuất hiện lần đầu).
   const unmappedCounts = new Map<string, number>();
   for (const name of unmapped) {
     const key = name.trim();
     unmappedCounts.set(key, (unmappedCounts.get(key) ?? 0) + 1);
   }
-  lines.push(`Không tìm thấy (${unmappedCounts.size}):`);
+
+  const lines: string[] = [];
+  // Tóm tắt GỌN: chỉ con số tổng + đã map; KHÔNG liệt kê từng dòng đã map.
+  lines.push(`Tổng số dòng: ${total} — đã map: ${mapped.length}`);
+
   if (unmappedCounts.size === 0) {
-    lines.push("(không có)");
-  } else {
-    for (const [name, count] of unmappedCounts) {
-      lines.push(count > 1 ? `- ${name} (${count} HS)` : `- ${name}`);
-    }
-    // Gợi ý sẵn cú pháp /adduser để admin thêm username rồi /ok lại.
-    lines.push("");
-    lines.push("👉 Thêm username cho QLL chưa map rồi /ok lại:");
-    for (const name of unmappedCounts.keys()) {
-      lines.push(`/adduser <username> ${name}`);
-    }
+    // Map hết: không cần in gì thêm, chỉ nhắc gửi.
+    lines.push("✅ Đã map hết. Gõ /ok để gửi, /huy để huỷ.");
+    return lines.join("\n");
   }
 
+  // Còn QLL chưa map: CHỈ liệt kê những QLL này + gợi ý /adduser.
   lines.push("");
-  lines.push("Gõ /ok để gửi, /huy để huỷ.");
+  lines.push(`⚠️ QLL chưa map (${unmappedCounts.size}):`);
+  for (const [name, count] of unmappedCounts) {
+    lines.push(count > 1 ? `- ${name} (${count} HS)` : `- ${name}`);
+  }
+  lines.push("");
+  lines.push("👉 Thêm username rồi gõ /remap (khỏi gửi lại file):");
+  for (const name of unmappedCounts.keys()) {
+    lines.push(`/adduser <username> ${name}`);
+  }
+  lines.push("");
+  lines.push("Gõ /ok để gửi phần đã map, /huy để huỷ.");
   return lines.join("\n");
 }
