@@ -8,6 +8,9 @@ import {
   parseGroqJson,
   maybeHandleAi,
   detectScope,
+  extractCustomText,
+  classifyMemory,
+  extractNote,
 } from "../lib/ai.js";
 
 describe("loadAiConfig", () => {
@@ -62,6 +65,38 @@ describe("nhacnhom", () => {
     expect(classifyByRules(foldVi("nhắc nhóm QLL xử lý nhé"))).toBe("nhacnhom");
     expect(classifyByRules(foldVi("gửi anh case tồn nhóm QLL"))).toBe("casetreo");
     expect(classifyByRules(foldVi("tag ctv ca chiều xử lý case tồn QLL"))).toBe("hentag");
+  });
+});
+
+describe("câu nhắc tùy chỉnh", () => {
+  it("lấy đúng câu admin đưa", () => {
+    expect(extractCustomText("Đổi câu nhắc: Nhắn là dạ còn 1 case anh chị hỗ trợ nốt ạ")).toBe(
+      "Dạ còn 1 case anh chị hỗ trợ nốt ạ"
+    );
+    expect(
+      extractCustomText("Em nhắn trong nhóm HTKT đổi câu thành:  Dạ, còn 1 case anh chị hỗ trợ nốt ạ")
+    ).toBe("Dạ, còn 1 case anh chị hỗ trợ nốt ạ");
+    expect(extractCustomText("Nhắn nhóm HTKT")).toBe("");
+    expect(classifyByRules(foldVi("Đổi câu nhắc: Nhắn là dạ còn 1 case"))).toBe("nhacnhom");
+  });
+});
+
+describe("bộ nhớ lời dạy", () => {
+  it("nhận đúng lệnh dạy/xem/quên, không nhầm 'nhờ'", () => {
+    expect(classifyMemory("Bee nhớ: nhắc nhóm thì gọi là anh chị")).toBe("daynho");
+    expect(classifyMemory("Từ giờ nhắc nhóm thì nói ngắn gọn thôi")).toBe("daynho");
+    expect(classifyMemory("nhớ là luôn kèm số case")).toBe("daynho");
+    expect(classifyMemory("Bee nhớ gì")).toBe("xemnho");
+    expect(classifyMemory("em đã học những gì rồi")).toBe("xemnho");
+    expect(classifyMemory("Bee quên số 2")).toBe("quennho");
+    expect(classifyMemory("quên hết")).toBe("quennho");
+    expect(classifyMemory("nhờ CTV ca chiều xử lý")).toBeNull();
+    expect(classifyMemory("học sinh 203745 xin tk")).toBeNull();
+    expect(classifyMemory("ai đang trực")).toBeNull();
+  });
+  it("lấy nội dung lời dạy", () => {
+    expect(extractNote("Bee nhớ: nhắc nhóm thì gọi là anh chị")).toBe("nhắc nhóm thì gọi là anh chị");
+    expect(extractNote("Từ giờ nhắc nhóm thì nói ngắn gọn")).toBe("Từ giờ nhắc nhóm thì nói ngắn gọn");
   });
 });
 

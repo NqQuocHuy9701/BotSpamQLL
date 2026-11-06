@@ -42,7 +42,10 @@ export type Intent =
   | "chat"
   | "checkout"
   | "hentag"
-  | "nhacnhom";
+  | "nhacnhom"
+  | "daynho"
+  | "xemnho"
+  | "quennho";
 const INTENTS: readonly Intent[] = [
   "checkin",
   "baocao",
@@ -52,6 +55,9 @@ const INTENTS: readonly Intent[] = [
   "checkout",
   "hentag",
   "nhacnhom",
+  "daynho",
+  "xemnho",
+  "quennho",
 ];
 
 // Câu dẫn trước số liệu (có sẵn, không tốn lượt AI).
@@ -125,6 +131,23 @@ export function foldVi(s: string): string {
 const ANALYTIC_RE =
   /(nhieu nhat|it nhat|cao nhat|thap nhat|bao nhieu|so sanh|tai sao|vi sao|ban nhat|dung dau|\bai\b.*(xu ly|lam|top|tot|cham)|nhan xet|danh gia|the nao|ra sao)/;
 
+// Lệnh bộ nhớ: đọc câu CÒN DẤU (vì "nhớ" và "nhờ" bỏ dấu đều thành "nho").
+export function classifyMemory(raw: string): Intent | null {
+  const s = raw.normalize("NFC").toLowerCase().trim().replace(/^bee[\s,]+/, "");
+  if (/^(em |bee )?(đã |đang )?(nhớ|học|ghi nhớ) (gì|những gì)|^(xem|liệt kê) (ghi nhớ|lời dạy)/.test(s)) {
+    return "xemnho";
+  }
+  if (/^(quên|xóa|xoá) (hết|số|lời dạy|ghi nhớ|\d)|^quên\s*\d/.test(s)) return "quennho";
+  const end = "(?=[\\s:：,.!-]|$)"; // \b của JS không nhận chữ có dấu
+  if (
+    new RegExp(`^(hãy |em )?(nhớ|ghi nhớ|học(?! sinh| viên| bài))${end}`).test(s) ||
+    new RegExp(`^(từ giờ|từ nay|lần sau|về sau)${end}`).test(s)
+  ) {
+    return "daynho";
+  }
+  return null;
+}
+
 export function classifyByRules(folded: string): Intent | null {
   // Dặn Bee: đến ca chiều thì tag CTV ca chiều xử lý case tồn.
   if (
@@ -142,6 +165,8 @@ export function classifyByRules(folded: string): Intent | null {
   ) {
     return "nhacnhom";
   }
+  // "Đổi câu nhắc: ..." -> đăng lại với câu admin đưa.
+  if (/\b(doi|sua|thay) cau\b/.test(folded)) return "nhacnhom";
   if (ANALYTIC_RE.test(folded) && !/\b(truc|check ?in|checkin|diem danh)\b/.test(folded)) return null;
   // Bee chưa có dữ liệu check-out: trả lời thẳng thay vì nhả danh sách check-in.
   if (/\b(check ?out|checkout|tan ca|het ca|ve ca)\b/.test(folded)) return "checkout";
@@ -256,8 +281,15 @@ export function parseGroqJson(
 // Gọi Groq
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(title: string, context: string): string {
+function buildSystemPrompt(title: string, context: string, notes: string[] = []): string {
   return [
+    ...(notes.length
+      ? [
+          "LỜI DẠY CỦA ADMIN (ưu tiên cao nhất, luôn làm theo khi trả lời):",
+          ...notes.map((n, i) => `${i + 1}. ${n}`),
+          "",
+        ]
+      : []),
     'Bạn là Bee (Tiểu Bee), trợ lý ong thân thiện của team CTV VHHS. Chỉ trả về MỘT đối tượng JSON: {"intent":"...","reply":"..."}.',
     "intent là một trong:",
     "- chat: mọi câu hỏi/trò chuyện có thể tự trả lời (kể cả hỏi về số liệu bên dưới)",
@@ -267,7 +299,9 @@ function buildSystemPrompt(title: string, context: string): string {
     "- help: hỏi Bee làm được gì",
     "- checkout: hỏi ai đã check-out/tan ca (Bee chưa có dữ liệu này)",
     "- hentag: dặn đến ca chiều thì tag CTV ca chiều xử lý case tồn",
-    "- nhacnhom: nhờ nhắn/nhắc vào nhóm QLL hoặc HTKT ngay bây giờ",
+    "- nhacnhom: nhờ nhắn/nhắc vào nhóm QLL hoặc HTKT ngay bây giờ, hoặc nhờ gửi lại/đổi câu tin nhắc vừa gửi",
+    "- daynho: admin dạy Bee một quy tắc/cách nói để nhớ lâu dài",
+    "Các tin trước đó trong cuộc trò chuyện là ngữ cảnh: hiểu câu ngắn theo mạch đang nói.",
     `reply (khi intent=chat): trả lời tự nhiên như đang trò chuyện, tiếng Việt, xưng "em", gọi người hỏi là "${title}", 1-3 câu ngắn, mở đầu "Dạ", tối đa 1 emoji mặt cười. Chỉ dùng số liệu trong DỮ LIỆU, KHÔNG bịa; nếu DỮ LIỆU không có thì nói thẳng em chưa có thông tin đó. Có thể nêu tên CTV (không gắn @). Việc ghi/sửa dữ liệu (chuyển ca, thêm người...) Bee chưa làm được qua chat: nói rõ và gợi ý gõ lệnh /help. Intent khác thì reply là "".`,
     "DỮ LIỆU (ca hiện tại, chỉ đọc):",
     context.trim() === "" ? "(không có)" : context,
@@ -311,22 +345,27 @@ async function buildContext(deps: AiDeps, isAdmin: boolean, now: Date): Promise<
 }
 
 // Thử tối đa 2 lần (lỗi lẻ tẻ của Groq thường qua được ở lần 2).
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
 async function callGroq(
   ai: AiConfig,
   question: string,
   title: string,
-  context = ""
+  context = "",
+  notes: string[] = [],
+  history: ChatTurn[] = []
 ): Promise<{ intent: Intent; reply: string } | null> {
-  const first = await callGroqOnce(ai, question, title, context);
+  const system = buildSystemPrompt(title, context, notes);
+  const first = await callGroqOnce(ai, system, question, history);
   if (first) return first;
-  return await callGroqOnce(ai, question, title, context);
+  return await callGroqOnce(ai, system, question, history);
 }
 
 async function callGroqOnce(
   ai: AiConfig,
+  system: string,
   question: string,
-  title: string,
-  context = ""
+  history: ChatTurn[] = []
 ): Promise<{ intent: Intent; reply: string } | null> {
   const doFetch = ai.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -335,7 +374,8 @@ async function callGroqOnce(
     const body: Record<string, unknown> = {
       model: ai.model,
       messages: [
-        { role: "system", content: buildSystemPrompt(title, context) },
+        { role: "system", content: system },
+        ...history,
         { role: "user", content: question.slice(0, MAX_QUESTION_CHARS) },
       ],
       temperature: 0.3,
@@ -679,7 +719,9 @@ async function handleAi(
   const rng = opts.rng ?? Math.random;
   const folded = foldVi(question);
 
-  let intent: Intent | null = classifyByRules(folded);
+  // Lệnh bộ nhớ (dạy/xem/quên) chỉ dành cho admin; người khác đi luồng thường.
+  let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
+  if (intent === null) intent = classifyByRules(folded);
   let canned: string | null = null;
   if (intent === null) {
     canned = cannedChat(folded, "{title}", rng); // điền danh xưng sau
@@ -687,6 +729,26 @@ async function handleAi(
   }
   const needsAi = intent === null;
 
+  // Admin: ghi lại câu Bee trả lời vào mạch hội thoại (để hiểu câu nói tắt lần sau).
+  const replies: string[] = [];
+  const d: AiDeps = isAdmin
+    ? {
+        ...deps,
+        telegram: Object.assign(Object.create(deps.telegram) as TelegramClient, {
+          sendMessage: (
+            chatId: number,
+            text: string,
+            replyTo?: number,
+            parseMode?: "HTML"
+          ) => {
+            if (chatId === message.chat.id) replies.push(text);
+            return deps.telegram.sendMessage(chatId, text, replyTo, parseMode);
+          },
+        }),
+      }
+    : deps;
+
+  let handled: boolean;
   // Trần lượt + cooldown. Admin không bị cooldown; câu rule của admin khỏi tốn DB.
   if (needsAi || !isAdmin) {
     const g = await gate(deps.supabase, from.id, needsAi, !isAdmin, ai.dailyCap, now);
@@ -696,10 +758,15 @@ async function handleAi(
       await sendHere(deps, message, isPrivate, FALLBACK_CAP.replace("{title}", title0));
       return true;
     }
-    return await respond(deps, ai, message, isPrivate, isAdmin, question, intent, canned, title0, now, adminIds);
+    handled = await respond(d, ai, message, isPrivate, isAdmin, question, intent, canned, title0, now, adminIds);
+  } else {
+    const title = await resolveTitle(deps.supabase, from.username);
+    handled = await respond(d, ai, message, isPrivate, isAdmin, question, intent, canned, title, now, adminIds);
   }
-  const title = await resolveTitle(deps.supabase, from.username);
-  return await respond(deps, ai, message, isPrivate, isAdmin, question, intent, canned, title, now, adminIds);
+  if (isAdmin && handled) {
+    await appendHistory(deps.supabase, from.id, question, replies, now.getTime());
+  }
+  return handled;
 }
 
 function sendHere(
@@ -732,9 +799,14 @@ async function respond(
 ): Promise<boolean> {
   let chatReply = canned ? canned.replace(/\{title\}/g, title) : "";
 
+  // Lời dạy áp cho mọi người hỏi; mạch hội thoại chỉ lưu cho admin.
+  const notes = await loadNotes(deps.supabase);
+  const history =
+    isAdmin && message.from ? await loadHistory(deps.supabase, message.from.id, now.getTime()) : [];
+
   if (intent === null) {
     const context = await buildContext(deps, isAdmin, now);
-    const r = await callGroq(ai, question, title, context);
+    const r = await callGroq(ai, question, title, context, notes, history);
     if (!r) {
       await sendHere(deps, message, isPrivate, FALLBACK_BUSY.replace("{title}", title));
       return true;
@@ -756,9 +828,71 @@ async function respond(
         await sendHere(deps, message, isPrivate, `Dạ việc này em chỉ nhận từ admin thôi ạ ${title} 🥺`);
         return true;
       }
+      // Nhóm: câu hỏi -> tin đang reply -> mạch hội thoại gần nhất.
       let scope = detectScope(foldVi(question));
       if (scope === "all") scope = detectScope(foldVi(message.reply_to_message?.text ?? ""));
-      await sendHere(deps, message, isPrivate, await remindGroups(deps, scope, title, now));
+      for (let i = history.length - 1; scope === "all" && i >= 0; i--) {
+        scope = detectScope(foldVi(history[i].content));
+      }
+      // Câu nhắc: admin đưa nguyên câu -> dùng nguyên văn; không thì AI viết theo
+      // lời dạy + yêu cầu; AI lỗi -> mẫu có sẵn.
+      const custom = extractCustomText(question);
+      const writer =
+        custom !== ""
+          ? undefined
+          : (group: string, n: number) => writeNudge(ai, notes, question, group, n, history);
+      await sendHere(deps, message, isPrivate, await remindGroups(deps, scope, title, now, custom, writer));
+      return true;
+    }
+    case "daynho": {
+      if (!isAdmin) return false;
+      const note = extractNote(question);
+      if (note.length < 3) {
+        await sendHere(deps, message, isPrivate, `Dạ ${title} muốn em nhớ điều gì ạ? Ví dụ: "Bee nhớ: nhắc nhóm thì gọi là anh chị" 😊`);
+        return true;
+      }
+      const list = notes.filter((x) => x !== note);
+      list.push(note);
+      const kept = list.slice(-MAX_NOTES);
+      const ok = await saveNotes(deps.supabase, kept);
+      await sendHere(
+        deps,
+        message,
+        isPrivate,
+        ok
+          ? `Dạ em nhớ rồi ạ (lời dạy số ${kept.length}): "${note}" 😊`
+          : `Dạ em chưa lưu được, ${title} thử lại giúp em nhé 🥺`
+      );
+      return true;
+    }
+    case "xemnho": {
+      if (!isAdmin) return false;
+      const text = notes.length
+        ? `Dạ em đang nhớ ${notes.length} lời dạy ạ 😊\n` + notes.map((x, i) => `${i + 1}. ${x}`).join("\n") +
+          `\n\nMuốn bỏ thì ${title} nhắn "Bee quên số ${notes.length}" hoặc "Bee quên hết" nhé.`
+        : `Dạ em chưa được dạy gì ạ. ${title} nhắn "Bee nhớ: ..." để dạy em nhé 😊`;
+      await sendHere(deps, message, isPrivate, text);
+      return true;
+    }
+    case "quennho": {
+      if (!isAdmin) return false;
+      const s = question.normalize("NFC").toLowerCase();
+      let next: string[];
+      let msg: string;
+      if (/hết|tất cả/.test(s)) {
+        next = [];
+        msg = `Dạ em quên hết ${notes.length} lời dạy rồi ạ 😊`;
+      } else {
+        const idx = Number((s.match(/\d+/) ?? ["0"])[0]);
+        if (idx < 1 || idx > notes.length) {
+          await sendHere(deps, message, isPrivate, `Dạ em không thấy lời dạy số đó ạ, ${title} nhắn "Bee nhớ gì" để xem danh sách nhé 🥺`);
+          return true;
+        }
+        msg = `Dạ em quên lời dạy số ${idx} rồi ạ: "${notes[idx - 1]}" 😊`;
+        next = notes.filter((_, i) => i !== idx - 1);
+      }
+      const ok = await saveNotes(deps.supabase, next);
+      await sendHere(deps, message, isPrivate, ok ? msg : `Dạ em chưa xóa được, ${title} thử lại nhé 🥺`);
       return true;
     }
     case "hentag": {
@@ -1055,11 +1189,39 @@ export async function describeHandoff(supabase: SupabaseClient, now: Date): Prom
 // Admin nhờ "nhắn nhóm QLL/HTKT": đăng ngay vào nhóm, tag CTV đã check-in ca hiện
 // tại + liệt kê case tồn từ đầu ngày. Nhóm nào không còn tồn thì bỏ qua. Trả câu
 // báo lại admin (không ném lỗi).
+// Câu nhắc mặc định, xoay vòng, mỗi câu đúng 1 icon mặt.
+const NUDGES: readonly string[] = [
+  "Dạ, còn {n} case anh chị hỗ trợ nốt giúp em ạ 😊",
+  "Dạ còn {n} case {g} chưa xử lý, anh chị xem giúp em nhé 🥺",
+  "Anh chị ơi, còn {n} case {g} tồn, mình hỗ trợ nốt giúp em với ạ 😅",
+  "Dạ em nhắc nhẹ, còn {n} case {g} anh chị xử lý giúp em nhé 😊",
+];
+function nudgeLine(n: number, group: string): string {
+  return NUDGES[pickIndex(NUDGES.length, undefined)]
+    .replace(/\{n\}/g, String(n))
+    .replace(/\{g\}/g, group);
+}
+
+// Lấy câu admin muốn Bee nhắn: phần sau dấu ":" / "nhắn là" / "nói là" / "câu thành"
+// CUỐI CÙNG trong tin. Không có -> "" (dùng câu mặc định).
+export function extractCustomText(q: string): string {
+  const re = /(?:[:：]|nhắn là|nói là|nhắn rằng|câu thành|đổi thành)\s*/gi;
+  let end = -1;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(q)) !== null) end = m.index + m[0].length;
+  if (end < 0) return "";
+  const t = q.slice(end).replace(/\s+/g, " ").trim().slice(0, 300);
+  if (t.length < 3) return "";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
 async function remindGroups(
   deps: AiDeps,
   scope: CaseScope,
   title: string,
-  now: Date
+  now: Date,
+  custom = "",
+  writer?: (group: string, n: number) => Promise<string | null>
 ): Promise<string> {
   try {
     const ctvs = deps.checkinSupabase ? await getCurrentShiftCheckins(deps.checkinSupabase, now) : [];
@@ -1076,10 +1238,11 @@ async function remindGroups(
         empty.push(scopeLabel(s));
         continue;
       }
-      const head = tags ? `${tags} ơi, nhờ mình` : "Nhờ các bạn";
-      const text =
-        `${head} xử lý giúp các case tồn ${scopeLabel(s)} nhé 😊\n\n` +
-        `📋 Case tồn ${scopeLabel(s)}: ${n}\n${lines.join("\n")}`;
+      const sentence =
+        custom !== ""
+          ? custom
+          : (writer ? await writer(scopeLabel(s), Number(n)) : null) ?? nudgeLine(Number(n), scopeLabel(s));
+      const text = `${tags !== "" ? tags + " " : ""}${sentence}\n\n${lines.join("\n")}`;
       const res = await deps.telegram.sendMessage(s === "qll" ? QLL_CHAT_ID : HTKT_CHAT_ID, text);
       (res.ok ? posted : failed).push(`${scopeLabel(s)} (${n} case)`);
     }
@@ -1096,4 +1259,132 @@ async function remindGroups(
     console.error("remindGroups lỗi:", e instanceof Error ? e.message : String(e));
     return `Dạ em chưa nhắn nhóm được, ${title} thử lại sau nhé 🥺`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Bộ nhớ: lời dạy của admin (lâu dài) + vài lượt hội thoại gần nhất
+// ---------------------------------------------------------------------------
+// Lưu trong pending_batches, admin_id cố định (không đụng id admin thật/dương,
+// -9001/-9002 của luồng cũ, hay các id theo ngày ~ -2e9).
+const NOTES_ROW_ID = -9101;
+const HISTORY_ROW_ID = -9102;
+const MAX_NOTES = 20;
+const MAX_NOTE_CHARS = 300;
+const HISTORY_TURNS = 6; // 3 cặp hỏi-đáp
+const HISTORY_TTL_MS = 2 * 60 * 60 * 1000; // quá 2 giờ thì quên mạch cũ
+
+export async function loadNotes(supabase: SupabaseClient): Promise<string[]> {
+  try {
+    const { data } = await supabase
+      .from("pending_batches")
+      .select("items")
+      .eq("admin_id", NOTES_ROW_ID)
+      .maybeSingle();
+    const n = (data?.items as { notes?: unknown } | undefined)?.notes;
+    return Array.isArray(n) ? n.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveNotes(supabase: SupabaseClient, notes: string[]): Promise<boolean> {
+  const { error } = await supabase
+    .from("pending_batches")
+    .upsert({ admin_id: NOTES_ROW_ID, items: { kind: "notes", notes } }, { onConflict: "admin_id" });
+  if (error) console.error("saveNotes lỗi:", error.message);
+  return !error;
+}
+
+// Bỏ phần lệnh ở đầu ("Bee nhớ:", "từ giờ", ...) để lấy đúng nội dung lời dạy.
+export function extractNote(raw: string): string {
+  return raw
+    .normalize("NFC")
+    .replace(/^\s*bee[\s,]+/i, "")
+    .replace(/^(hãy\s+|em\s+)?(ghi nhớ|nhớ|học)\s*(giúp anh|giúp chị|giúp|là|rằng)?\s*[:：,-]?\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_NOTE_CHARS);
+}
+
+interface HistoryRow {
+  kind: "history";
+  byUser: Record<string, { t: number; role: "user" | "assistant"; content: string }[]>;
+}
+
+async function readHistoryRow(supabase: SupabaseClient): Promise<HistoryRow> {
+  try {
+    const { data } = await supabase
+      .from("pending_batches")
+      .select("items")
+      .eq("admin_id", HISTORY_ROW_ID)
+      .maybeSingle();
+    const it = data?.items as Partial<HistoryRow> | undefined;
+    if (it && it.kind === "history" && it.byUser && typeof it.byUser === "object") {
+      return { kind: "history", byUser: it.byUser };
+    }
+  } catch {
+    // bỏ qua
+  }
+  return { kind: "history", byUser: {} };
+}
+
+export async function loadHistory(
+  supabase: SupabaseClient,
+  userId: number,
+  nowMs: number
+): Promise<ChatTurn[]> {
+  const row = await readHistoryRow(supabase);
+  return (row.byUser[String(userId)] ?? [])
+    .filter((h) => nowMs - h.t < HISTORY_TTL_MS)
+    .map((h) => ({ role: h.role, content: h.content }));
+}
+
+// Ghi thêm 1 lượt hỏi-đáp. Đọc-rồi-ghi (không nguyên tử) — mất 1 lượt hiếm hoi
+// khi 2 tin đến cùng lúc là chấp nhận được.
+export async function appendHistory(
+  supabase: SupabaseClient,
+  userId: number,
+  question: string,
+  answers: string[],
+  nowMs: number
+): Promise<void> {
+  try {
+    const row = await readHistoryRow(supabase);
+    const key = String(userId);
+    const list = (row.byUser[key] ?? []).filter((h) => nowMs - h.t < HISTORY_TTL_MS);
+    list.push({ t: nowMs, role: "user", content: question.slice(0, 300) });
+    const a = answers.join("\n").replace(/https?:\/\/\S+/g, "").slice(0, 400).trim();
+    if (a) list.push({ t: nowMs, role: "assistant", content: a });
+    row.byUser[key] = list.slice(-HISTORY_TURNS);
+    // Dọn người đã im quá TTL cho dòng nhẹ.
+    for (const [k, v] of Object.entries(row.byUser)) {
+      if (!v.length || nowMs - v[v.length - 1].t >= HISTORY_TTL_MS) delete row.byUser[k];
+    }
+    await supabase
+      .from("pending_batches")
+      .upsert({ admin_id: HISTORY_ROW_ID, items: row }, { onConflict: "admin_id" });
+  } catch {
+    // bỏ qua
+  }
+}
+
+// AI viết câu nhắc vào nhóm theo lời dạy + yêu cầu của admin. Số case do code
+// truyền vào (không để AI bịa). Lỗi -> null (dùng mẫu có sẵn).
+export async function writeNudge(
+  ai: AiConfig,
+  notes: string[],
+  request: string,
+  group: string,
+  n: number,
+  history: ChatTurn[]
+): Promise<string | null> {
+  const system = [
+    'Bạn là Bee, viết MỘT câu nhắc ngắn gửi vào nhóm chat công việc để nhờ các CTV xử lý case tồn. Chỉ trả JSON {"intent":"chat","reply":"<câu nhắc>"}.',
+    `Thông tin bắt buộc đúng: nhóm ${group}, còn ${n} case tồn.`,
+    'Yêu cầu: tiếng Việt tự nhiên, lễ phép, gọi người nhận là "anh chị", xưng "em", 1-2 câu, đúng 1 emoji mặt cười ở cuối. Không gắn @, không link, không liệt kê case (hệ thống tự thêm).',
+    ...(notes.length ? ["LỜI DẠY CỦA ADMIN (làm theo):", ...notes.map((x, i) => `${i + 1}. ${x}`)] : []),
+  ].join("\n");
+  const r = await callGroqOnce(ai, system, `Yêu cầu của admin: ${request}`, history);
+  const text = r?.reply?.trim() ?? "";
+  return text.length >= 5 ? text : null;
 }
