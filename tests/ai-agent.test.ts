@@ -707,6 +707,20 @@ describe("Form xin nghỉ QLL -> tự chuyển nhóm Cộng đồng", () => {
     }
   });
 
+  it("tin test thực tế: Mã HS 1 dòng, mã lớp + Ngày vào lớp xuống dòng -> nhận", () => {
+    const real = [
+      "Dương Quỳnh Anh",
+      "Code: 9820814",
+      "Mã học sinh: 205783",
+      "TOAN.2026.1135 | TOÁN 6 | LỚP 1:10 | NỀN TẢNG 2 Đang học",
+      "| Ngày vào lớp: 30/07/2026",
+      "GV dạy: T374 - Nguyễn Thị Trà Giang",
+      "test",
+    ].join("\n");
+    expect(isLeaveFormMessage(real)).toMatchObject({ hs: "205783", cls: "TOAN.2026.1135" });
+    expect(isLeaveFormMessage(real.replace("\n| Ngày vào lớp", " | Ngày vào lớp"))).not.toBeNull();
+  });
+
   it("thiếu khung giờ học vẫn chuyển (không bắt buộc)", () => {
     expect(isLeaveFormMessage(FORM.replace("20:30 - 21:30 (T3) 20:30 - 21:30 (CN)\n", ""))).not.toBeNull();
   });

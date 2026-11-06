@@ -2712,18 +2712,22 @@ export function parseLeaveForm(text: string): LeaveForm | null {
   // 3) Mã học sinh: [Mã HS] ... [Mã lớp] | [Môn] | LỚP [Khối] | [Chương trình] | Ngày vào lớp: [Ngày]
   const iHs = idx(/^ma hoc sinh\s*:/, iCode + 1);
   if (iHs < 0) return null;
-  const hsLine = f[iHs];
+
+  // 4) GV dạy: [Mã GV] - [Tên giáo viên]
+  const iGv = idx(/^gv day\s*:\s*\S+\s*-\s*\S+/, iHs + 1);
+  if (iGv < 0) return null;
+
+  // Khối Mã HS = từ dòng "Mã học sinh:" tới trước "GV dạy:" (QLL có lúc để mã lớp
+  // / "| Ngày vào lớp" ở dòng riêng). Gộp lại rồi kiểm.
+  const hsLine = f.slice(iHs, iGv).join(" ");
+  const hsRaw = lines.slice(iHs, iGv).join(" ");
   const hs = hsLine.match(/^ma hoc sinh\s*:\s*(\d{3,})/)?.[1];
-  const cls = lines[iHs].match(/[A-Za-z][A-Za-z_]*\.\d{4}\.\d{3,4}/)?.[0];
+  const cls = hsRaw.match(/[A-Za-z][A-Za-z_]*\.\d{4}\.\d{3,4}/)?.[0];
   if (!hs || !cls) return null;
   const parts = hsLine.split("|").map((p) => p.trim());
   if (parts.length < 5) return null;
   if (!parts.some((p) => /^lop\s+\S+/.test(p))) return null;
   if (!/ngay vao lop\s*:\s*\d{1,2}\/\d{1,2}\/\d{4}/.test(hsLine)) return null;
-
-  // 4) GV dạy: [Mã GV] - [Tên giáo viên]
-  const iGv = idx(/^gv day\s*:\s*\S+\s*-\s*\S+/, iHs + 1);
-  if (iGv < 0) return null;
 
   // 5) Khung giờ học: KHÔNG bắt buộc (admin chốt chỉ cần đủ K1-K6).
 
