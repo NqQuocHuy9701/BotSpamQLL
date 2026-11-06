@@ -3012,3 +3012,32 @@ export async function handlePendingPost(
   void title;
   return true;
 }
+
+// Tin QLL Bee đã chuyển + thả ❤️ hôm nay -> handled=true (giống hệt khi có người
+// thả react), để KHÔNG bị nhắc SLA. Cần vì: (1) Telegram không gửi update
+// message_reaction cho reaction do bot thả; (2) Bee chuyển TRƯỚC khi luồng QLL lưu
+// case (upsert handled=false). Gọi từ cron, TRƯỚC bước nhắc SLA. Không ném lỗi.
+export async function markForwardedHandled(supabase: SupabaseClient, now: Date = new Date()): Promise<number> {
+  try {
+    const cur = await readRow<{ kind?: string; day?: string; keys?: string[] }>(supabase, LEAVE_ROW_ID);
+    if (cur?.kind !== "leavefw" || cur.day !== vnDay(now) || !Array.isArray(cur.keys)) return 0;
+    const ids = cur.keys.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (ids.length === 0) return 0;
+    const { data, error } = await supabase
+      .from("qll_tracking")
+      .update({ handled: true })
+      .in("message_id", ids)
+      .eq("handled", false)
+      .select("message_id");
+    if (error) {
+      console.error("[Bee FW] đánh dấu handled lỗi:", error.message);
+      return 0;
+    }
+    const n = Array.isArray(data) ? data.length : 0;
+    if (n > 0) console.log(`[Bee FW] đánh dấu handled ${n} tin đã chuyển (không nhắc SLA)`);
+    return n;
+  } catch (e) {
+    console.error("[Bee FW] đánh dấu handled lỗi:", e instanceof Error ? e.message : String(e));
+    return 0;
+  }
+}

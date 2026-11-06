@@ -1022,3 +1022,54 @@ describe("Lời nhắn khi admin bảo tag: code chọn mẫu nhờ hỗ trợ",
     expect(looksLikeQuestionToAdmin("Hỗ trợ case này giúp em với ạ 😊")).toBe(false);
   });
 });
+
+import { markForwardedHandled } from "../lib/ai.js";
+
+describe("Tin Bee đã chuyển + ❤️ không bị nhắc SLA (lỗi thực tế #142153)", () => {
+  function db(ledger: unknown) {
+    const updates: { ids: number[]; filters: Record<string, unknown>; payload: unknown }[] = [];
+    const from = (table: string) => {
+      const filters: Record<string, unknown> = {};
+      let ids: number[] = [];
+      let payload: unknown;
+      const c: any = {
+        select: () => c,
+        eq: (k: string, v: unknown) => ((filters[k] = v), c),
+        in: (_k: string, v: number[]) => ((ids = v), c),
+        update: (p: unknown) => ((payload = p), c),
+        maybeSingle: async () => ({ data: table === "pending_batches" && ledger ? { items: ledger } : null }),
+        then: (r: (v: unknown) => unknown) => {
+          if (table === "qll_tracking") updates.push({ ids, filters, payload });
+          return r({ data: ids.map((message_id) => ({ message_id })), error: null });
+        },
+      };
+      return c;
+    };
+    return { client: { from } as any, updates };
+  }
+  const today = "2026-11-06";
+
+  it("đánh dấu handled=true đúng các tin Bee đã chuyển hôm nay, chỉ tin đang handled=false", async () => {
+    const d = db({ kind: "leavefw", day: today, keys: ["142153", "142107"], count: 2 });
+    const n = await markForwardedHandled(d.client, NOW);
+    expect(n).toBe(2);
+    expect(d.updates).toHaveLength(1);
+    expect(d.updates[0].ids).toEqual([142153, 142107]);
+    expect(d.updates[0].payload).toEqual({ handled: true });
+    expect(d.updates[0].filters).toEqual({ handled: false });
+  });
+
+  it("sổ của ngày cũ / trống -> không cập nhật gì", async () => {
+    const old = db({ kind: "leavefw", day: "2026-11-05", keys: ["1"] });
+    expect(await markForwardedHandled(old.client, NOW)).toBe(0);
+    expect(old.updates).toHaveLength(0);
+    const empty = db(null);
+    expect(await markForwardedHandled(empty.client, NOW)).toBe(0);
+    expect(empty.updates).toHaveLength(0);
+  });
+
+  it("lỗi DB -> không ném lỗi (không làm hỏng cron)", async () => {
+    const bad: any = { from: () => { throw new Error("db down"); } };
+    await expect(markForwardedHandled(bad, NOW)).resolves.toBe(0);
+  });
+});

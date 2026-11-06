@@ -6,7 +6,7 @@
 import { checkUnansweredMessages, maybeSendShiftReports } from "../lib/monitor.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { loadConfig } from "../lib/config.js";
-import { loadAiConfig, runHandoff } from "../lib/ai.js";
+import { loadAiConfig, markForwardedHandled, runHandoff } from "../lib/ai.js";
 import {
   claimRow,
   countUnsent,
@@ -168,6 +168,14 @@ export default async function handler(
   } catch (err) {
     // Swallow: a failed send stays unsent and retries on the next run.
     console.error("Cron send error:", err);
+  }
+
+  // Tin QLL Bee đã chuyển + thả ❤️ -> coi như đã react (handled=true) TRƯỚC khi
+  // quét SLA. Không đụng luồng react; chỉ chạy khi Bee AI bật. Lỗi được nuốt.
+  try {
+    if (loadAiConfig()) await markForwardedHandled(deps.supabase);
+  } catch (err) {
+    console.error("Mark forwarded error:", err);
   }
 
   // TIẾN TRÌNH QUÉT SLA ĐỘC LẬP HOÀN TOÀN (Đảm bảo bên trong monitor.ts có query .eq("handled", false))
