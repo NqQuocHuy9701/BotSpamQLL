@@ -32,8 +32,23 @@ const MAX_QUESTION_CHARS = 300;
 const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 const QLL_LINK_ID = "2273179613"; // id nhóm QLL bỏ tiền tố -100 (link t.me/c/...)
 
-export type Intent = "checkin" | "baocao" | "casetreo" | "help" | "chat";
-const INTENTS: readonly Intent[] = ["checkin", "baocao", "casetreo", "help", "chat"];
+export type Intent = "checkin" | "baocao" | "casetreo" | "help" | "chat" | "checkout";
+const INTENTS: readonly Intent[] = ["checkin", "baocao", "casetreo", "help", "chat", "checkout"];
+
+// Câu dẫn trước số liệu (có sẵn, không tốn lượt AI).
+const LEAD: readonly string[] = [
+  "Dạ {title} xem nhé 😊",
+  "Dạ em gửi {title} đây ạ 😊",
+  "Dạ có ngay ạ, {title} xem giúp em nhé 😊",
+  "Dạ đây ạ {title} 😊",
+];
+const CHECKOUT_REPLY: readonly string[] = [
+  "Dạ Bee chưa theo dõi được check-out ạ, {title} xem trong nhóm check-in giúp em nhé 🥺",
+  "Dạ phần check-out em chưa có dữ liệu ạ, em chỉ xem được ai đã check-in thôi ạ 🥺",
+];
+function lead(title: string, rng: () => number = Math.random): string {
+  return LEAD[pickIndex(LEAD.length, undefined, rng)].replace(/\{title\}/g, title);
+}
 
 export interface AiConfig {
   apiKey: string;
@@ -88,6 +103,8 @@ export function foldVi(s: string): string {
 
 // Nhận diện ý định bằng từ khóa. null = không chắc -> mới cần hỏi AI.
 export function classifyByRules(folded: string): Intent | null {
+  // Bee chưa có dữ liệu check-out: trả lời thẳng thay vì nhả danh sách check-in.
+  if (/\b(check ?out|checkout|tan ca|het ca|ve ca)\b/.test(folded)) return "checkout";
   if (/\b(bao cao|thong ke|hieu suat|kpi|xep hang)\b/.test(folded)) return "baocao";
   if (
     /\b(case|ca)\b.*\b(treo|ton|chua xu ly|chua ai|chua rep|chua react|miss)\b/.test(folded) ||
@@ -202,6 +219,7 @@ function buildSystemPrompt(title: string): string {
     "- baocao: hỏi báo cáo, hiệu suất, số liệu của ca",
     "- casetreo: hỏi case chưa xử lý / đang treo / bị miss",
     "- help: hỏi Bee làm được gì, cách dùng",
+    "- checkout: hỏi ai đã check-out / tan ca / về ca",
     "- chat: chào hỏi, trò chuyện, hoặc câu không thuộc các loại trên",
     `reply: CHỈ điền khi intent=chat, 1 câu ngắn tiếng Việt, xưng "em", gọi người hỏi là "${title}", mở đầu bằng "Dạ", đúng 1 emoji mặt cười. Không bịa số liệu, không nhắc tới @ai. Nếu được nhờ việc ngoài khả năng thì từ chối lịch sự và gợi ý gõ /help. Intent khác thì reply là "".`,
   ].join("\n");
@@ -525,7 +543,12 @@ async function respond(
       const body = deps.checkinSupabase
         ? await buildCheckinList(deps.checkinSupabase, now)
         : "Dạ chức năng check-in chưa được cấu hình ạ 🥺";
-      await sendHere(deps, message, isPrivate, body);
+      await sendHere(deps, message, isPrivate, deps.checkinSupabase ? `${lead(title)}\n\n${body}` : body);
+      return true;
+    }
+    case "checkout": {
+      const pool = CHECKOUT_REPLY;
+      await sendHere(deps, message, isPrivate, pool[pickIndex(pool.length, undefined)].replace(/\{title\}/g, title));
       return true;
     }
     case "baocao":
@@ -539,11 +562,16 @@ async function respond(
         ? await buildShiftReport(deps.supabase, deps.checkinSupabase, now)
         : await buildPendingCases(deps.supabase, now);
       if (isPrivate) {
-        await sendHere(deps, message, true, body, html);
+        await sendHere(deps, message, true, `${lead(title)}\n\n${body}`, html);
         return true;
       }
       // Trong nhóm: gửi riêng cho admin, nhóm chỉ nhận 1 câu xác nhận.
-      const dm = await deps.telegram.sendMessage(from.id, body, undefined, html ? "HTML" : undefined);
+      const dm = await deps.telegram.sendMessage(
+        from.id,
+        `${lead(title)}\n\n${body}`,
+        undefined,
+        html ? "HTML" : undefined
+      );
       await sendHere(
         deps,
         message,
