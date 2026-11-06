@@ -4,6 +4,7 @@
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { loadConfig } from "../lib/config.js";
+import { loadAiConfig } from "../lib/ai.js";
 import { handleUpdate, type Deps } from "../lib/handler.js";
 import { getClient } from "../lib/supabase.js";
 import { createTelegramClient } from "../lib/telegram.js";
@@ -38,6 +39,7 @@ export default async function handler(
     supabase: getClient(config.supabaseUrl, config.supabaseKey),
     relayEnabled: config.relayEnabled,
     checkinSupabase,
+    ai: loadAiConfig(), // undefined nếu AI_ENABLED != true hoặc thiếu GROQ_API_KEY
   };
 
   // Always return HTTP 200 for handled message-processing outcomes so Telegram

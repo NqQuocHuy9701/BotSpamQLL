@@ -265,6 +265,9 @@ export function buildHelpText(): string {
     "📢 KHÁC:",
     "• /spam — đăng thông báo vào nhóm QLL (admin)",
     "• /help hoặc /menu — hiện bảng lệnh này",
+    "",
+    "💬 NÓI CHUYỆN VỚI BEE (không cần gõ lệnh):",
+    '• Nhắn riêng (admin) hoặc tag @vh_messenger_bot trong nhóm, ví dụ "ai đang trực?", "báo cáo ca", "case nào đang treo?"',
   ].join("\n");
 }
 

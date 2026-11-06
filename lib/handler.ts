@@ -10,6 +10,7 @@ import {
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
 import { mapQllByUser } from "./qllmap.js";
+import { maybeHandleAi, type AiConfig } from "./ai.js";
 import { formatVnDateTime, parseOkCommand } from "./schedule.js";
 import {
   addUserManual,
@@ -147,6 +148,8 @@ export interface Deps {
   // OPTIONAL: client tới project Supabase chứa checkin_logs. undefined khi
   // chưa cấu hình env -> lệnh /checkin báo chưa bật tính năng.
   checkinSupabase?: SupabaseClient;
+  // OPTIONAL: Bee AI (Groq). undefined = tắt hoàn toàn (xem lib/ai.ts).
+  ai?: AiConfig;
 }
 
 export async function handleUpdate(
@@ -251,11 +254,22 @@ const message = update.message;
       if (await maybeHandleBatch(message, deps)) {
           return;
       }
+      // 9. Bee AI: admin nhắn riêng bằng câu thường (không phải lệnh /). Chỉ chạy
+      // khi AI được bật; các tin trên không khớp lệnh nào mới tới đây.
+      if (deps.ai && (await maybeHandleAi(message, deps, SPAMTEST_ADMIN_IDS))) {
+          return;
+      }
       if (!deps.relayEnabled) return;
       if (message.text && message.text.startsWith("/start")) {
           await deps.telegram.sendMessage(message.chat.id, START_ACK);
       }
       return;
+  }
+
+  // Bee AI trong nhóm: CHỈ khi tin tag @bot. Không chặn luồng phía dưới (tin tag
+  // vẫn được tracking case như thường); lỗi AI đã được nuốt trong maybeHandleAi.
+  if (deps.ai) {
+    await maybeHandleAi(message, deps, SPAMTEST_ADMIN_IDS);
   }
 
   // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép LUỒNG QLL (relay/forward/auto-ack) nếu đúng
