@@ -2310,14 +2310,21 @@ export async function buildQuotaReport(supabase: SupabaseClient, ai: AiConfig, n
   const lines = [
     "Hạn mức hôm nay của Bee nè 😊",
     `• Groq (${u.model ?? ai.agentModel}): gọi ${u.calls} lần (thành công ${u.ok}, lỗi ${u.errors}, bị giới hạn 429: ${u.rate429})`,
-    `• Token hôm nay: vào ${fmtNum(u.tokIn)}, ra ${fmtNum(u.tokOut)} → khoảng ${fmtNum(tok)}/${fmtNum(GROQ_FREE_TPD)} (${pct}%)`,
+    `• Token Bee đã dùng hôm nay: vào ${fmtNum(u.tokIn)}, ra ${fmtNum(u.tokOut)} → ${fmtNum(tok)}/${fmtNum(GROQ_FREE_TPD)} token/ngày (${pct}%)`,
   ];
-  if (u.remReq || u.remTok) {
+  if (u.remReq && u.limReq) {
+    // Số thật từ header Groq, tính cho CẢ key (gồm mọi nơi dùng chung key).
+    const used = Number(u.limReq) - Number(u.remReq);
     lines.push(
-      `• Groq báo còn (lúc ${u.lastAt ? vnHHmm(u.lastAt) : "?"}): ${fmtNum(u.remReq)}/${fmtNum(u.limReq)} lượt trong ngày, ${fmtNum(u.remTok)}/${fmtNum(u.limTok)} token trong phút`
+      `• Groq (số thật, lúc ${u.lastAt ? vnHHmm(u.lastAt) : "?"}): đã dùng ${fmtNum(used)}/${fmtNum(u.limReq)} lượt hôm nay, còn ${fmtNum(u.remReq)} lượt`
     );
   }
-  lines.push(`• Trần riêng của Bee: ${beeCount}/${ai.dailyCap} lượt hỏi AI`);
+  if (u.remTok && u.limTok) {
+    lines.push(
+      `• Token trong 1 phút: còn ${fmtNum(u.remTok)}/${fmtNum(u.limTok)} (tự hồi lại sau mỗi phút, không phải hạn mức ngày)`
+    );
+  }
+  lines.push(`• Trần riêng của Bee: ${beeCount}/${ai.dailyCap} tin nhắn cần AI`);
   lines.push("• Vercel, Supabase: em chưa có quyền đọc, anh xem ở trang Usage của từng hệ thống nhé.");
   if (pct >= 80 || u.rate429 > 0) {
     lines.push("Lưu ý: sắp chạm hạn mức hoặc đã bị giới hạn, Bee có thể trả lời chậm hoặc báo bận.");

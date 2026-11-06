@@ -512,4 +512,26 @@ describe("Hỏi Bee về credit/hạn mức", () => {
     const tomorrow = await buildQuotaReport(db, ai, new Date(NOW.getTime() + 24 * 3600_000));
     expect(tomorrow).toContain("gọi 0 lần");
   });
+
+  it("header 950/1000: báo ĐÃ DÙNG 50, còn 950 (không gây hiểu nhầm sắp hết)", async () => {
+    const { db } = fakeDb();
+    const h = (m: Record<string, string>) => ({ get: (k: string) => m[k] ?? null });
+    await recordGroqCall(
+      db,
+      {
+        status: 200,
+        model: "m",
+        headers: h({
+          "x-ratelimit-remaining-requests": "950",
+          "x-ratelimit-limit-requests": "1000",
+          "x-ratelimit-remaining-tokens": "4350",
+          "x-ratelimit-limit-tokens": "8000",
+        }),
+      },
+      NOW
+    );
+    const r = await buildQuotaReport(db, loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, NOW);
+    expect(r).toContain("đã dùng 50/1.000 lượt hôm nay, còn 950 lượt");
+    expect(r).toContain("tự hồi lại sau mỗi phút");
+  });
 });
