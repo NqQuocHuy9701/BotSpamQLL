@@ -412,3 +412,40 @@ describe("needsAiUnderstanding: câu nào phải để AI hiểu theo mạch", (
     expect(needsAiUnderstanding(intent as any, q)).toBe(expected);
   });
 });
+
+import { shiftMoment } from "../lib/ai.js";
+
+describe("Hỏi ca đã qua ('ca sáng nay có những ai làm') — lỗi 'Bee đang hơi bận'", () => {
+  it("shiftMoment: hỏi ca sáng lúc 15:07 -> 10:00 sáng cùng ngày (giờ VN)", () => {
+    const at1507 = new Date("2026-11-06T08:07:00Z"); // 15:07 VN
+    expect(shiftMoment(at1507, "sang").toISOString()).toBe("2026-11-06T03:00:00.000Z");
+    expect(shiftMoment(at1507, "toi").toISOString()).toBe("2026-11-06T12:00:00.000Z");
+    expect(shiftMoment(at1507, undefined)).toBe(at1507);
+  });
+
+  it("công cụ báo cáo nhận tham số ca", async () => {
+    const t = setup([say("Dạ")]);
+    await t.run("hôm nay thế nào em");
+    const tool = t.bodies[0].tools.find((x: any) => x.function.name === "xem_bao_cao_ca");
+    expect(tool.function.parameters.properties.ca.enum).toEqual(["sang", "chieu", "toi"]);
+  });
+
+  it("AI gọi công cụ liên tục: vòng cuối buộc trả lời (tool_choice none), không báo bận", async () => {
+    const c = (id: string, name: string, args: object = {}) => ({
+      id,
+      type: "function",
+      function: { name, arguments: JSON.stringify(args) },
+    });
+    const t = setup([
+      say("", [c("1", "xem_bao_cao_ca", { ca: "sang" })]),
+      say("", [c("2", "xem_so_lieu")]),
+      say("Ca sáng có minhlt và anhpd1 làm, QLL 20, HTKT 20 ạ"),
+    ]);
+    await t.run("Ca sáng nay có những ai làm thế em với số case 2 nhóm như thế nào");
+    expect(t.f).toHaveBeenCalledTimes(3);
+    expect(t.bodies[0].tool_choice).toBe("auto");
+    expect(t.bodies[2].tool_choice).toBe("none");
+    expect(t.sent.at(-1)!.text).toBe("Ca sáng có minhlt và anhpd1 làm, QLL 20, HTKT 20 ạ");
+    expect(t.sent.some((s) => /bận/.test(s.text))).toBe(false);
+  });
+});

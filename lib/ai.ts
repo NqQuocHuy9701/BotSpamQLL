@@ -1544,8 +1544,12 @@ const AGENT_TOOLS = [
     type: "function",
     function: {
       name: "xem_bao_cao_ca",
-      description: "Báo cáo ca hiện tại: từng CTV xử lý bao nhiêu case (tim, reply, QLL, HTKT).",
-      parameters: { type: "object", properties: {} },
+      description:
+        "Báo cáo 1 ca HÔM NAY: CTV nào làm, mỗi người bao nhiêu case (tim, reply, QLL, HTKT). Bỏ trống ca = ca hiện tại.",
+      parameters: {
+        type: "object",
+        properties: { ca: { type: "string", enum: ["sang", "chieu", "toi"] } },
+      },
     },
   },
   {
@@ -1716,8 +1720,9 @@ function sleepMs(ms: number): Promise<void> {
 async function agentCall(
   ai: AiConfig,
   messages: AgentMsg[],
-  deadline: number
-): Promise<{ content: string; tool_calls?: ToolCall[] } | null> {
+  deadline: number,
+  allowTools = true
+): Promise<{ content: string; tool_calls?: ToolCall[]; finish?: string } | null> {
   const doFetch = ai.fetchImpl ?? fetch;
   // Tối đa 2 lần gửi: lần 2 CHỈ khi 429 có Retry-After ngắn (<=2s) hoặc lỗi 5xx,
   // và còn đủ thời gian. 400/401/timeout/mất mạng: không thử lại.
@@ -1732,7 +1737,7 @@ async function agentCall(
         model: ai.agentModel,
         messages,
         tools: AGENT_TOOLS,
-        tool_choice: "auto",
+        tool_choice: allowTools ? "auto" : "none",
         temperature: 0.6,
         max_completion_tokens: ai.maxCompletionTokens,
       };
@@ -1766,7 +1771,10 @@ async function agentCall(
         return null;
       }
       const data = (await res.json()) as {
-        choices?: { message?: { content?: string | null; tool_calls?: ToolCall[] } }[];
+        choices?: {
+          message?: { content?: string | null; tool_calls?: ToolCall[] };
+          finish_reason?: string;
+        }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       // Theo dõi quota qua log Vercel: token mỗi lần gọi + phần còn lại theo header.
@@ -1779,7 +1787,11 @@ async function agentCall(
       );
       const m = data.choices?.[0]?.message;
       if (!m) return null;
-      return { content: m.content ?? "", tool_calls: m.tool_calls?.length ? m.tool_calls : undefined };
+      return {
+        content: m.content ?? "",
+        tool_calls: m.tool_calls?.length ? m.tool_calls : undefined,
+        finish: data.choices?.[0]?.finish_reason,
+      };
     } catch (e) {
       console.error("Bee agent lỗi:", e instanceof Error ? e.message : String(e));
       return null;
@@ -1788,6 +1800,15 @@ async function agentCall(
     }
   }
   return null;
+}
+
+// Mốc giữa ca của HÔM NAY (giờ VN) để dựng báo cáo đúng ca được hỏi — cùng cách
+// cron dựng báo cáo cuối ca. Không chỉ định ca -> giữ thời điểm hiện tại.
+export function shiftMoment(now: Date, ca: unknown): Date {
+  const hour = ca === "sang" ? 10 : ca === "chieu" ? 15 : ca === "toi" ? 19 : null;
+  if (hour === null) return now;
+  const vn = new Date(now.getTime() + VN_OFFSET_MS);
+  return new Date(Date.UTC(vn.getUTCFullYear(), vn.getUTCMonth(), vn.getUTCDate(), hour - 7, 0, 0));
 }
 
 function toScope(v: unknown): CaseScope {
@@ -1812,7 +1833,7 @@ async function runTool(
       case "xem_so_lieu":
         return await buildDayCaseStats(deps.supabase, now);
       case "xem_bao_cao_ca":
-        return stripHtml(await buildShiftReport(deps.supabase, deps.checkinSupabase, now));
+        return stripHtml(await buildShiftReport(deps.supabase, deps.checkinSupabase, shiftMoment(now, args.ca)));
       case "tra_cuu_case":
         return await lookupCases(deps.supabase, String(args.tu_khoa ?? ""), true);
       case "xem_ctv":
@@ -1929,12 +1950,22 @@ export async function runAgent(
   ];
 
   let acted = false; // đã thực thi công cụ có tác dụng thật (gửi/ghi)
+  let why = "hết vòng";
   for (let round = 0; round < AGENT_MAX_ROUNDS; round++) {
-    const m = await agentCall(ai, messages, deadline);
-    if (!m) break;
-    if (!m.tool_calls) {
+    // Vòng cuối: KHÔNG cho gọi công cụ nữa -> AI buộc phải trả lời bằng dữ liệu
+    // đã lấy được, thay vì bỏ dở (trước đây rơi vào "Bee đang hơi bận").
+    const lastRound = round === AGENT_MAX_ROUNDS - 1;
+    const m = await agentCall(ai, messages, deadline, !lastRound);
+    if (!m) {
+      why = "gọi AI thất bại";
+      break;
+    }
+    if (!m.tool_calls || lastRound) {
       const text = plainText(m.content).slice(0, 1500);
-      if (text === "") break;
+      if (text === "") {
+        why = `AI trả rỗng (finish=${m.finish ?? "?"})`;
+        break;
+      }
       await sendHere(deps, message, isPrivate, text);
       return text;
     }
@@ -1947,12 +1978,13 @@ export async function runAgent(
         // tham số hỏng -> chạy với {}
       }
       const result = await runTool(tc.function.name, args, ctx);
-      if (/^(gui_danh_sach|nhan_nhom|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) acted = true;
+      if (/^(gui_danh_sach|nhan_nhom|tag_ctv|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) acted = true;
       messages.push({ role: "tool", tool_call_id: tc.id, content: result.slice(0, 1200) });
     }
   }
   // Đã làm việc thật nhưng không kịp nói câu cuối -> báo ngắn, KHÔNG rơi về luồng
   // cũ (tránh làm lặp hành động).
+  console.error(`[Bee AI] không ra câu trả lời: ${why}`);
   if (acted) {
     const text = `Dạ em làm xong rồi ạ ${title} 😊`;
     await sendHere(deps, message, isPrivate, text);
