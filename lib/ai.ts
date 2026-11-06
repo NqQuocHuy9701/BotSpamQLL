@@ -806,6 +806,15 @@ async function handleAi(
   const rng = opts.rng ?? Math.random;
   const folded = foldVi(question);
 
+  // Admin trả lời bản nháp đăng nhóm ("gửi" / "hủy"): TypeScript xử lý, không qua AI.
+  if (isAdmin) {
+    const title = await resolveTitle(deps.supabase, from.username);
+    const done = await handlePendingPost(deps, message, isPrivate, folded, now, title, (name, args) =>
+      runTool(name, args, { deps, message, isPrivate, title, now, notes: [], confirmed: true })
+    );
+    if (done) return true;
+  }
+
   // Nhóm A (không cần AI): lệnh bộ nhớ rõ ràng + yêu cầu nghiệp vụ khớp luật.
   let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
   if (intent === null) intent = classifyByRules(folded);
@@ -1698,9 +1707,9 @@ const AGENT_TOOLS = [
   ]),
   tool(
     "tag_ctv",
-    "ĐĂNG THẬT: tag đúng người; có ma_case thì reply vào tin case đó",
-    { nhom: { type: "string", enum: ["qll", "htkt"] }, usernames: { type: "array", items: S }, ma_case: S, loi_nhan: S },
-    ["nhom", "usernames", "loi_nhan"]
+    "ĐĂNG THẬT: tag đúng người nhờ hỗ trợ (lời nhắn hệ thống tự viết); có ma_case thì reply vào tin case đó",
+    { nhom: { type: "string", enum: ["qll", "htkt"] }, usernames: { type: "array", items: S }, ma_case: S },
+    ["nhom", "usernames"]
   ),
   tool("hen_tag_ca_chieu", "Hẹn sau 13h30 tag CTV ca chiều xử lý case tồn", { nhom: NHOM }, ["nhom"]),
   tool("ghi_nho", "Ghi lâu dài điều admin dạy (không ghi số liệu tạm)", { noi_dung: S }, ["noi_dung"]),
@@ -1724,7 +1733,8 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Hiểu câu nối tiếp/đại từ (\"nhóm đó\", \"anh ý\", \"ok gửi đi\") theo tin trước. Mơ hồ thật thì hỏi lại 1 câu.",
     "- Số liệu/case/CTV/cấu hình chỉ lấy qua công cụ, không bịa. Việc chung (soạn tin, trả lời phụ huynh, giải thích, tính nhẩm) thì tự làm.",
     "- Nhóm ngoài QLL/HTKT: xem_cac_nhom, xem_nhom; gửi/rep tin thường: gui_tin_nhom (theo tên).",
-    "- Nhắc cả ca case tồn: nhan_nhom; tag 1 người/1 case: tag_ctv. Nhờ soạn thử thì đưa nháp, chỉ gửi khi admin bảo gửi. Lời nhắn tự viết tự nhiên, không chép lệnh.",
+    "- Bảo tag ai -> tag_ctv ngay (username + ma_case; lời nhắn hệ thống viết). Chưa rõ tag ai thì hỏi admin, KHÔNG gọi công cụ.",
+    "- Nhắc cả ca case tồn: nhan_nhom; tin tự do: gui_tin_nhom (2 cái này chỉ tạo nháp cho admin duyệt).",
     "- Chưa có công cụ báo thành công thì KHÔNG nói đã gửi/tag. Không hứa tự động việc gì ngoài: hẹn tag ca chiều, và form QLL đủ mẫu tự chuyển sang nhóm Cộng đồng VH - BGD.",
     "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
     "- Admin dặn lâu dài (\"từ nay\", \"lần sau\", \"nhớ\") thì ghi_nho 1 câu. Hỏi em nhớ gì thì kể BỘ NÃO.",
@@ -1915,9 +1925,15 @@ async function runTool(
     title: string;
     now: Date;
     notes: string[];
+    confirmed?: boolean; // true CHỈ khi admin đã nhắn xác nhận bản nháp (TypeScript)
   }
 ): Promise<string> {
   const { deps, message, isPrivate, title, now } = ctx;
+  // CHỐT CHẶN: AI KHÔNG được tự đăng vào nhóm. Công cụ đăng chỉ tạo BẢN NHÁP;
+  // code gửi bản nháp cho admin, admin nhắn "gửi" (TypeScript xử lý) mới đăng thật.
+  if (POST_TOOLS.has(name) && !ctx.confirmed) {
+    return await draftPost(name, args, ctx);
+  }
   try {
     switch (name) {
       case "xem_so_lieu":
@@ -1984,8 +2000,12 @@ async function runTool(
           .map((u) => String(u).trim().replace(/^@/, "").toLowerCase())
           .filter((u) => /^[a-z0-9_]{3,32}$/.test(u));
         if (users.length === 0) return "Chưa rõ tag ai, hãy hỏi lại admin (cần username).";
-        const loiNhan = sanitizeReply(String(args.loi_nhan ?? "")) || "nhờ mình hỗ trợ giúp em nhé 😊";
-        const r = await tagInGroup(deps, nhom, users.slice(0, 5), String(args.ma_case ?? ""), loiNhan);
+        // Lời nhắn do CODE chọn từ mẫu (không dùng chữ AI viết -> không lọt câu hỏi
+        // dành cho admin vào nhóm). Danh xưng theo userTitles đã cài cho từng CTV.
+        const picked = users.slice(0, 5);
+        const maCase = String(args.ma_case ?? "").trim();
+        const xung = await addressFor(deps.supabase, picked);
+        const r = await tagInGroup(deps, nhom, picked, maCase, (found) => tagLine(xung, maCase, found));
         return `KẾT QUẢ THẬT (báo đúng như vậy): ${r}`;
       }
       case "hen_tag_ca_chieu": {
@@ -2093,6 +2113,13 @@ export async function runAgent(
         // tham số hỏng -> chạy với {}
       }
       const result = await runTool(tc.function.name, args, ctx);
+      // Bản nháp đăng nhóm: CODE gửi nguyên văn cho admin duyệt, dừng ngay (không
+      // để AI diễn giải, không tốn thêm lượt). Không có gì được đăng vào nhóm.
+      if (result.startsWith(DRAFT_MARK)) {
+        const preview = result.slice(DRAFT_MARK.length);
+        await sendHere(deps, message, isPrivate, preview);
+        return preview;
+      }
       if (/^(gui_danh_sach|nhan_nhom|tag_ctv|gui_tin_nhom|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) {
         acted = true;
       }
@@ -2265,7 +2292,7 @@ async function tagInGroup(
   nhom: "qll" | "htkt",
   users: string[],
   maCase: string,
-  loiNhan: string
+  makeLine: (foundCase: boolean) => string
 ): Promise<string> {
   const chatId = nhom === "qll" ? QLL_CHAT_ID : HTKT_CHAT_ID;
   const label = nhom.toUpperCase();
@@ -2276,7 +2303,7 @@ async function tagInGroup(
     if (found) replyTo = found.realId;
     else note = ` (không tìm thấy tin case "${maCase}" trong ${label} nên đăng tin riêng)`;
   }
-  const text = `${users.map((u) => `@${u}`).join(" ")} ${loiNhan}`;
+  const text = `${users.map((u) => `@${u}`).join(" ")} ${makeLine(replyTo !== undefined)}`;
   const res = await deps.telegram.sendMessage(chatId, text, replyTo);
   if (!res.ok) return `Chưa gửi được vào nhóm ${label}.`;
   return replyTo
@@ -2843,4 +2870,145 @@ export async function leaveForwardSummary(supabase: SupabaseClient, now: Date): 
   const cur = await readRow<{ kind?: string; day?: string; count?: number }>(supabase, LEAVE_ROW_ID);
   const n = cur?.kind === "leavefw" && cur.day === vnDay(now) ? cur.count ?? 0 : 0;
   return `Form QLL (đủ mẫu) đã tự chuyển sang nhóm Cộng đồng VH - BGD hôm nay: ${n}.`;
+}
+
+// ---------------------------------------------------------------------------
+// Lời nhắn khi admin bảo TAG người hỗ trợ — CODE chọn mẫu, mỗi câu 1 icon mặt.
+// ---------------------------------------------------------------------------
+const TAG_CASE: readonly string[] = [
+  "Hỗ trợ case này giúp em với ạ 😊",
+  "{x} xem giúp em case này với ạ 😊",
+  "{x} hỗ trợ case này giúp em nhé 🥺",
+  "Nhờ {x} check giúp em case này ạ 😊",
+];
+// Không tìm thấy tin gốc của case (đăng tin riêng) -> nêu mã case cho rõ.
+const TAG_CODE: readonly string[] = [
+  "{x} hỗ trợ giúp em case {c} với ạ 😊",
+  "Nhờ {x} xem giúp em case {c} ạ 🥺",
+];
+const TAG_PLAIN: readonly string[] = [
+  "Nhờ {x} hỗ trợ giúp em với ạ 😊",
+  "{x} hỗ trợ giúp em nhé 🥺",
+];
+
+// Danh xưng cho người được tag: 1 người theo userTitles (anh/chị), nhiều người -> "anh chị".
+export async function addressFor(supabase: SupabaseClient, users: string[]): Promise<string> {
+  if (users.length !== 1) return "anh chị";
+  try {
+    const t = (await loadMonitorConfig(supabase)).userTitles ?? {};
+    return t[users[0].toLowerCase()] ?? t[users[0]] ?? "anh chị";
+  } catch {
+    return "anh chị";
+  }
+}
+
+export function tagLine(xung: string, maCase: string, foundCase: boolean, rng: () => number = Math.random): string {
+  const pool = foundCase ? TAG_CASE : maCase ? TAG_CODE : TAG_PLAIN;
+  const s = pool[pickIndex(pool.length, undefined, rng)].replace(/\{x\}/g, xung).replace(/\{c\}/g, maCase);
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// ---------------------------------------------------------------------------
+// BẢN NHÁP đăng nhóm: gui_tin_nhom / nhan_nhom (nội dung do AI viết) -> admin
+// duyệt. Admin nhắn "gửi" (TypeScript xử lý, không qua AI) mới đăng thật.
+// ---------------------------------------------------------------------------
+const POST_TOOLS = new Set(["gui_tin_nhom", "nhan_nhom"]);
+const DRAFT_MARK = "__DRAFT__";
+const PENDING_ROW_ID = -9106;
+const PENDING_TTL_MS = 10 * 60_000;
+
+interface PendingPost {
+  name: string;
+  args: Record<string, unknown>;
+  at: number;
+}
+
+async function readPending(supabase: SupabaseClient): Promise<Record<string, PendingPost>> {
+  const it = await readRow<{ kind?: string; byKey?: Record<string, PendingPost> }>(supabase, PENDING_ROW_ID);
+  return it?.kind === "pendingpost" && it.byKey ? it.byKey : {};
+}
+
+async function setPending(supabase: SupabaseClient, key: string, p: PendingPost | null): Promise<void> {
+  const all = await readPending(supabase);
+  const now = Date.now();
+  for (const [k, v] of Object.entries(all)) if (now - v.at > PENDING_TTL_MS) delete all[k];
+  if (p) all[key] = p;
+  else delete all[key];
+  await writeRow(supabase, PENDING_ROW_ID, { kind: "pendingpost", byKey: all });
+}
+
+// Nội dung giống câu hỏi dành cho admin (lỗi thực tế: "Bạn muốn em tag CTV nào?").
+export function looksLikeQuestionToAdmin(text: string): boolean {
+  return /(anh|chị|bạn|sếp) (muốn|cần|có muốn)|em (nên |sẽ )?tag (ai|ctv nào|người nào)|tag ai|ctv nào\s*\?|chưa rõ/i.test(
+    text
+  );
+}
+
+async function draftPost(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: { deps: AiDeps; message: TelegramMessage }
+): Promise<string> {
+  const { deps, message } = ctx;
+  const ask = 'Anh nhắn "gửi" để em đăng, "hủy" để bỏ, hoặc bảo em sửa lại nhé.';
+  if (name === "gui_tin_nhom") {
+    const text = sanitizeReply(String(args.noi_dung ?? ""));
+    if (text === "") return "Chưa có nội dung để gửi, hãy hỏi lại admin.";
+    if (looksLikeQuestionToAdmin(text)) {
+      return "KHÔNG tạo nháp: nội dung là câu hỏi dành cho admin, không phải tin gửi nhóm. Hãy hỏi admin trực tiếp.";
+    }
+    const hit = await findGroupByName(deps.supabase, String(args.ten_nhom ?? ""));
+    if (!hit) {
+      const known = (await loadGroups(deps.supabase)).map(([, g]) => g.title).join("; ") || "(chưa có)";
+      return `Chưa gửi: không thấy nhóm tên "${args.ten_nhom}". Các nhóm em biết: ${known}.`;
+    }
+    await setPending(deps.supabase, convKey(message), { name, args: { ...args, noi_dung: text }, at: Date.now() });
+    const rep = String(args.tra_loi_cho ?? "").trim() ? " (reply vào tin gần nhất của người đó)" : "";
+    return `${DRAFT_MARK}Em định gửi vào nhóm "${hit[1].title}"${rep}:\n\n${text}\n\n${ask}`;
+  }
+  // nhan_nhom
+  const cau = sanitizeReply(String(args.cau_nhac ?? ""));
+  if (cau !== "" && looksLikeQuestionToAdmin(cau)) {
+    return "KHÔNG tạo nháp: câu nhắc là câu hỏi dành cho admin. Hãy hỏi admin trực tiếp.";
+  }
+  let scope = toScope(args.nhom);
+  if (scope === "all") scope = detectScope(foldVi(message.reply_to_message?.text ?? ""));
+  await setPending(deps.supabase, convKey(message), { name, args: { ...args, nhom: scope }, at: Date.now() });
+  const where = scope === "all" ? "QLL và HTKT" : scope.toUpperCase();
+  return `${DRAFT_MARK}Em định nhắn nhóm ${where}: tag CTV đang trực + danh sách case tồn, kèm câu:\n\n${
+    cau || "(câu nhắc mẫu có sẵn)"
+  }\n\n${ask}`;
+}
+
+// Admin trả lời bản nháp đang chờ. Trả true nếu đã xử lý (gửi/hủy).
+export async function handlePendingPost(
+  deps: AiDeps,
+  message: TelegramMessage,
+  isPrivate: boolean,
+  folded: string,
+  now: Date,
+  title: string,
+  exec: (name: string, args: Record<string, unknown>) => Promise<string>
+): Promise<boolean> {
+  if (folded.length > 30) return false;
+  const confirm = /^(ok |oke |uh |u |vang |da )?(gui|dang|send|ok|oke|okie|dong y|duoc|dc|chuan|yes|uh|u|vang)( di| luon| nhe| em| nha| a)*$/.test(
+    folded
+  );
+  const cancel = /^(huy|thoi|khong|ko|k|dung|cancel|bo qua|khoi|bo di)( .*)?$/.test(folded);
+  if (!confirm && !cancel) return false;
+  const key = convKey(message);
+  const p = (await readPending(deps.supabase))[key];
+  if (!p || Date.now() - p.at > PENDING_TTL_MS) return false;
+  await setPending(deps.supabase, key, null);
+  let text: string;
+  if (cancel) {
+    text = `Dạ em bỏ bản nháp đó, không gửi gì vào nhóm ạ.`;
+  } else {
+    const r = await exec(p.name, p.args);
+    text = r.replace(/^KẾT QUẢ THẬT \(báo đúng như vậy\):\s*/, "");
+  }
+  await sendHere(deps, message, isPrivate, text);
+  await appendHistory(deps.supabase, key, message.text ?? "", [text], now.getTime());
+  void title;
+  return true;
 }

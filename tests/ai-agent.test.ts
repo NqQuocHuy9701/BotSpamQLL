@@ -361,7 +361,8 @@ describe("Hiểu đúng ý: 'tag anh ý trong nhóm HTKT case 215785' (lỗi th�
     });
     await t.run("Em thử tag anh ý trong nhóm HTKT case 215785 đi");
     const post = t.sent.find((s) => s.chat === HTKT)!;
-    expect(post.text).toBe("@vh_anhpd1 anh hỗ trợ giúp em case này nhé 😊");
+    // lời nhắn do code chọn từ mẫu: câu nhờ hỗ trợ case, 1 icon mặt
+    expect(post.text).toMatch(/^@vh_anhpd1 [^@?]*case này[^?]*(😊|🥺)$/);
     expect(post.replyTo).toBe(149662);
     const tool = t.bodies[1].messages.find((m: any) => m.role === "tool");
     expect(tool.content).toContain("ngay dưới tin case 215785");
@@ -652,13 +653,38 @@ describe("Gửi tin vào nhóm theo tên + chặn báo 'đã gửi' sai (lỗi t
     expect(t.sent.at(-1)!.text).toContain("chưa gửi được tin nào thật");
   });
 
-  it("gui_tin_nhom: tìm nhóm theo tên (không cần ID), reply đúng tin của admin", async () => {
-    const t = setup([say("", [send({ ten_nhom: "Xếp lớp", noi_dung: "test nhé", tra_loi_cho: "admin" })]), say("Em rep trong nhóm Xếp lớp rồi ạ")], seed);
+  it("gui_tin_nhom: chỉ tạo NHÁP cho admin; admin nhắn 'gửi' mới đăng, reply đúng tin", async () => {
+    const t = setup([say("", [send({ ten_nhom: "Xếp lớp", noi_dung: "test nhé", tra_loi_cho: "admin" })])], seed);
     await t.run("Ờ em rep lại là test nhé");
+    expect(t.f).toHaveBeenCalledTimes(1); // dừng ngay sau khi tạo nháp, không tốn thêm lượt
+    expect(t.sent.some((s) => s.chat === XEPLOP)).toBe(false); // CHƯA đăng
+    expect(t.sent.at(-1)!.text).toContain('Em định gửi vào nhóm "[BU VUIHOC VH] Hỗ Trợ Xếp Lớp"');
+    expect(t.sent.at(-1)!.text).toContain("test nhé");
+    await t.run("gửi");
+    expect(t.f).toHaveBeenCalledTimes(1); // xác nhận bằng TypeScript, không gọi AI
     const post = t.sent.find((s) => s.chat === XEPLOP)!;
     expect(post.text).toBe("test nhé");
     expect(post.replyTo).toBe(77);
-    expect(t.sent.at(-1)!.text).toBe("Em rep trong nhóm Xếp lớp rồi ạ"); // có gửi thật -> không bị chặn
+    expect(t.sent.at(-1)!.text).toContain("Đã gửi vào nhóm");
+  });
+
+  it("bản nháp: admin nhắn 'hủy' -> không đăng gì", async () => {
+    const t = setup([say("", [send({ ten_nhom: "Xếp lớp", noi_dung: "test nhé" })])], seed);
+    await t.run("gửi nhóm xếp lớp chữ test nhé");
+    await t.run("hủy");
+    expect(t.sent.some((s) => s.chat === XEPLOP)).toBe(false);
+    expect(t.sent.at(-1)!.text).toContain("bỏ bản nháp");
+    await t.run("gửi"); // nháp đã hủy -> 'gửi' không còn tác dụng đăng
+    expect(t.sent.some((s) => s.chat === XEPLOP)).toBe(false);
+  });
+
+  it("lỗi thực tế: AI nhét câu hỏi cho admin vào tin gửi nhóm -> KHÔNG tạo nháp, không đăng", async () => {
+    const bad = send({ ten_nhom: "Xếp lớp", noi_dung: "215965 mới vào HTKT, chưa xử lý. Bạn muốn em tag CTV nào?" });
+    const t = setup([say("", [bad]), say("Anh muốn em tag ai ạ?")], seed);
+    await t.run("tag bạn ấy đi");
+    expect(t.sent.some((s) => s.chat === XEPLOP)).toBe(false);
+    const tool = t.bodies[1].messages.find((m: any) => m.role === "tool");
+    expect(tool.content).toContain("KHÔNG tạo nháp");
   });
 
   it("tên nhóm không có trong sổ: không gửi, báo các nhóm đã biết", async () => {
@@ -969,5 +995,30 @@ describe("Hết hạn mức NGÀY của Groq (lỗi thực tế: token/phút cò
     const ai = loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!;
     expect(pickModel(ai, Date.now())).toBe("openai/gpt-oss-120b");
     expect(t.sent[0].text).toContain("theo phút");
+  });
+});
+
+import { tagLine, looksLikeQuestionToAdmin } from "../lib/ai.js";
+
+describe("Lời nhắn khi admin bảo tag: code chọn mẫu nhờ hỗ trợ", () => {
+  it("có tin case: câu nhờ hỗ trợ case này, đúng danh xưng, 1 icon", () => {
+    for (let i = 0; i < 4; i++) {
+      const s = tagLine("chị", "215965", true, () => i / 4);
+      expect(s).toMatch(/case này/);
+      expect(s).not.toMatch(/\?|@/);
+      expect((s.match(/😊|🥺/g) ?? []).length).toBe(1);
+    }
+    expect(tagLine("anh", "", true, () => 0)).toBe("Hỗ trợ case này giúp em với ạ 😊");
+    expect(tagLine("chị", "", true, () => 0.3)).toBe("Chị xem giúp em case này với ạ 😊");
+  });
+  it("không tìm thấy tin case: nêu rõ mã case", () => {
+    expect(tagLine("anh", "215965", false, () => 0)).toBe("Anh hỗ trợ giúp em case 215965 với ạ 😊");
+  });
+  it("không có case: câu nhờ hỗ trợ chung", () => {
+    expect(tagLine("anh chị", "", false, () => 0)).toBe("Nhờ anh chị hỗ trợ giúp em với ạ 😊");
+  });
+  it("nhận ra câu hỏi dành cho admin", () => {
+    expect(looksLikeQuestionToAdmin("215965 mới vào HTKT, chưa xử lý. Bạn muốn em tag CTV nào?")).toBe(true);
+    expect(looksLikeQuestionToAdmin("Hỗ trợ case này giúp em với ạ 😊")).toBe(false);
   });
 });
