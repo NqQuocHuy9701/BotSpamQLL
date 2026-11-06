@@ -102,7 +102,12 @@ export function foldVi(s: string): string {
 }
 
 // Nhận diện ý định bằng từ khóa. null = không chắc -> mới cần hỏi AI.
+// Câu hỏi phân tích/so sánh số liệu: cần AI đọc dữ liệu rồi trả lời bằng lời.
+const ANALYTIC_RE =
+  /(nhieu nhat|it nhat|cao nhat|thap nhat|bao nhieu|so sanh|tai sao|vi sao|ban nhat|dung dau|\bai\b.*(xu ly|lam|top|tot|cham)|nhan xet|danh gia|the nao|ra sao)/;
+
 export function classifyByRules(folded: string): Intent | null {
+  if (ANALYTIC_RE.test(folded) && !/\b(truc|check ?in|checkin|diem danh)\b/.test(folded)) return null;
   // Bee chưa có dữ liệu check-out: trả lời thẳng thay vì nhả danh sách check-in.
   if (/\b(check ?out|checkout|tan ca|het ca|ve ca)\b/.test(folded)) return "checkout";
   if (/\b(bao cao|thong ke|hieu suat|kpi|xep hang)\b/.test(folded)) return "baocao";
@@ -183,7 +188,7 @@ export function sanitizeReply(s: string): string {
     .replace(/@/g, "")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 280);
+    .slice(0, 600);
 }
 
 // Đọc JSON AI trả về; chấp nhận có chữ thừa quanh JSON. Sai định dạng -> null.
@@ -211,24 +216,62 @@ export function parseGroqJson(
 // Gọi Groq
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(title: string): string {
+function buildSystemPrompt(title: string, context: string): string {
   return [
-    'Bạn là Bee, trợ lý ong thân thiện của team CTV VHHS. Chỉ trả về MỘT đối tượng JSON: {"intent":"...","reply":"..."}.',
+    'Bạn là Bee (Tiểu Bee), trợ lý ong thân thiện của team CTV VHHS. Chỉ trả về MỘT đối tượng JSON: {"intent":"...","reply":"..."}.',
     "intent là một trong:",
-    "- checkin: hỏi ai đang trực / đã check-in ca này",
-    "- baocao: hỏi báo cáo, hiệu suất, số liệu của ca",
-    "- casetreo: hỏi case chưa xử lý / đang treo / bị miss",
-    "- help: hỏi Bee làm được gì, cách dùng",
-    "- checkout: hỏi ai đã check-out / tan ca / về ca",
-    "- chat: chào hỏi, trò chuyện, hoặc câu không thuộc các loại trên",
-    `reply: CHỈ điền khi intent=chat, 1 câu ngắn tiếng Việt, xưng "em", gọi người hỏi là "${title}", mở đầu bằng "Dạ", đúng 1 emoji mặt cười. Không bịa số liệu, không nhắc tới @ai. Nếu được nhờ việc ngoài khả năng thì từ chối lịch sự và gợi ý gõ /help. Intent khác thì reply là "".`,
+    "- chat: mọi câu hỏi/trò chuyện có thể tự trả lời (kể cả hỏi về số liệu bên dưới)",
+    "- checkin: chỉ khi người hỏi muốn xem NGUYÊN danh sách check-in",
+    "- baocao: chỉ khi muốn xem NGUYÊN bảng báo cáo ca",
+    "- casetreo: chỉ khi muốn xem NGUYÊN danh sách case chưa xử lý",
+    "- help: hỏi Bee làm được gì",
+    "- checkout: hỏi ai đã check-out/tan ca (Bee chưa có dữ liệu này)",
+    `reply (khi intent=chat): trả lời tự nhiên như đang trò chuyện, tiếng Việt, xưng "em", gọi người hỏi là "${title}", 1-3 câu ngắn, mở đầu "Dạ", tối đa 1 emoji mặt cười. Chỉ dùng số liệu trong DỮ LIỆU, KHÔNG bịa; nếu DỮ LIỆU không có thì nói thẳng em chưa có thông tin đó. Có thể nêu tên CTV (không gắn @). Việc ghi/sửa dữ liệu (chuyển ca, thêm người...) Bee chưa làm được qua chat: nói rõ và gợi ý gõ lệnh /help. Intent khác thì reply là "".`,
+    "DỮ LIỆU (ca hiện tại, chỉ đọc):",
+    context.trim() === "" ? "(không có)" : context,
   ].join("\n");
+}
+
+// Gom dữ liệu thật để AI đọc. Người thường chỉ được thấy check-in; admin thấy thêm
+// báo cáo ca + số case chưa xử lý. Lỗi lấy dữ liệu -> bỏ qua phần đó.
+function stripHtml(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+async function buildContext(deps: AiDeps, isAdmin: boolean, now: Date): Promise<string> {
+  const parts: string[] = [];
+  try {
+    if (deps.checkinSupabase) {
+      parts.push(stripHtml(await buildCheckinList(deps.checkinSupabase, now)));
+    }
+  } catch {
+    // bỏ qua
+  }
+  if (isAdmin) {
+    try {
+      parts.push(stripHtml(await buildShiftReport(deps.supabase, deps.checkinSupabase, now)));
+    } catch {
+      // bỏ qua
+    }
+    try {
+      const pending = await buildPendingCases(deps.supabase, now);
+      parts.push(pending.split("\n").filter((l) => !l.includes("t.me/")).join("\n"));
+    } catch {
+      // bỏ qua
+    }
+  }
+  return parts.join("\n\n").slice(0, 3500);
 }
 
 async function callGroq(
   ai: AiConfig,
   question: string,
-  title: string
+  title: string,
+  context = ""
 ): Promise<{ intent: Intent; reply: string } | null> {
   const doFetch = ai.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -237,11 +280,11 @@ async function callGroq(
     const body: Record<string, unknown> = {
       model: ai.model,
       messages: [
-        { role: "system", content: buildSystemPrompt(title) },
+        { role: "system", content: buildSystemPrompt(title, context) },
         { role: "user", content: question.slice(0, MAX_QUESTION_CHARS) },
       ],
       temperature: 0.3,
-      max_completion_tokens: 300,
+      max_completion_tokens: 450,
       response_format: { type: "json_object" },
     };
     // Model suy luận (gpt-oss, qwen): ép suy luận ít + không trả phần suy luận.
@@ -527,7 +570,8 @@ async function respond(
   let chatReply = canned ? canned.replace(/\{title\}/g, title) : "";
 
   if (intent === null) {
-    const r = await callGroq(ai, question, title);
+    const context = await buildContext(deps, isAdmin, now);
+    const r = await callGroq(ai, question, title, context);
     if (!r) {
       await sendHere(deps, message, isPrivate, FALLBACK_BUSY.replace("{title}", title));
       return true;
