@@ -6,6 +6,7 @@
 import { checkUnansweredMessages, maybeSendShiftReports } from "../lib/monitor.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { loadConfig } from "../lib/config.js";
+import { loadAiConfig, runHandoff } from "../lib/ai.js";
 import {
   claimRow,
   countUnsent,
@@ -189,6 +190,16 @@ export default async function handler(
     );
   } catch (err) {
     console.error("Shift report error:", err);
+  }
+
+  // BEE: tag CTV ca chiều xử lý case tồn (chỉ khi admin đã dặn; không ném lỗi).
+  // Chỉ chạy khi Bee AI được bật.
+  try {
+    if (loadAiConfig()) {
+      await runHandoff(deps.telegram, deps.supabase, checkinSupabase, Date.now());
+    }
+  } catch (err) {
+    console.error("Handoff error:", err);
   }
 
   // DỌN DỮ LIỆU HIỆU SUẤT CŨ — chạy MỖI lần cron (mỗi phút). Trước đây chỉ chạy

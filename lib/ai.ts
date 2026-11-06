@@ -18,6 +18,7 @@ import { pickIndex } from "./messages.js";
 import {
   buildCheckinList,
   buildShiftReport,
+  getCurrentShiftCheckins,
   getCurrentShiftVn,
   htktCaseKey,
   loadMonitorConfig,
@@ -34,8 +35,23 @@ const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 const QLL_LINK_ID = "2273179613"; // id nhóm QLL bỏ tiền tố -100 (link t.me/c/...)
 const HTKT_LINK_ID = "2458492731"; // id nhóm HTKT bỏ tiền tố -100
 
-export type Intent = "checkin" | "baocao" | "casetreo" | "help" | "chat" | "checkout";
-const INTENTS: readonly Intent[] = ["checkin", "baocao", "casetreo", "help", "chat", "checkout"];
+export type Intent =
+  | "checkin"
+  | "baocao"
+  | "casetreo"
+  | "help"
+  | "chat"
+  | "checkout"
+  | "hentag";
+const INTENTS: readonly Intent[] = [
+  "checkin",
+  "baocao",
+  "casetreo",
+  "help",
+  "chat",
+  "checkout",
+  "hentag",
+];
 
 // Câu dẫn trước số liệu (có sẵn, không tốn lượt AI).
 const LEAD: readonly string[] = [
@@ -109,6 +125,14 @@ const ANALYTIC_RE =
   /(nhieu nhat|it nhat|cao nhat|thap nhat|bao nhieu|so sanh|tai sao|vi sao|ban nhat|dung dau|\bai\b.*(xu ly|lam|top|tot|cham)|nhan xet|danh gia|the nao|ra sao)/;
 
 export function classifyByRules(folded: string): Intent | null {
+  // Dặn Bee: đến ca chiều thì tag CTV ca chiều xử lý case tồn.
+  if (
+    /\b(tag|goi|nhac|nho|giao)\b.*\bctv\b.*\bca chieu\b/.test(folded) ||
+    /\bca chieu\b.*\b(tag|goi|nhac|nho|giao)\b.*\bctv\b/.test(folded) ||
+    /\b(den|khi|vao|luc|sau)\b.*\bca chieu\b.*\b(tag|goi|nhac|giao)\b/.test(folded)
+  ) {
+    return "hentag";
+  }
   if (ANALYTIC_RE.test(folded) && !/\b(truc|check ?in|checkin|diem danh)\b/.test(folded)) return null;
   // Bee chưa có dữ liệu check-out: trả lời thẳng thay vì nhả danh sách check-in.
   if (/\b(check ?out|checkout|tan ca|het ca|ve ca)\b/.test(folded)) return "checkout";
@@ -233,6 +257,7 @@ function buildSystemPrompt(title: string, context: string): string {
     "- casetreo: chỉ khi muốn xem NGUYÊN danh sách case chưa xử lý",
     "- help: hỏi Bee làm được gì",
     "- checkout: hỏi ai đã check-out/tan ca (Bee chưa có dữ liệu này)",
+    "- hentag: dặn đến ca chiều thì tag CTV ca chiều xử lý case tồn",
     `reply (khi intent=chat): trả lời tự nhiên như đang trò chuyện, tiếng Việt, xưng "em", gọi người hỏi là "${title}", 1-3 câu ngắn, mở đầu "Dạ", tối đa 1 emoji mặt cười. Chỉ dùng số liệu trong DỮ LIỆU, KHÔNG bịa; nếu DỮ LIỆU không có thì nói thẳng em chưa có thông tin đó. Có thể nêu tên CTV (không gắn @). Việc ghi/sửa dữ liệu (chuyển ca, thêm người...) Bee chưa làm được qua chat: nói rõ và gợi ý gõ lệnh /help. Intent khác thì reply là "".`,
     "DỮ LIỆU (ca hiện tại, chỉ đọc):",
     context.trim() === "" ? "(không có)" : context,
@@ -259,6 +284,8 @@ async function buildContext(deps: AiDeps, isAdmin: boolean, now: Date): Promise<
     // bỏ qua
   }
   if (isAdmin) {
+    const ho = await describeHandoff(deps.supabase, now);
+    if (ho) parts.push(ho);
     try {
       parts.push(stripHtml(await buildShiftReport(deps.supabase, deps.checkinSupabase, now)));
     } catch {
@@ -540,7 +567,8 @@ const HELP_TEXT = [
   "Dạ Bee làm được mấy việc này ạ:",
   '• "Ai đang trực?" — xem CTV đã check-in ca này',
   '• "Báo cáo ca" — báo cáo hiệu suất (admin)',
-  '• "Case nào đang treo?" — case chưa xử lý (admin)',
+  '• "Case tồn nhóm QLL/HTKT" — case chưa xử lý (admin)',
+  '• "Tới ca chiều tag CTV ca chiều xử lý case tồn" — sau 13h30 Bee tự tag (admin)',
   "• Muốn dùng lệnh: gõ /help",
 ].join("\n");
 
@@ -678,6 +706,27 @@ async function respond(
       await sendHere(deps, message, isPrivate, deps.checkinSupabase ? `${lead(title)}\n\n${body}` : body);
       return true;
     }
+    case "hentag": {
+      if (!isAdmin) {
+        await sendHere(deps, message, isPrivate, `Dạ việc này em chỉ nhận từ admin thôi ạ ${title} 🥺`);
+        return true;
+      }
+      const scope = detectScope(foldVi(question));
+      const where = scope === "all" ? "QLL và HTKT" : scope.toUpperCase();
+      const r = await scheduleHandoff(deps.supabase, scope, message.from?.id ?? 0, now);
+      let text: string;
+      if (r === "sent") {
+        text = `Dạ hôm nay em tag CTV ca chiều xong rồi ạ ${title} 😊`;
+      } else if (r === "error") {
+        text = `Dạ em chưa ghi nhận được lịch này, ${title} thử lại sau nhé 🥺`;
+      } else if (handoffTimeNow(now) >= HANDOFF_START_H) {
+        text = `Dạ em ghi nhận rồi ạ, em sẽ tag CTV ca chiều xử lý case tồn ${where} trong ít phút nữa ạ 😊`;
+      } else {
+        text = `Dạ em ghi nhận rồi ạ, sau 13h30 em sẽ tag CTV ca chiều xử lý case tồn ${where} trong nhóm ạ 😊`;
+      }
+      await sendHere(deps, message, isPrivate, text);
+      return true;
+    }
     case "checkout": {
       const pool = CHECKOUT_REPLY;
       await sendHere(deps, message, isPrivate, pool[pickIndex(pool.length, undefined)].replace(/\{title\}/g, title));
@@ -714,5 +763,234 @@ async function respond(
       await sendHere(deps, message, isPrivate, reply);
       return true;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lịch tag CTV ca chiều xử lý case tồn (admin dặn, cron thực hiện)
+// ---------------------------------------------------------------------------
+// Lưu trong pending_batches (không cần bảng mới), admin_id = -(YYYYMMDD*10 + 5)
+// (báo cáo cuối ca dùng +1..+3, quota AI dùng +4). Mỗi ngày tối đa 1 lịch.
+// Sau 13h30, cron chiếm lịch (đổi pending -> sending nguyên tử), lấy CTV đã
+// check-in ca chiều, tag họ trong đúng nhóm kèm case tồn từ đầu ngày, rồi lưu
+// kết quả (sent). Quá 15h30 mà chưa tag được thì hết hạn và báo lại admin.
+
+export const HANDOFF_START_H = 13.5;
+const HANDOFF_EXPIRE_H = 15.5;
+const HANDOFF_STALE_MS = 3 * 60_000; // "sending" quá 3 phút coi như treo -> chiếm lại
+const QLL_CHAT_ID = -1002273179613;
+const HTKT_CHAT_ID = -1002458492731;
+
+interface HandoffState {
+  kind: "handoff";
+  day: string;
+  scope: CaseScope;
+  requestedBy: number;
+  requestedAt: string;
+  status: "pending" | "sending" | "sent" | "expired";
+  claimedAt?: number;
+  sentScopes: string[];
+  sentAt?: string;
+  ctvs?: string[];
+  counts?: { qll: number; htkt: number };
+  note?: string;
+}
+
+function handoffRowId(day: string): number {
+  return -(Number(day.replace(/-/g, "")) * 10 + 5);
+}
+
+export function handoffTimeNow(now: Date): number {
+  const vn = new Date(now.getTime() + VN_OFFSET_MS);
+  return vn.getUTCHours() + vn.getUTCMinutes() / 60;
+}
+
+function dayStartUtcIso(now: Date): string {
+  const vn = new Date(now.getTime() + VN_OFFSET_MS);
+  return new Date(
+    Date.UTC(vn.getUTCFullYear(), vn.getUTCMonth(), vn.getUTCDate(), -7, 0, 0)
+  ).toISOString();
+}
+
+async function readHandoff(supabase: SupabaseClient, day: string): Promise<HandoffState | null> {
+  const { data, error } = await supabase
+    .from("pending_batches")
+    .select("items")
+    .eq("admin_id", handoffRowId(day))
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  const it = data?.items as Partial<HandoffState> | undefined;
+  if (!it || it.kind !== "handoff" || it.day !== day) return null;
+  return it as HandoffState;
+}
+
+// Admin dặn tag. Trả: "ok" (đã ghi/cập nhật), "sent" (hôm nay tag xong rồi), "error".
+export async function scheduleHandoff(
+  supabase: SupabaseClient,
+  scope: CaseScope,
+  requestedBy: number,
+  now: Date
+): Promise<"ok" | "sent" | "error"> {
+  const day = vnDay(now);
+  try {
+    const cur = await readHandoff(supabase, day);
+    if (cur && cur.status === "sent") return "sent";
+    if (cur && cur.status === "sending") return "ok"; // đang tag, khỏi ghi đè
+    const next: HandoffState = {
+      kind: "handoff",
+      day,
+      scope,
+      requestedBy,
+      requestedAt: now.toISOString(),
+      status: "pending",
+      sentScopes: [],
+    };
+    const { error } = await supabase
+      .from("pending_batches")
+      .upsert({ admin_id: handoffRowId(day), items: next }, { onConflict: "admin_id" });
+    if (error) throw new Error(error.message);
+    return "ok";
+  } catch (e) {
+    console.error("scheduleHandoff lỗi:", e instanceof Error ? e.message : String(e));
+    return "error";
+  }
+}
+
+async function saveHandoff(supabase: SupabaseClient, state: HandoffState): Promise<void> {
+  await supabase
+    .from("pending_batches")
+    .upsert({ admin_id: handoffRowId(state.day), items: state }, { onConflict: "admin_id" });
+}
+
+// Chiếm lịch nguyên tử: chỉ 1 lần gọi cron thắng. Trả state đã chiếm hoặc null.
+async function claimHandoff(
+  supabase: SupabaseClient,
+  cur: HandoffState,
+  nowMs: number
+): Promise<HandoffState | null> {
+  const stale = cur.status === "sending" && nowMs - (cur.claimedAt ?? 0) > HANDOFF_STALE_MS;
+  if (cur.status !== "pending" && !stale) return null;
+  const next: HandoffState = { ...cur, status: "sending", claimedAt: nowMs };
+  const { data, error } = await supabase
+    .from("pending_batches")
+    .update({ items: next })
+    .eq("admin_id", handoffRowId(cur.day))
+    .eq("items->>status", cur.status)
+    .select("admin_id");
+  if (error) {
+    console.error("claimHandoff lỗi:", error.message);
+    return null;
+  }
+  return Array.isArray(data) && data.length > 0 ? next : null;
+}
+
+function scopeLabel(s: string): string {
+  return s === "qll" ? "QLL" : "HTKT";
+}
+
+// Chạy mỗi phút từ cron. Không bao giờ ném lỗi. Ngoài khung 13h30-15h30 (và khi
+// chưa có lịch) gần như không làm gì: chỉ 1 lần đọc DB trong khung giờ.
+export async function runHandoff(
+  telegram: TelegramClient,
+  supabase: SupabaseClient,
+  checkinClient: SupabaseClient | undefined,
+  nowMs: number = Date.now()
+): Promise<void> {
+  try {
+    const now = new Date(nowMs);
+    const t = handoffTimeNow(now);
+    if (t < HANDOFF_START_H || t >= 17) return;
+    if (!supabase || typeof supabase.from !== "function") return;
+
+    const cur = await readHandoff(supabase, vnDay(now));
+    if (!cur || (cur.status !== "pending" && cur.status !== "sending")) return;
+
+    if (t >= HANDOFF_EXPIRE_H) {
+      const exp: HandoffState = { ...cur, status: "expired", note: "quá giờ, chưa tag được" };
+      await saveHandoff(supabase, exp);
+      await telegram.sendMessage(
+        cur.requestedBy,
+        "Dạ em chưa tag được CTV ca chiều (chưa có ai check-in hoặc lỗi) nên đã hủy lịch hôm nay ạ 🥺"
+      );
+      return;
+    }
+
+    const claimed = await claimHandoff(supabase, cur, nowMs);
+    if (!claimed) return;
+
+    const ctvs = checkinClient ? await getCurrentShiftCheckins(checkinClient, now) : [];
+    if (ctvs.length === 0) {
+      // Chưa ai check-in ca chiều: trả về pending, phút sau thử lại.
+      await saveHandoff(supabase, { ...claimed, status: "pending", claimedAt: undefined });
+      return;
+    }
+
+    const since = dayStartUtcIso(now);
+    const tags = ctvs.map((u) => `@${u}`).join(" ");
+    const scopes: ("qll" | "htkt")[] =
+      claimed.scope === "all" ? ["qll", "htkt"] : [claimed.scope as "qll" | "htkt"];
+    const counts = { qll: 0, htkt: 0 };
+    const done = new Set(claimed.sentScopes);
+    let failed = false;
+
+    for (const s of scopes) {
+      if (done.has(s)) continue;
+      const [n, ...lines] = s === "qll" ? await pendingQll(supabase, since) : await pendingHtkt(supabase, since);
+      counts[s] = Number(n);
+      if (n === "0") {
+        done.add(s);
+        continue;
+      }
+      const text =
+        `${tags} ơi, sang ca chiều rồi, nhờ mình xử lý giúp các case tồn ${scopeLabel(s)} nhé 😊\n\n` +
+        `📋 Case tồn ${scopeLabel(s)}: ${n}\n${lines.join("\n")}`;
+      const res = await telegram.sendMessage(s === "qll" ? QLL_CHAT_ID : HTKT_CHAT_ID, text);
+      if (res.ok) done.add(s);
+      else failed = true;
+    }
+
+    if (failed) {
+      // Giữ lại phần đã gửi, phút sau thử lại phần còn thiếu.
+      await saveHandoff(supabase, {
+        ...claimed,
+        status: "pending",
+        claimedAt: undefined,
+        sentScopes: [...done],
+      });
+      return;
+    }
+
+    await saveHandoff(supabase, {
+      ...claimed,
+      status: "sent",
+      sentScopes: [...done],
+      sentAt: now.toISOString(),
+      ctvs,
+      counts,
+    });
+    const total = counts.qll + counts.htkt;
+    await telegram.sendMessage(
+      cur.requestedBy,
+      total === 0
+        ? "Dạ ca sáng không còn case tồn nên em không tag ai ạ 😊"
+        : `Dạ em đã tag ${ctvs.length} CTV ca chiều xử lý case tồn (QLL ${counts.qll}, HTKT ${counts.htkt}) rồi ạ 😊`
+    );
+  } catch (e) {
+    console.error("runHandoff lỗi:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// Mô tả lịch hôm nay cho AI đọc (để hỏi "Bee đã tag chưa").
+export async function describeHandoff(supabase: SupabaseClient, now: Date): Promise<string> {
+  try {
+    const h = await readHandoff(supabase, vnDay(now));
+    if (!h) return "";
+    if (h.status === "sent") {
+      return `Đã tag CTV ca chiều (${(h.ctvs ?? []).join(", ")}) xử lý case tồn: QLL ${h.counts?.qll ?? 0}, HTKT ${h.counts?.htkt ?? 0}.`;
+    }
+    if (h.status === "expired") return "Lịch tag CTV ca chiều hôm nay đã hết hạn, chưa tag được.";
+    return "Đã có lịch tag CTV ca chiều xử lý case tồn, đang chờ sau 13h30.";
+  } catch {
+    return "";
   }
 }

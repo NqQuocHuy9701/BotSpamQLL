@@ -42,6 +42,14 @@ describe("detectScope / case tồn theo nhóm", () => {
   });
 });
 
+describe("hentag", () => {
+  it("nhận câu dặn tag CTV ca chiều", () => {
+    expect(classifyByRules(foldVi("đến ca chiều bee tag CTV ca chiều xử lý case tồn QLL"))).toBe("hentag");
+    expect(classifyByRules(foldVi("sau 13h30 tag ctv ca chiều xử lý case tồn"))).toBe("hentag");
+    expect(classifyByRules(foldVi("case tồn nhóm QLL"))).toBe("casetreo");
+  });
+});
+
 describe("extractMention", () => {
   it("có tag", () => {
     const r = extractMention("@vh_messenger_bot ai đang trực?", "vh_messenger_bot");
