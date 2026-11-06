@@ -1757,7 +1757,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Hỏi về nhóm khác (\"nhóm Xếp lớp\", \"em ở những nhóm nào\", \"nhóm vừa tag em\") -> xem_cac_nhom / xem_nhom, không hỏi lại QLL hay HTKT.",
     "- Gửi/rep 1 tin bất kỳ vào nhóm nào đó -> gui_tin_nhom (theo tên, không cần ID; \"rep lại anh\" = tra_loi_cho \"admin\"). nhan_nhom CHỈ để nhắc case tồn ở QLL/HTKT, không dùng gửi tin thường.",
     "- TUYỆT ĐỐI không nói đã gửi/nhắn/tag nếu chưa gọi công cụ gửi và công cụ chưa báo thành công.",
-    "- Việc tự động đang chạy: form xin nghỉ ở QLL (đủ mẫu Tên/Code/Mã học sinh/GV dạy/giờ học + có \"xin nghỉ\") tự chuyển sang nhóm Cộng đồng VH - BGD; xem số lượng qua xem_cau_hinh. Ngoài việc này và hẹn tag ca chiều, em KHÔNG có cơ chế tự động nào khác: không được hứa \"em sẽ tự fw/chuyển/gửi\" các loại tin khác.",
+    "- Việc tự động đang chạy: mọi tin ở QLL có đủ form (Tên / Code / Mã học sinh + mã lớp + LỚP + Ngày vào lớp / GV dạy) — xin nghỉ, xin muộn, out sớm, phản ánh... — tự chuyển sang nhóm Cộng đồng VH - BGD; xem số lượng qua xem_cau_hinh. Ngoài việc này và hẹn tag ca chiều, em KHÔNG có cơ chế tự động nào khác: không được hứa \"em sẽ tự fw/chuyển/gửi\" các loại tin khác.",
     `Giờ VN: ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm, mọi người cùng thấy."}`,
     "Giọng: như đồng nghiệp nhắn tin, ngắn (1-2 câu), thân thiện, đổi cách nói cho tự nhiên. Không cần mở đầu bằng \"Dạ\" hay gọi tên ở mọi câu, không lặp lại câu hỏi. Tối đa 1 emoji, văn bản thuần, không markdown.",
     "Quy tắc:",
@@ -2725,9 +2725,7 @@ export function parseLeaveForm(text: string): LeaveForm | null {
   const iGv = idx(/^gv day\s*:\s*\S+\s*-\s*\S+/, iHs + 1);
   if (iGv < 0) return null;
 
-  // 5) Khung giờ học: HH:MM - HH:MM
-  const iTime = idx(/\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}/, iGv + 1);
-  if (iTime < 0) return null;
+  // 5) Khung giờ học: KHÔNG bắt buộc (admin chốt chỉ cần đủ K1-K6).
 
   const code = lines[iCode].replace(/^[^:]*:\s*/, "").trim();
   return { name, code, hs, cls: cls.toUpperCase() };
@@ -2741,9 +2739,10 @@ export function hasLeaveIntent(text: string): boolean {
     / (xin|bao) nghi /.test(f);
 }
 
+// Admin chốt: chuyển MỌI loại yêu cầu (xin nghỉ, xin muộn, out sớm, phản ánh...)
+// miễn đủ K1-K6 của form. hasLeaveIntent giữ lại để Bee nói được loại yêu cầu.
 export function isLeaveFormMessage(text: string): LeaveForm | null {
-  const p = parseLeaveForm(text);
-  return p && hasLeaveIntent(text) ? p : null;
+  return parseLeaveForm(text);
 }
 
 export const COMMUNITY_CHAT_ID = -1002556373370; // [BU VUIHOC VH] Cộng đồng VH - BGD
@@ -2762,7 +2761,8 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
     if (!form) return;
 
     const day = vnDay(new Date());
-    const key = `${form.hs}:${form.cls}`;
+    // Chống trùng theo TỪNG TIN (1 HS có thể vừa xin muộn vừa xin nghỉ trong ngày).
+    const key = `${message.message_id}`;
     const cur = await readRow<{ kind?: string; day?: string; keys?: string[]; count?: number }>(
       deps.supabase,
       LEAVE_ROW_ID
@@ -2806,7 +2806,9 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
       const r = await deps.telegram.sendMessage(COMMUNITY_CHAT_ID, `${text}\n\n(Chuyển từ QLL: ${link})`.slice(0, 4000));
       ok = r.ok;
     }
-    console.log(`[Bee FW] form xin nghỉ ${key} (${form.name}) -> Cộng đồng: ${ok ? "ok" : "lỗi"}`);
+    console.log(
+      `[Bee FW] form QLL #${key} HS ${form.hs} ${form.cls} (${form.name}) -> Cộng đồng: ${ok ? "ok" : "lỗi"}`
+    );
   } catch (e) {
     console.error("[Bee FW] lỗi (bỏ qua):", e instanceof Error ? e.message : String(e));
   }
@@ -2816,5 +2818,5 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
 export async function leaveForwardSummary(supabase: SupabaseClient, now: Date): Promise<string> {
   const cur = await readRow<{ kind?: string; day?: string; count?: number }>(supabase, LEAVE_ROW_ID);
   const n = cur?.kind === "leavefw" && cur.day === vnDay(now) ? cur.count ?? 0 : 0;
-  return `Form xin nghỉ QLL đã tự chuyển sang nhóm Cộng đồng VH - BGD hôm nay: ${n}.`;
+  return `Form QLL (đủ mẫu) đã tự chuyển sang nhóm Cộng đồng VH - BGD hôm nay: ${n}.`;
 }
