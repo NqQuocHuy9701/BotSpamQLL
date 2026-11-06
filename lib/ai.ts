@@ -746,6 +746,8 @@ async function handleAi(
   // Ghi nhận nhóm Bee đang ở (+ tin gần đây của nhóm ngoài QLL/HTKT). Fail-soft.
   if (message.chat.type === "group" || message.chat.type === "supergroup") {
     await observeGroup(deps.supabase, message, opts.now ?? new Date());
+    // Form xin nghỉ ở QLL -> tự chuyển vào nhóm Cộng đồng (không tốn lượt AI). Fail-soft.
+    await applyLeaveForward(deps, ai, message);
   }
   // Ảnh/tệp có chú thích: tag Bee trong caption vẫn được nhận.
   const text = (message.text ?? message.caption ?? "").trim();
@@ -777,10 +779,13 @@ async function handleAi(
     question = m.mentioned ? m.question : text;
   }
 
-  // Nội dung nhạy cảm (TK/MK, dãy số dài như SĐT): KHÔNG gửi lên AI.
-  // Admin: tra cứu thẳng trong DB bằng TypeScript (không tốn lượt AI) nếu có dãy
-  // số; không thì nhắc nhẹ. Người khác: im lặng như cũ.
-  if (isSensitive(question)) {
+  // Nội dung nhạy cảm (TK/MK, dãy số dài như SĐT): KHÔNG gửi nguyên văn lên AI.
+  // - Người khác: im lặng như cũ.
+  // - Admin, câu dài (dạy/nhờ việc, có dán form): CHE số/TK/MK rồi vẫn cho AI hiểu.
+  // - Admin, câu tra số ngắn: TypeScript tra thẳng DB (không tốn lượt AI).
+  if (isSensitive(question) && isAdmin && !isShortLookup(question)) {
+    question = redactForAi(question);
+  } else if (isSensitive(question)) {
     if (!isAdmin) return true;
     const digits = question.replace(/[\s.\-]/g, "").match(/\d{8,}/)?.[0];
     let text: string;
@@ -1752,6 +1757,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Hỏi về nhóm khác (\"nhóm Xếp lớp\", \"em ở những nhóm nào\", \"nhóm vừa tag em\") -> xem_cac_nhom / xem_nhom, không hỏi lại QLL hay HTKT.",
     "- Gửi/rep 1 tin bất kỳ vào nhóm nào đó -> gui_tin_nhom (theo tên, không cần ID; \"rep lại anh\" = tra_loi_cho \"admin\"). nhan_nhom CHỈ để nhắc case tồn ở QLL/HTKT, không dùng gửi tin thường.",
     "- TUYỆT ĐỐI không nói đã gửi/nhắn/tag nếu chưa gọi công cụ gửi và công cụ chưa báo thành công.",
+    "- Việc tự động đang chạy: form xin nghỉ ở QLL (đủ mẫu Tên/Code/Mã học sinh/GV dạy/giờ học + có \"xin nghỉ\") tự chuyển sang nhóm Cộng đồng VH - BGD; xem số lượng qua xem_cau_hinh. Ngoài việc này và hẹn tag ca chiều, em KHÔNG có cơ chế tự động nào khác: không được hứa \"em sẽ tự fw/chuyển/gửi\" các loại tin khác.",
     `Giờ VN: ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm, mọi người cùng thấy."}`,
     "Giọng: như đồng nghiệp nhắn tin, ngắn (1-2 câu), thân thiện, đổi cách nói cho tự nhiên. Không cần mở đầu bằng \"Dạ\" hay gọi tên ở mọi câu, không lặp lại câu hỏi. Tối đa 1 emoji, văn bản thuần, không markdown.",
     "Quy tắc:",
@@ -1929,7 +1935,7 @@ async function runTool(
       case "xem_ctv":
         return await ctvToday(deps.supabase, String(args.username ?? ""), now);
       case "xem_cau_hinh":
-        return await configSummary(deps.supabase, now);
+        return `${await configSummary(deps.supabase, now)}\n${await leaveForwardSummary(deps.supabase, now)}`;
       case "gui_tin_nhom": {
         let replyUser = String(args.tra_loi_cho ?? "").trim().replace(/^@/, "").toLowerCase();
         if (replyUser === "admin") replyUser = `id:${message.from?.id ?? 0}`;
@@ -2633,4 +2639,182 @@ export async function sendToGroup(
   const res = await deps.telegram.sendMessage(chatId, text, replyTo);
   if (!res.ok) return `Chưa gửi được vào nhóm "${g.title}" (Telegram từ chối, có thể bot không có quyền gửi tin).`;
   return `Đã gửi vào nhóm "${g.title}"${replyTo ? " (reply đúng tin)" : ""}${note}: "${text}"`;
+}
+
+// ---------------------------------------------------------------------------
+// Che dữ liệu nhạy cảm trước khi gửi AI (chỉ dùng cho tin của admin)
+// ---------------------------------------------------------------------------
+// Câu tra số ngắn ("tra case 0964517258") -> luồng TypeScript cũ.
+export function isShortLookup(q: string): boolean {
+  const s = q.trim();
+  return s.length <= 80 && !s.includes("\n");
+}
+
+// Che TK/MK + dãy số dài kiểu SĐT/STK (>= 8 chữ số). GIỮ mã lớp (TOAN.2026.1836),
+// mã HS ngắn, giờ học... để AI vẫn hiểu form.
+export function redactForAi(q: string): string {
+  return q
+    .replace(/(tk|mk|tài khoản|mật khẩu|password|pass)\s*[:：=]?\s*\S+/gi, "$1: [đã ẩn]")
+    .replace(/(?<![A-Za-z0-9_.])\+?\d[\d \-]{6,}\d(?![A-Za-z0-9_])/g, (m) =>
+      m.replace(/\D/g, "").length >= 8 ? "[số đã ẩn]" : m
+    );
+}
+
+
+// ---------------------------------------------------------------------------
+// FORM XIN NGHỈ (QLL) -> tự chuyển vào nhóm Cộng đồng. TypeScript, không tốn AI.
+// ---------------------------------------------------------------------------
+// Mẫu bắt buộc (đủ TẤT CẢ key, đúng thứ tự):
+//   [Tên học sinh]
+//   Code: [Dãy số]
+//   Mã học sinh: [Mã HS] [Mã lớp] | [Tên môn] | LỚP [Khối] | [Chương trình] | Ngày vào lớp: [Ngày]
+//   GV dạy: [Mã GV] - [Tên giáo viên]
+//   [Khung giờ học]
+
+// Bỏ dấu nhưng GIỮ dấu câu (":", "|", "-", "/") để kiểm cấu trúc.
+function foldKeep(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase();
+}
+
+export interface LeaveForm {
+  name: string;
+  code: string;
+  hs: string;
+  cls: string;
+}
+
+export function parseLeaveForm(text: string): LeaveForm | null {
+  const lines = (text ?? "")
+    .normalize("NFC")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  if (lines.length < 5) return null;
+
+  // 1) Dòng đầu: tên học sinh (chữ, không có ":", không bắt đầu bằng số).
+  const name = lines[0];
+  if (name.includes(":") || /^\d/.test(name) || !/\p{L}{2,}/u.test(name) || name.length > 60) return null;
+
+  const f = lines.map(foldKeep);
+  const idx = (re: RegExp, from: number) => {
+    for (let i = from; i < f.length; i++) if (re.test(f[i])) return i;
+    return -1;
+  };
+
+  // 2) Code: [Dãy số]
+  const iCode = idx(/^code\s*:\s*\d{3,}\s*$/, 1);
+  if (iCode < 0) return null;
+
+  // 3) Mã học sinh: [Mã HS] ... [Mã lớp] | [Môn] | LỚP [Khối] | [Chương trình] | Ngày vào lớp: [Ngày]
+  const iHs = idx(/^ma hoc sinh\s*:/, iCode + 1);
+  if (iHs < 0) return null;
+  const hsLine = f[iHs];
+  const hs = hsLine.match(/^ma hoc sinh\s*:\s*(\d{3,})/)?.[1];
+  const cls = lines[iHs].match(/[A-Za-z][A-Za-z_]*\.\d{4}\.\d{3,4}/)?.[0];
+  if (!hs || !cls) return null;
+  const parts = hsLine.split("|").map((p) => p.trim());
+  if (parts.length < 5) return null;
+  if (!parts.some((p) => /^lop\s+\S+/.test(p))) return null;
+  if (!/ngay vao lop\s*:\s*\d{1,2}\/\d{1,2}\/\d{4}/.test(hsLine)) return null;
+
+  // 4) GV dạy: [Mã GV] - [Tên giáo viên]
+  const iGv = idx(/^gv day\s*:\s*\S+\s*-\s*\S+/, iHs + 1);
+  if (iGv < 0) return null;
+
+  // 5) Khung giờ học: HH:MM - HH:MM
+  const iTime = idx(/\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}/, iGv + 1);
+  if (iTime < 0) return null;
+
+  const code = lines[iCode].replace(/^[^:]*:\s*/, "").trim();
+  return { name, code, hs, cls: cls.toUpperCase() };
+}
+
+// Có ý XIN NGHỈ (dòng Mã HS hoặc cuối tin). Chấp nhận lỗi gõ thường gặp ("nghri").
+// Bắt buộc vì QLL dùng CÙNG khung form cho cả xin muộn / out sớm / phản ánh.
+export function hasLeaveIntent(text: string): boolean {
+  const f = ` ${foldVi(text)} `;
+  return / (xin|bao|cho|duoc|phep) (cho )?(con |hs |em |be )?ngh?r?it?( hoc| buoi| ca| a| nhe|) /.test(f) ||
+    / (xin|bao) nghi /.test(f);
+}
+
+export function isLeaveFormMessage(text: string): LeaveForm | null {
+  const p = parseLeaveForm(text);
+  return p && hasLeaveIntent(text) ? p : null;
+}
+
+export const COMMUNITY_CHAT_ID = -1002556373370; // [BU VUIHOC VH] Cộng đồng VH - BGD
+const LEAVE_ROW_ID = -9105;
+const LEAVE_KEYS_MAX = 500;
+
+// Tin QLL là form xin nghỉ đủ mẫu -> chuyển vào nhóm Cộng đồng. Mỗi (ngày, mã HS,
+// mã lớp) chỉ chuyển 1 lần. Chiếm khóa TRƯỚC khi gửi để webhook lặp không gửi trùng.
+// Không bao giờ ném lỗi; không đụng luồng tracking/SLA của QLL.
+export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: TelegramMessage): Promise<void> {
+  try {
+    if (message.chat.id !== QLL_CHAT_ID || message.from?.is_bot) return;
+    const text = message.text ?? message.caption ?? "";
+    if (extractMention(text, ai.botUsername).mentioned) return; // tin ra lệnh cho Bee
+    const form = isLeaveFormMessage(text);
+    if (!form) return;
+
+    const day = vnDay(new Date());
+    const key = `${form.hs}:${form.cls}`;
+    const cur = await readRow<{ kind?: string; day?: string; keys?: string[]; count?: number }>(
+      deps.supabase,
+      LEAVE_ROW_ID
+    );
+    const sameDay = cur?.kind === "leavefw" && cur.day === day;
+    const keys = sameDay && Array.isArray(cur?.keys) ? cur!.keys! : [];
+    if (keys.includes(key)) {
+      console.log(`[Bee FW] bỏ qua form trùng ${key}`);
+      return;
+    }
+    const count = (sameDay ? cur?.count ?? 0 : 0) + 1;
+    await writeRow(deps.supabase, LEAVE_ROW_ID, {
+      kind: "leavefw",
+      day,
+      keys: [...keys, key].slice(-LEAVE_KEYS_MAX),
+      count,
+    });
+
+    let ok = false;
+    if (ai.botToken) {
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${ai.botToken}/forwardMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: COMMUNITY_CHAT_ID,
+            from_chat_id: message.chat.id,
+            message_id: message.message_id,
+          }),
+        });
+        const j = (await res.json()) as { ok?: boolean; description?: string };
+        ok = !!j.ok;
+        if (!ok) console.error(`[Bee FW] forwardMessage lỗi: ${j.description ?? res.status}`);
+      } catch (e) {
+        console.error("[Bee FW] forwardMessage lỗi:", e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (!ok) {
+      // Dự phòng (nhóm chặn chuyển tiếp / không có token): gửi bản sao kèm link gốc.
+      const link = `https://t.me/c/${QLL_LINK_ID}/${message.message_id}`;
+      const r = await deps.telegram.sendMessage(COMMUNITY_CHAT_ID, `${text}\n\n(Chuyển từ QLL: ${link})`.slice(0, 4000));
+      ok = r.ok;
+    }
+    console.log(`[Bee FW] form xin nghỉ ${key} (${form.name}) -> Cộng đồng: ${ok ? "ok" : "lỗi"}`);
+  } catch (e) {
+    console.error("[Bee FW] lỗi (bỏ qua):", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// Số form xin nghỉ đã chuyển hôm nay (cho Bee trả lời admin).
+export async function leaveForwardSummary(supabase: SupabaseClient, now: Date): Promise<string> {
+  const cur = await readRow<{ kind?: string; day?: string; count?: number }>(supabase, LEAVE_ROW_ID);
+  const n = cur?.kind === "leavefw" && cur.day === vnDay(now) ? cur.count ?? 0 : 0;
+  return `Form xin nghỉ QLL đã tự chuyển sang nhóm Cộng đồng VH - BGD hôm nay: ${n}.`;
 }

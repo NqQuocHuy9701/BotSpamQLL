@@ -676,3 +676,110 @@ describe("Gửi tin vào nhóm theo tên + chặn báo 'đã gửi' sai (lỗi t
     expect(claimsSent("Hôm nay QLL còn 1 case ạ")).toBe(false);
   });
 });
+
+import { parseLeaveForm, hasLeaveIntent, isLeaveFormMessage, applyLeaveForward, COMMUNITY_CHAT_ID, redactForAi } from "../lib/ai.js";
+import { afterEach } from "vitest";
+
+describe("Form xin nghỉ QLL -> tự chuyển nhóm Cộng đồng", () => {
+  const QLL = -1002273179613;
+  const FORM = [
+    "Nguyễn Minh Tuấn",
+    "Code: 4756684",
+    "Mã học sinh: 210150 xin nghỉ TOAN.2026.1836 | TOÁN 8 | LỚP 1-1 | NỀN TẢNG 2 Đang học | Ngày vào lớp: 11/10/2026",
+    "GV dạy: M562 - Mai Thị Ánh Ly",
+    "20:30 - 21:30 (T3) 20:30 - 21:30 (CN)",
+    "Đã học: 16/24 (buổi)",
+  ].join("\n");
+  const FORM_TAIL = FORM.replace(" xin nghỉ ", "  ") + "\n#VH hs xin nghỉ buổi hôm nay ạ";
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("đủ mẫu + xin nghỉ (ở dòng Mã HS hoặc cuối tin) -> nhận", () => {
+    expect(isLeaveFormMessage(FORM)).toMatchObject({ hs: "210150", cls: "TOAN.2026.1836", name: "Nguyễn Minh Tuấn" });
+    expect(isLeaveFormMessage(FORM_TAIL)).not.toBeNull();
+    expect(hasLeaveIntent("#vh hs xin nghri ạ")).toBe(true);
+    expect(hasLeaveIntent("#vh hs xin nghit ạ")).toBe(true);
+  });
+
+  it("đủ mẫu nhưng là xin muộn / out sớm / phản ánh -> KHÔNG chuyển", () => {
+    for (const tail of ["#VH xin muộn", "#VH xin out lớp sớm", "#VH PH phản ánh gv nói nhỏ quá", "#VH xin phép làm bù BTVN"]) {
+      const t = FORM.replace(" xin nghỉ ", "  ") + "\n" + tail;
+      expect(parseLeaveForm(t)).not.toBeNull();
+      expect(isLeaveFormMessage(t)).toBeNull();
+    }
+  });
+
+  it.each([
+    ["thiếu tên dòng đầu", FORM.split("\n").slice(1).join("\n")],
+    ["thiếu Code", FORM.replace("Code: 4756684\n", "")],
+    ["thiếu mã lớp", FORM.replace("TOAN.2026.1836", "TOAN")],
+    ["thiếu LỚP", FORM.replace("| LỚP 1-1 ", "")],
+    ["thiếu Ngày vào lớp", FORM.replace("| Ngày vào lớp: 11/10/2026", "")],
+    ["thiếu GV dạy", FORM.replace("GV dạy: M562 - Mai Thị Ánh Ly\n", "")],
+    ["thiếu khung giờ", FORM.replace("20:30 - 21:30 (T3) 20:30 - 21:30 (CN)\n", "")],
+    ["chỉ là câu nói", "Đào Nguyễn Linh Đan\nCode: 11702182\nMã học sinh: 210612\nlớp 1:1 qll có lên phiếu nghỉ tối nay"],
+  ])("%s -> KHÔNG nhận", (_n, t) => {
+    expect(isLeaveFormMessage(t)).toBeNull();
+  });
+
+  function run(text: string, chatId = QLL, store?: Map<number, unknown>, fwOk = true) {
+    const db = fakeDb(store ? Object.fromEntries(store) : {});
+    const fwCalls: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: any) => {
+      fwCalls.push({ url, body: JSON.parse(init.body) });
+      return { json: async () => (fwOk ? { ok: true } : { ok: false, description: "forbidden" }), status: 200 };
+    }));
+    const sent: any[] = [];
+    const deps: any = { telegram: { sendMessage: async (c: number, t: string) => (sent.push({ c, t }), { ok: true }) }, supabase: db.db };
+    const ai = { ...loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, botToken: "T" };
+    const message: any = { message_id: 555, chat: { id: chatId, type: "supergroup" }, from: { id: 9 }, text };
+    return { go: () => applyLeaveForward(deps, ai, message), fwCalls, sent, store: db.store };
+  }
+
+  it("form ở QLL -> forwardMessage đúng nhóm Cộng đồng, 1 lần", async () => {
+    const r = run(FORM);
+    await r.go();
+    expect(r.fwCalls).toHaveLength(1);
+    expect(r.fwCalls[0].url).toContain("/forwardMessage");
+    expect(r.fwCalls[0].body).toEqual({ chat_id: COMMUNITY_CHAT_ID, from_chat_id: QLL, message_id: 555 });
+    // gửi lại cùng form (webhook lặp / QLL gửi lại) -> không chuyển nữa
+    const again = run(FORM, QLL, r.store);
+    await again.go();
+    expect(again.fwCalls).toHaveLength(0);
+  });
+
+  it("form ở nhóm KHÁC QLL -> không chuyển", async () => {
+    const r = run(FORM, -1002458492731);
+    await r.go();
+    expect(r.fwCalls).toHaveLength(0);
+  });
+
+  it("tin xin muộn ở QLL -> không chuyển", async () => {
+    const r = run(FORM.replace(" xin nghỉ ", "  ") + "\n#VH xin muộn");
+    await r.go();
+    expect(r.fwCalls).toHaveLength(0);
+  });
+
+  it("forward bị chặn -> gửi bản sao kèm link tin gốc", async () => {
+    const r = run(FORM, QLL, undefined, false);
+    await r.go();
+    expect(r.sent).toHaveLength(1);
+    expect(r.sent[0].c).toBe(COMMUNITY_CHAT_ID);
+    expect(r.sent[0].t).toContain("https://t.me/c/2273179613/555");
+  });
+
+  it("che dữ liệu nhạy cảm cho AI nhưng GIỮ mã lớp", () => {
+    const r = redactForAi("SĐT 0964 517 258, mk: abc123, lớp TOAN.2026.1836, Code: 4756684");
+    expect(r).toContain("[số đã ẩn]");
+    expect(r).toContain("mk: [đã ẩn]");
+    expect(r).toContain("TOAN.2026.1836");
+    expect(r).toContain("4756684");
+    expect(r).not.toContain("0964");
+  });
+
+  it("admin dán form + nhờ việc: không bị đẩy vào luồng tra số, AI được đọc (đã che số)", async () => {
+    const t = setup([say("Dạ em hiểu rồi ạ")]);
+    await t.run(FORM + "\n\nCác tin dạng form như thế này em fw vào nhóm Cộng đồng được không");
+    expect(t.f).toHaveBeenCalledTimes(1);
+    expect(t.sent[0].text).not.toContain("Em tra theo");
+  });
+});
