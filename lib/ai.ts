@@ -80,6 +80,7 @@ export interface AiConfig {
   model: string;
   agentModel: string; // model trò chuyện 2 chiều + công cụ (admin)
   maxCompletionTokens: number; // trần output mỗi lần gọi (gồm cả suy luận ngắn)
+  botToken?: string; // chỉ để hiện "đang nhập..." (sendChatAction) khi chờ AI
   botUsername: string; // không có @, lowercase
   dailyCap: number;
   timeoutMs: number;
@@ -92,6 +93,26 @@ export interface AiDeps {
   supabase: SupabaseClient;
   checkinSupabase?: SupabaseClient;
   ai?: AiConfig;
+}
+
+// Hiện "Tiểu Bee đang nhập..." trong lúc chờ AI. Telegram tự tắt sau ~5s hoặc khi
+// bot gửi tin, nên nhắc lại mỗi 4s. Không tốn lượt Groq; lỗi thì bỏ qua (chỉ là
+// hiệu ứng). Trả hàm dừng. Không có botToken -> không làm gì.
+export function startTyping(ai: AiConfig, message: TelegramMessage): () => void {
+  if (!ai.botToken) return () => {};
+  const body: Record<string, unknown> = { chat_id: message.chat.id, action: "typing" };
+  if (message.message_thread_id !== undefined) body.message_thread_id = message.message_thread_id;
+  const url = `https://api.telegram.org/bot${ai.botToken}/sendChatAction`;
+  const ping = () => {
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(() => {});
+  };
+  ping();
+  const timer = setInterval(ping, 4000);
+  return () => clearInterval(timer);
 }
 
 function clampInt(v: string | undefined, def: number, lo: number, hi: number): number {
@@ -117,6 +138,7 @@ export function loadAiConfig(
     // webhook Vercel ~10s -> mỗi lần gọi AI tối đa GROQ_TIMEOUT ms (1000-8000)
     timeoutMs: clampInt(env.GROQ_TIMEOUT, 5000, 1000, 8000),
     maxCompletionTokens: clampInt(env.GROQ_MAX_COMPLETION_TOKENS, 300, 100, 800),
+    botToken: (env.BOT_TOKEN ?? "").trim() || undefined,
   };
 }
 
@@ -749,7 +771,13 @@ async function handleAi(
     const g = await gate(deps.supabase, from.id, true, false, ai.dailyCap, now);
     if (g === "ok") {
       const title = await resolveTitle(deps.supabase, from.username);
-      const answer = await runAgent(deps, ai, message, isPrivate, question, title, now);
+      const stopTyping = startTyping(ai, message);
+      let answer: string | null;
+      try {
+        answer = await runAgent(deps, ai, message, isPrivate, question, title, now);
+      } finally {
+        stopTyping();
+      }
       if (answer !== null) {
         await appendHistory(deps.supabase, convKey(message), question, [answer], now.getTime());
         return true;
@@ -836,8 +864,14 @@ async function respond(
     isAdmin && message.from ? await loadHistory(deps.supabase, convKey(message), now.getTime()) : [];
 
   if (intent === null) {
-    const context = await buildContext(deps, isAdmin, now);
-    const r = await callGroq(ai, question, title, context, notes, history);
+    const stopTyping = startTyping(ai, message);
+    let r: Awaited<ReturnType<typeof callGroq>>;
+    try {
+      const context = await buildContext(deps, isAdmin, now);
+      r = await callGroq(ai, question, title, context, notes, history);
+    } finally {
+      stopTyping();
+    }
     if (!r) {
       await sendHere(deps, message, isPrivate, FALLBACK_BUSY.replace("{title}", title));
       return true;

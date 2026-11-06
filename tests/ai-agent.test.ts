@@ -198,3 +198,52 @@ describe("Lỗi & hạn mức: không gọi AI lặp lại, báo bận thân thi
     expect(t.sent[0].text).toMatch(busy);
   });
 });
+
+describe("Hiệu ứng 'đang nhập...' khi chờ AI", () => {
+  function setupTyping(queue: FakeRes[], botToken?: string) {
+    const typing = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal("fetch", typing);
+    const t = setup(queue);
+    const { db } = fakeDb();
+    const { f } = fakeFetch(queue);
+    const sent: string[] = [];
+    const deps: any = {
+      telegram: { sendMessage: async (_c: number, text: string) => (sent.push(text), { ok: true }) },
+      supabase: db,
+      ai: { ...loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, fetchImpl: f as any, botToken },
+    };
+    const run = (text: string) =>
+      maybeHandleAi(
+        { message_id: 1, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN }, text } as any,
+        deps,
+        [ADMIN],
+        { now: NOW, rng: () => 0 }
+      );
+    void t;
+    return { run, typing, f, sent };
+  }
+
+  it("có token: gửi sendChatAction typing đúng chat trước khi gọi AI", async () => {
+    const t = setupTyping([say("Ổn anh ơi")], "TOKEN");
+    await t.run("hôm nay thế nào em");
+    expect(t.typing).toHaveBeenCalled();
+    const [url, init] = t.typing.mock.calls[0] as unknown as [string, { body: string }];
+    expect(url).toContain("/botTOKEN/sendChatAction");
+    expect(JSON.parse(init.body)).toEqual({ chat_id: ADMIN, action: "typing" });
+    expect(t.f).toHaveBeenCalledTimes(1); // không ảnh hưởng số lần gọi Groq
+    vi.unstubAllGlobals();
+  });
+  it("câu xử lý bằng TypeScript (không gọi AI): không typing", async () => {
+    const t = setupTyping([], "TOKEN");
+    await t.run("ai đang trực");
+    expect(t.typing).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+  it("không có token: không typing, vẫn trả lời bình thường", async () => {
+    const t = setupTyping([say("Ổn anh ơi")]);
+    await t.run("hôm nay thế nào em");
+    expect(t.typing).not.toHaveBeenCalled();
+    expect(t.sent).toEqual(["Ổn anh ơi"]);
+    vi.unstubAllGlobals();
+  });
+});
