@@ -847,8 +847,10 @@ async function handleAi(
       }
       // Hết hạn mức token/phút: nói rõ cần đợi bao lâu, thay vì "bận" chung chung.
       const busy =
-        rateHintSec > 0
-          ? `Em đang chạm giới hạn miễn phí của Groq theo phút, ${title} đợi khoảng ${Math.min(rateHintSec, 60)} giây rồi nhắn lại giúp em nhé 🥺`
+        dailyHintMin > 0
+          ? `Hôm nay em dùng hết hạn mức miễn phí theo ngày của Groq rồi ạ, khoảng ${fmtWait(dailyHintMin * 60)} nữa em mới trả lời được. Các lệnh / và báo cáo, case tồn vẫn dùng bình thường nhé 🥺`
+          : rateHintSec > 0
+          ? `Em đang chạm giới hạn miễn phí của Groq theo phút, ${title} đợi khoảng ${fmtWait(rateHintSec)} rồi nhắn lại giúp em nhé 🥺`
           : FALLBACK_BUSY.replace("{title}", title);
       await sendHere(deps, message, isPrivate, busy);
       return true;
@@ -1563,6 +1565,48 @@ const AGENT_MAX_ROUNDS = 3; // thường 1 (trò chuyện) hoặc 2 (gọi công
 // "1m2.5s", "450ms") sau mỗi lần gọi. Dùng để không gửi request chắc chắn bị 429.
 let tpmState: { rem: number; resetAt: number } | null = null;
 let rateHintSec = 0; // > 0: lượt này dừng vì hạn mức phút, cần đợi ~N giây
+let dailyHintMin = 0; // > 0: lượt này dừng vì HẾT hạn mức NGÀY (cả 2 model), đợi ~N phút
+
+// Model hết hạn mức ngày -> chặn tới mốc Groq báo (bộ nhớ instance).
+const modelBlockedUntil = new Map<string, number>();
+
+// Đọc nội dung lỗi 429 của Groq, vd:
+// "Rate limit reached for model `openai/gpt-oss-120b` ... on tokens per day (TPD):
+//  Limit 200000, Used 199500, Requested 2100. Please try again in 12m3.5s."
+export function parse429(text: string): { daily: boolean; waitMs: number } {
+  const t = text ?? "";
+  const daily = /per day|\(TPD\)|\(RPD\)/i.test(t);
+  const m = t.match(/try again in\s+([0-9hms.]+)/i);
+  return { daily, waitMs: m ? parseDurationMs(m[1]) : 0 };
+}
+
+// Model chính trước; hết hạn mức ngày thì dùng model dự phòng (ai.model). null = cả 2 đều hết.
+export function pickModel(ai: AiConfig, nowMs: number): string | null {
+  for (const m of [ai.agentModel, ai.model]) {
+    if ((modelBlockedUntil.get(m) ?? 0) <= nowMs) return m;
+  }
+  return null;
+}
+
+function blockedForMs(ai: AiConfig, nowMs: number): number {
+  const ends = [ai.agentModel, ai.model].map((m) => (modelBlockedUntil.get(m) ?? 0) - nowMs);
+  return Math.max(0, Math.min(...ends));
+}
+
+// "45 giây" / "12 phút" / "2 giờ 5 phút" — không cắt trần, nói đúng thời gian thật.
+export function fmtWait(sec: number): string {
+  const s = Math.max(1, Math.round(sec));
+  if (s < 60) return `${s} giây`;
+  const min = Math.ceil(s / 60);
+  if (min < 60) return `${min} phút`;
+  const h = Math.floor(min / 60);
+  return min % 60 ? `${h} giờ ${min % 60} phút` : `${h} giờ`;
+}
+
+// Chỉ dùng trong test.
+export function resetModelBlocksForTest(): void {
+  modelBlockedUntil.clear();
+}
 
 export function parseDurationMs(s: string): number {
   const t = (s ?? "").trim();
@@ -1718,19 +1762,26 @@ async function agentCall(
   for (let attempt = 0; attempt < 2; attempt++) {
     const left = deadline - Date.now();
     if (left < 800) return null;
+    // Chọn model: model chính hết hạn mức NGÀY -> dùng model dự phòng (hạn mức riêng).
+    const model = pickModel(ai, Date.now());
+    if (!model) {
+      dailyHintMin = Math.max(1, Math.ceil(blockedForMs(ai, Date.now()) / 60_000));
+      console.error(`[Bee AI] cả 2 model đều hết hạn mức ngày, còn ~${dailyHintMin} phút`);
+      return null;
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.min(left, ai.timeoutMs));
     const t0 = Date.now();
     try {
       const body: Record<string, unknown> = {
-        model: ai.agentModel,
+        model,
         messages,
         tools: AGENT_TOOLS,
         tool_choice: allowTools ? "auto" : "none",
         temperature: 0.6,
         max_completion_tokens: ai.maxCompletionTokens,
       };
-      if (/gpt-oss|qwen/i.test(ai.agentModel)) {
+      if (/gpt-oss|qwen/i.test(model)) {
         body.reasoning_effort = "low";
         body.include_reasoning = false;
       }
@@ -1757,16 +1808,30 @@ async function agentCall(
           signal: controller.signal,
         });
       } catch (e) {
-        if (sb) await recordGroqCall(sb, { status: 0, model: ai.agentModel });
+        if (sb) await recordGroqCall(sb, { status: 0, model: model });
         throw e;
       }
       noteTpm(res.headers, Date.now());
-      if (sb && !res.ok) await recordGroqCall(sb, { status: res.status, model: ai.agentModel, headers: res.headers });
+      if (sb && !res.ok) await recordGroqCall(sb, { status: res.status, model, headers: res.headers });
       if (res.status === 429) {
-        // Groq báo phải đợi: retry-after (giây) hoặc x-ratelimit-reset-tokens ("7.66s").
+        // Đọc lỗi để biết hết hạn mức NGÀY hay PHÚT (Groq không trả hạn mức ngày trong header).
+        const errText = await res.text().catch(() => "");
+        const info = parse429(errText);
         const ra = Number(res.headers?.get?.("retry-after") ?? "") * 1000;
-        const wait = ra > 0 ? ra : parseDurationMs(res.headers?.get?.("x-ratelimit-reset-tokens") ?? "");
-        console.error(`[Bee AI] 429 rate limit (đợi ${wait || "?"}ms, lần ${attempt + 1})`);
+        const wait =
+          info.waitMs || (ra > 0 ? ra : parseDurationMs(res.headers?.get?.("x-ratelimit-reset-tokens") ?? ""));
+        console.error(
+          `[Bee AI] 429 ${info.daily ? "HẾT HẠN MỨC NGÀY" : "theo phút"} model=${model} (đợi ${wait || "?"}ms, lần ${
+            attempt + 1
+          }) ${errText.slice(0, 160)}`
+        );
+        if (info.daily) {
+          modelBlockedUntil.set(model, Date.now() + (wait || 30 * 60_000));
+          // Còn model dự phòng chưa bị chặn -> thử ngay bằng model đó.
+          if (attempt === 0 && pickModel(ai, Date.now())) continue;
+          dailyHintMin = Math.max(1, Math.ceil(blockedForMs(ai, Date.now()) / 60_000));
+          return null;
+        }
         // Groq nói rõ cần đợi <= 6s và còn kịp thời gian webhook: chờ rồi thử lại 1 lần.
         // Không rõ thời gian đợi: KHÔNG đoán thử lại (tốn lượt), báo admin.
         if (attempt === 0 && wait > 0 && wait <= 6000 && Date.now() + wait + 1500 < deadline) {
@@ -1796,7 +1861,7 @@ async function agentCall(
       if (sb) {
         await recordGroqCall(sb, {
           status: res.status,
-          model: ai.agentModel,
+          model: model,
           tokIn: data.usage?.prompt_tokens,
           tokOut: data.usage?.completion_tokens,
           headers: res.headers,
@@ -1804,7 +1869,7 @@ async function agentCall(
       }
       // Theo dõi quota qua log Vercel: token mỗi lần gọi + phần còn lại theo header.
       console.log(
-        `[Bee AI] ok model=${ai.agentModel} ${Date.now() - t0}ms in=${data.usage?.prompt_tokens ?? "?"} out=${
+        `[Bee AI] ok model=${model} ${Date.now() - t0}ms in=${data.usage?.prompt_tokens ?? "?"} out=${
           data.usage?.completion_tokens ?? "?"
         } còn_req_ngày=${res.headers?.get?.("x-ratelimit-remaining-requests") ?? "?"} còn_tok_phút=${
           res.headers?.get?.("x-ratelimit-remaining-tokens") ?? "?"
@@ -1973,6 +2038,7 @@ export async function runAgent(
 ): Promise<string | null> {
   const deadline = Date.now() + AGENT_DEADLINE_MS;
   rateHintSec = 0;
+  dailyHintMin = 0;
   const ctx = {
     deps,
     message,
@@ -2335,6 +2401,12 @@ export async function buildQuotaReport(supabase: SupabaseClient, ai: AiConfig, n
     );
   }
   lines.push(`• Trần riêng của Bee: ${beeCount}/${ai.dailyCap} tin nhắn cần AI`);
+  const nowMs = now.getTime();
+  for (const m of [ai.agentModel, ai.model]) {
+    const left = (modelBlockedUntil.get(m) ?? 0) - nowMs;
+    if (left > 0) lines.push(`• ${m}: HẾT hạn mức token/ngày, dùng lại sau ~${fmtWait(left / 1000)}`);
+  }
+  lines.push(`• Hạn mức ngày (Groq không báo qua header): ~200.000 token/ngày cho mỗi model; hết model chính em tự chuyển sang ${ai.model}.`);
   lines.push("• Vercel, Supabase: em chưa có quyền đọc, anh xem ở trang Usage của từng hệ thống nhé.");
   if (pct >= 80 || u.rate429 > 0) {
     lines.push("Lưu ý: sắp chạm hạn mức hoặc đã bị giới hạn, Bee có thể trả lời chậm hoặc báo bận.");

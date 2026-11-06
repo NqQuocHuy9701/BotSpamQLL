@@ -907,3 +907,67 @@ describe("Báo bận do hạn mức token/phút (lỗi thực tế: 5 lần 429)
     expect(t.sent).toHaveLength(1);
   });
 });
+
+import { parse429, pickModel, fmtWait, resetModelBlocksForTest } from "../lib/ai.js";
+
+describe("Hết hạn mức NGÀY của Groq (lỗi thực tế: token/phút còn 8000 vẫn 429)", () => {
+  beforeEach(() => resetModelBlocksForTest());
+  const TPD =
+    "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_x` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199500, Requested 2100. Please try again in 12m3.5s.";
+  const TPM = "Rate limit reached ... on tokens per minute (TPM): Limit 8000, Used 7000, Requested 2000. Please try again in 7.5s.";
+
+  it("parse429 phân biệt ngày / phút và đọc đúng thời gian chờ", () => {
+    expect(parse429(TPD)).toEqual({ daily: true, waitMs: 723500 });
+    expect(parse429(TPM)).toEqual({ daily: false, waitMs: 7500 });
+    expect(parse429("")).toEqual({ daily: false, waitMs: 0 });
+  });
+
+  it("fmtWait nói đúng thời gian, không cắt trần 60 giây", () => {
+    expect(fmtWait(45)).toBe("45 giây");
+    expect(fmtWait(723.5)).toBe("13 phút");
+    expect(fmtWait(7500)).toBe("2 giờ 5 phút");
+  });
+
+  it("120b hết hạn mức ngày -> tự chuyển sang 20b và trả lời được", async () => {
+    const t = setup([{ status: 429, body: TPD }, say("Dạ QLL chưa có case mới ạ")]);
+    await t.run("có case nào mới trong nhóm qll không em");
+    expect(t.bodies.map((b) => b.model)).toEqual(["openai/gpt-oss-120b", "openai/gpt-oss-20b"]);
+    expect(t.sent.at(-1)!.text).toBe("Dạ QLL chưa có case mới ạ");
+  });
+
+  it("lượt sau: không gọi lại 120b đang bị chặn, dùng thẳng 20b", async () => {
+    const a = setup([{ status: 429, body: TPD }, say("ok")]);
+    await a.run("hôm nay thế nào em");
+    const b = setup([say("Vẫn ổn ạ")]);
+    await b.run("còn gì nữa không em");
+    expect(b.bodies.map((x) => x.model)).toEqual(["openai/gpt-oss-20b"]);
+  });
+
+  it("cả 2 model hết hạn mức ngày -> báo đúng số phút, các lệnh khác vẫn dùng được", async () => {
+    const t = setup([
+      { status: 429, body: TPD },
+      { status: 429, body: TPD.replace("gpt-oss-120b", "gpt-oss-20b").replace("12m3.5s", "40m") },
+    ]);
+    await t.run("có case nào mới không em");
+    expect(t.f).toHaveBeenCalledTimes(2);
+    expect(t.sent.at(-1)!.text).toMatch(/hết hạn mức miễn phí theo ngày.*13 phút/);
+    // lượt sau: không gọi Groq nữa
+    const u = setup([]);
+    await u.run("hôm nay thế nào em");
+    expect(u.f).not.toHaveBeenCalled();
+    expect(u.sent.at(-1)!.text).toContain("hết hạn mức miễn phí theo ngày");
+    // câu xem đơn giản vẫn chạy bằng TypeScript
+    const v = setup([]);
+    await v.run("case tồn nhóm HTKT");
+    expect(v.sent).toHaveLength(1);
+    expect(v.sent[0].text).not.toContain("hạn mức");
+  });
+
+  it("429 theo phút vẫn xử lý như cũ (không chặn model)", async () => {
+    const t = setup([{ status: 429, body: TPM, headers: { "retry-after": "30" } }]);
+    await t.run("hôm nay thế nào em");
+    const ai = loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!;
+    expect(pickModel(ai, Date.now())).toBe("openai/gpt-oss-120b");
+    expect(t.sent[0].text).toContain("theo phút");
+  });
+});
