@@ -78,6 +78,7 @@ function lead(title: string, rng: () => number = Math.random): string {
 export interface AiConfig {
   apiKey: string;
   model: string;
+  agentModel: string; // model trò chuyện 2 chiều + công cụ (admin)
   botUsername: string; // không có @, lowercase
   dailyCap: number;
   timeoutMs: number;
@@ -102,6 +103,7 @@ export function loadAiConfig(
   return {
     apiKey,
     model: (env.GROQ_MODEL ?? "").trim() || DEFAULT_MODEL,
+    agentModel: (env.GROQ_AGENT_MODEL ?? "").trim() || "openai/gpt-oss-120b",
     botUsername: ((env.BOT_USERNAME ?? "").trim() || DEFAULT_BOT_USERNAME)
       .replace(/^@/, "")
       .toLowerCase(),
@@ -720,6 +722,20 @@ async function handleAi(
   const folded = foldVi(question);
 
   // Lệnh bộ nhớ (dạy/xem/quên) chỉ dành cho admin; người khác đi luồng thường.
+  // ADMIN: trò chuyện 2 chiều tự nhiên với "bộ não" (AI + công cụ + trí nhớ),
+  // kể cả dạy/xem/quên. Lỗi/hết lượt -> rơi xuống luồng cũ (luật từ khóa).
+  if (isAdmin) {
+    const g = await gate(deps.supabase, from.id, true, false, ai.dailyCap, now);
+    if (g === "ok") {
+      const title = await resolveTitle(deps.supabase, from.username);
+      const answer = await runAgent(deps, ai, message, isPrivate, question, title, now);
+      if (answer !== null) {
+        await appendHistory(deps.supabase, from.id, question, [answer], now.getTime());
+        return true;
+      }
+    }
+  }
+
   let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
   if (intent === null) intent = classifyByRules(folded);
   let canned: string | null = null;
@@ -1270,7 +1286,7 @@ const NOTES_ROW_ID = -9101;
 const HISTORY_ROW_ID = -9102;
 const MAX_NOTES = 20;
 const MAX_NOTE_CHARS = 300;
-const HISTORY_TURNS = 6; // 3 cặp hỏi-đáp
+const HISTORY_TURNS = 10; // 5 cặp hỏi-đáp
 const HISTORY_TTL_MS = 2 * 60 * 60 * 1000; // quá 2 giờ thì quên mạch cũ
 
 export async function loadNotes(supabase: SupabaseClient): Promise<string[]> {
@@ -1387,4 +1403,371 @@ export async function writeNudge(
   const r = await callGroqOnce(ai, system, `Yêu cầu của admin: ${request}`, history);
   const text = r?.reply?.trim() ?? "";
   return text.length >= 5 ? text : null;
+}
+
+// ===========================================================================
+// BỘ NÃO BEE (admin): trò chuyện 2 chiều + công cụ (tool calling) + tự học
+// ===========================================================================
+// AI tự nói chuyện; cần số liệu/hành động thì gọi công cụ, code thực thi rồi
+// trả kết quả cho AI viết câu trả lời. Số liệu luôn lấy từ DB qua công cụ.
+// Admin dạy điều gì (cách nói, quy tắc, thông tin team) -> AI tự gọi ghi_nho.
+// Trả câu trả lời cuối (đã gửi) hoặc null nếu lỗi (để rơi về luồng cũ).
+
+const AGENT_MAX_ROUNDS = 4;
+const AGENT_DEADLINE_MS = 8500; // chừa chỗ cho webhook Vercel
+
+type AgentMsg =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string; tool_calls?: ToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string };
+interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+const NHOM = { type: "string", enum: ["qll", "htkt", "all"], description: "qll, htkt hoặc all (cả hai)" };
+const AGENT_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "xem_so_lieu",
+      description: "Số liệu case hôm nay theo nhóm: tổng, đã xử lý, còn tồn + vài mã tồn. Dùng để trả lời bằng lời.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "xem_bao_cao_ca",
+      description: "Báo cáo ca hiện tại: từng CTV xử lý bao nhiêu case (tim, reply, QLL, HTKT).",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "xem_checkin",
+      description: "Danh sách CTV đã check-in ca hiện tại.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "gui_danh_sach",
+      description:
+        "Gửi vào cuộc trò chuyện này bản đầy đủ (bảng/danh sách có link). Dùng khi admin muốn XEM danh sách case tồn, bảng báo cáo hoặc danh sách check-in.",
+      parameters: {
+        type: "object",
+        properties: {
+          loai: { type: "string", enum: ["case_ton", "bao_cao", "checkin"] },
+          nhom: NHOM,
+        },
+        required: ["loai"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "nhan_nhom",
+      description:
+        "ĐĂNG THẬT vào nhóm: tag CTV đang trực + câu nhắc + danh sách case tồn. Chỉ gọi khi admin đã bảo gửi/nhắn rõ ràng hoặc đã đồng ý bản nháp.",
+      parameters: {
+        type: "object",
+        properties: {
+          nhom: NHOM,
+          cau_nhac: { type: "string", description: "Câu nhắc 1-2 câu, không @, không link, không liệt kê case" },
+        },
+        required: ["nhom", "cau_nhac"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "hen_tag_ca_chieu",
+      description: "Hẹn: sau 13h30 hôm nay tự tag CTV ca chiều xử lý case tồn.",
+      parameters: { type: "object", properties: { nhom: NHOM }, required: ["nhom"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ghi_nho",
+      description:
+        "Ghi vào bộ não lâu dài điều admin dạy: cách nói, quy tắc làm việc, sở thích, thông tin bền vững về team. KHÔNG ghi số liệu tạm thời.",
+      parameters: {
+        type: "object",
+        properties: { noi_dung: { type: "string", description: "1 câu ngắn, rõ ý" } },
+        required: ["noi_dung"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "quen",
+      description: "Xóa 1 điều trong bộ não theo số thứ tự, hoặc so=0 để xóa hết.",
+      parameters: { type: "object", properties: { so: { type: "integer" } }, required: ["so"] },
+    },
+  },
+];
+
+function vnClock(now: Date): string {
+  const vn = new Date(now.getTime() + VN_OFFSET_MS);
+  const p = (x: number) => String(x).padStart(2, "0");
+  return `${p(vn.getUTCHours())}:${p(vn.getUTCMinutes())} ngày ${p(vn.getUTCDate())}/${p(vn.getUTCMonth() + 1)}`;
+}
+
+function agentSystem(title0: string, notes: string[], now: Date, isPrivate: boolean): string {
+  const title = title0 === "anh/chị" ? "anh" : title0;
+  return [
+    `Bạn là Tiểu Bee 🐝, trợ lý của team CTV VHHS (hỗ trợ 2 nhóm Telegram: QLL và HTKT). Đang nói chuyện với admin, gọi là "${title}", xưng "em".`,
+    `Bây giờ là ${vnClock(now)} (giờ VN). Ca sáng 8h-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Đang chat riêng." : "Đang trong nhóm (mọi người cùng thấy)."}`,
+    "Cách nói chuyện: tự nhiên như người thật, thân thiện, lễ phép (hay mở đầu bằng \"Dạ\"), ngắn gọn (thường 1-3 câu), viết hoa đầu câu đúng chính tả. Hiểu câu nói tắt theo mạch trước đó. Tối đa 1 emoji. Văn bản thuần, KHÔNG dùng markdown (**, #, bảng).",
+    "Quy tắc:",
+    "- Số liệu PHẢI lấy qua công cụ, không bịa. Nói số liệu gọn tự nhiên (vd \"QLL xử lý hết 25 case rồi ạ\").",
+    "- Được nhờ soạn/thử câu nhắc nhóm: gọi xem_so_lieu trước, rồi tự soạn luôn bản nháp theo BỘ NÃO, đưa ra rồi hỏi có gửi không. Admin bảo gửi/ok/được thì mới gọi nhan_nhom. Admin ra lệnh nhắn nhóm rõ ràng thì gửi luôn.",
+    "- Admin dạy, dặn, góp ý cách làm hoặc nói \"từ nay/lần sau/nhớ...\" thì gọi ghi_nho (viết lại ý thành 1 câu rõ ràng), rồi xác nhận ngắn gọn. Hỏi em nhớ gì thì CHỈ kể các mục trong BỘ NÃO (không kể các quy tắc này).",
+    "- KHÔNG ghi_nho: chỉnh sửa bản nháp đang bàn, số liệu/tình hình hôm nay, câu hỏi thường.",
+    "- Nhóm không còn case tồn thì nói luôn là không cần nhắc, không soạn nháp.",
+    "- Báo ĐÚNG kết quả công cụ trả về: công cụ nói chưa gửi/lỗi thì không được nói đã gửi.",
+    "- Chỉ khi thật sự không hiểu ý mới hỏi lại.",
+    "- Việc không có công cụ (chuyển ca, thêm người, sửa dữ liệu...) thì nói thật là em chưa làm được và gợi ý gõ /help.",
+    notes.length
+      ? "BỘ NÃO (điều admin đã dạy, luôn làm theo):\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n")
+      : "BỘ NÃO: (chưa được dạy gì)",
+  ].join("\n");
+}
+
+// Bỏ markdown để hiển thị gọn trên Telegram (không dùng parse_mode).
+export function plainText(s: string): string {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^\s*[*-]\s+/gm, "• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function agentCall(
+  ai: AiConfig,
+  messages: AgentMsg[],
+  deadline: number
+): Promise<{ content: string; tool_calls?: ToolCall[] } | null> {
+  const doFetch = ai.fetchImpl ?? fetch;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const left = deadline - Date.now();
+    if (left < 800) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(left, 6000));
+    try {
+      const body: Record<string, unknown> = {
+        model: ai.agentModel,
+        messages,
+        tools: AGENT_TOOLS,
+        tool_choice: "auto",
+        temperature: 0.6,
+        max_completion_tokens: 700,
+      };
+      if (/gpt-oss|qwen/i.test(ai.agentModel)) {
+        body.reasoning_effort = "low";
+        body.include_reasoning = false;
+      }
+      const res = await doFetch(GROQ_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (res.status === 429) {
+        // Hạn mức theo phút: chờ ngắn rồi thử lại 1 lần nếu còn thời gian.
+        const wait = Number(res.headers.get("retry-after") ?? "2") * 1000;
+        console.error(`Bee agent 429, chờ ${wait}ms`);
+        if (attempt === 0 && Date.now() + wait + 1500 < deadline) {
+          await sleepMs(wait);
+          continue;
+        }
+        return null;
+      }
+      if (!res.ok) {
+        console.error(`Bee agent HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+        return null;
+      }
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: string | null; tool_calls?: ToolCall[] } }[];
+      };
+      const m = data.choices?.[0]?.message;
+      if (!m) return null;
+      return { content: m.content ?? "", tool_calls: m.tool_calls?.length ? m.tool_calls : undefined };
+    } catch (e) {
+      console.error("Bee agent lỗi:", e instanceof Error ? e.message : String(e));
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+function toScope(v: unknown): CaseScope {
+  return v === "qll" || v === "htkt" ? v : "all";
+}
+
+async function runTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: {
+    deps: AiDeps;
+    message: TelegramMessage;
+    isPrivate: boolean;
+    title: string;
+    now: Date;
+    notes: string[];
+  }
+): Promise<string> {
+  const { deps, message, isPrivate, title, now } = ctx;
+  try {
+    switch (name) {
+      case "xem_so_lieu":
+        return await buildDayCaseStats(deps.supabase, now);
+      case "xem_bao_cao_ca":
+        return stripHtml(await buildShiftReport(deps.supabase, deps.checkinSupabase, now));
+      case "xem_checkin":
+        return deps.checkinSupabase
+          ? await buildCheckinList(deps.checkinSupabase, now)
+          : "Chưa cấu hình dữ liệu check-in.";
+      case "gui_danh_sach": {
+        const loai = String(args.loai ?? "");
+        if (loai === "bao_cao") {
+          const html = await buildShiftReport(deps.supabase, deps.checkinSupabase, now);
+          await sendHere(deps, message, isPrivate, html, true);
+          return "Đã gửi bảng báo cáo ca vào cuộc trò chuyện.";
+        }
+        if (loai === "checkin") {
+          const t = deps.checkinSupabase
+            ? await buildCheckinList(deps.checkinSupabase, now)
+            : "Dạ chức năng check-in chưa được cấu hình ạ 🥺";
+          await sendHere(deps, message, isPrivate, t);
+          return "Đã gửi danh sách check-in.";
+        }
+        const list = await buildPendingCases(deps.supabase, now, toScope(args.nhom));
+        await sendHere(deps, message, isPrivate, list);
+        return `Đã gửi danh sách case tồn. Nội dung: ${list.replace(/https?:\/\/\S+/g, "").slice(0, 400)}`;
+      }
+      case "nhan_nhom": {
+        let scope = toScope(args.nhom);
+        if (scope === "all") scope = detectScope(foldVi(message.reply_to_message?.text ?? ""));
+        const cau = sanitizeReply(String(args.cau_nhac ?? ""));
+        const r = await remindGroups(deps, scope, title, now, cau.length >= 5 ? cau : "");
+        return `KẾT QUẢ THẬT (báo đúng như vậy): ${r}`;
+      }
+      case "hen_tag_ca_chieu": {
+        const scope = toScope(args.nhom);
+        const r = await scheduleHandoff(deps.supabase, scope, message.from?.id ?? 0, now);
+        if (r === "sent") return "Hôm nay đã tag CTV ca chiều rồi.";
+        if (r === "error") return "Lỗi, chưa lưu được lịch.";
+        return handoffTimeNow(now) >= HANDOFF_START_H
+          ? "Đã lưu lịch; vì đã quá 13h30 nên sẽ tag trong vài phút tới."
+          : "Đã lưu lịch; sau 13h30 sẽ tự tag CTV ca chiều.";
+      }
+      case "ghi_nho": {
+        const note = String(args.noi_dung ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_NOTE_CHARS);
+        if (note.length < 3) return "Nội dung trống, chưa ghi.";
+        // Chặn ghi số liệu tạm thời vào bộ não lâu dài.
+        if (/hôm nay|hiện tại|còn \d+ case|\d+ case tồn/i.test(note)) {
+          return "Không ghi: đây là số liệu tạm thời, không phải điều cần nhớ lâu dài.";
+        }
+        const list = ctx.notes.filter((x) => x !== note);
+        list.push(note);
+        ctx.notes = list.slice(-MAX_NOTES);
+        return (await saveNotes(deps.supabase, ctx.notes))
+          ? `Đã ghi nhớ (điều số ${ctx.notes.length}).`
+          : "Lỗi, chưa ghi được.";
+      }
+      case "quen": {
+        const so = Number(args.so ?? -1);
+        if (so === 0) ctx.notes = [];
+        else if (so >= 1 && so <= ctx.notes.length) ctx.notes = ctx.notes.filter((_, i) => i !== so - 1);
+        else return "Không có điều số đó.";
+        return (await saveNotes(deps.supabase, ctx.notes)) ? "Đã xóa." : "Lỗi, chưa xóa được.";
+      }
+      default:
+        return "Không có công cụ này.";
+    }
+  } catch (e) {
+    console.error(`Bee tool ${name} lỗi:`, e instanceof Error ? e.message : String(e));
+    return "Công cụ bị lỗi, chưa lấy được dữ liệu.";
+  }
+}
+
+export async function runAgent(
+  deps: AiDeps,
+  ai: AiConfig,
+  message: TelegramMessage,
+  isPrivate: boolean,
+  question: string,
+  title: string,
+  now: Date
+): Promise<string | null> {
+  const deadline = Date.now() + AGENT_DEADLINE_MS;
+  const ctx = {
+    deps,
+    message,
+    isPrivate,
+    title,
+    now,
+    notes: await loadNotes(deps.supabase),
+  };
+  const history = message.from ? await loadHistory(deps.supabase, message.from.id, now.getTime()) : [];
+  // Admin reply vào 1 tin cụ thể -> đưa nội dung tin đó vào làm ngữ cảnh.
+  const quoted = (message.reply_to_message?.text ?? "").replace(/https?:\/\/\S+/g, "").slice(0, 300);
+  const userText =
+    (quoted ? `(đang trả lời tin: "${quoted}")\n` : "") + question.slice(0, MAX_QUESTION_CHARS);
+
+  const messages: AgentMsg[] = [
+    { role: "system", content: agentSystem(title, ctx.notes, now, isPrivate) },
+    ...history.map((h) => ({ role: h.role, content: h.content.slice(0, 300) })),
+    { role: "user", content: userText },
+  ];
+
+  let acted = false; // đã thực thi công cụ có tác dụng thật (gửi/ghi)
+  for (let round = 0; round < AGENT_MAX_ROUNDS; round++) {
+    const m = await agentCall(ai, messages, deadline);
+    if (!m) break;
+    if (!m.tool_calls) {
+      const text = plainText(m.content).slice(0, 1500);
+      if (text === "") break;
+      await sendHere(deps, message, isPrivate, text);
+      return text;
+    }
+    messages.push({ role: "assistant", content: m.content, tool_calls: m.tool_calls });
+    for (const tc of m.tool_calls.slice(0, 3)) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        // tham số hỏng -> chạy với {}
+      }
+      const result = await runTool(tc.function.name, args, ctx);
+      if (/^(gui_danh_sach|nhan_nhom|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) acted = true;
+      messages.push({ role: "tool", tool_call_id: tc.id, content: result.slice(0, 2500) });
+    }
+  }
+  // Đã làm việc thật nhưng không kịp nói câu cuối -> báo ngắn, KHÔNG rơi về luồng
+  // cũ (tránh làm lặp hành động).
+  if (acted) {
+    const text = `Dạ em làm xong rồi ạ ${title} 😊`;
+    await sendHere(deps, message, isPrivate, text);
+    return text;
+  }
+  return null;
 }
