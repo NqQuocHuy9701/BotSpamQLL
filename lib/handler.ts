@@ -174,10 +174,18 @@ export async function handleUpdate(
     if (targetMessageId && hasValidReaction) {
       console.log(`🔍 [REACTION FLOW] Đang tìm và update handled=true cho message_id: ${targetMessageId}`);
 
+      // Khóa case: QLL giữ nguyên id; HTKT lưu id âm phái sinh (scopedCaseId).
+      // Nếu dùng id thô thì reaction ở HTKT không khớp dòng nào (case vẫn "tồn")
+      // và còn có thể trùng nhầm một case QLL cùng số id.
+      const reactChatForKey = reactionUpdate.chat?.id;
+      const caseKey =
+        typeof reactChatForKey === "number"
+          ? scopedCaseId(reactChatForKey, targetMessageId)
+          : targetMessageId;
       const { data, error } = await deps.supabase
         .from("qll_tracking")
         .update({ handled: true })
-        .eq("message_id", targetMessageId)
+        .eq("message_id", caseKey)
         .select();
 
       if (error) {
