@@ -752,13 +752,30 @@ describe("Form xin nghỉ QLL -> tự chuyển nhóm Cộng đồng", () => {
     return { go: () => applyLeaveForward(deps, ai, message), fwCalls, sent, store: db.store };
   }
 
+  it("chuyển xong -> thả ❤️ vào đúng tin gốc ở QLL", async () => {
+    const r = run(FORM);
+    await r.go();
+    const react = r.fwCalls.find((c) => c.url.includes("/setMessageReaction"));
+    expect(react.body).toEqual({ chat_id: QLL, message_id: 555, reaction: [{ type: "emoji", emoji: "❤️" }] });
+  });
+
+  it("forward lỗi + bản sao cũng lỗi -> KHÔNG thả react", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (calls.push(url), { json: async () => ({ ok: false }), status: 403 })));
+    const deps: any = { telegram: { sendMessage: async () => ({ ok: false }) }, supabase: fakeDb().db };
+    const ai = { ...loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, botToken: "T" };
+    await applyLeaveForward(deps, ai, { message_id: 9, chat: { id: QLL, type: "supergroup" }, from: { id: 9 }, text: FORM } as any);
+    expect(calls.some((u) => u.includes("/setMessageReaction"))).toBe(false);
+  });
+
   it("form ở QLL -> forwardMessage đúng nhóm Cộng đồng, 1 lần", async () => {
     const r = run(FORM);
     await r.go();
+    r.fwCalls.splice(0, r.fwCalls.length, ...r.fwCalls.filter((c) => !c.url.includes("/setMessageReaction")));
     expect(r.fwCalls).toHaveLength(1);
     expect(r.fwCalls[0].url).toContain("/forwardMessage");
     expect(r.fwCalls[0].body).toEqual({ chat_id: COMMUNITY_CHAT_ID, from_chat_id: QLL, message_id: 555 });
-    // gửi lại cùng form (webhook lặp / QLL gửi lại) -> không chuyển nữa
+    // webhook gửi lặp cùng tin -> không chuyển, không react lại
     const again = run(FORM, QLL, r.store);
     await again.go();
     expect(again.fwCalls).toHaveLength(0);
@@ -773,7 +790,7 @@ describe("Form xin nghỉ QLL -> tự chuyển nhóm Cộng đồng", () => {
   it("tin xin muộn đủ mẫu ở QLL -> CÓ chuyển", async () => {
     const r = run(FORM.replace(" xin nghỉ ", "  ") + "\n#VH xin muộn");
     await r.go();
-    expect(r.fwCalls).toHaveLength(1);
+    expect(r.fwCalls.filter((c) => c.url.includes("/forwardMessage"))).toHaveLength(1);
   });
 
   it("cùng HS, tin khác (xin muộn rồi xin nghỉ) -> chuyển cả hai", async () => {
@@ -781,7 +798,10 @@ describe("Form xin nghỉ QLL -> tự chuyển nhóm Cộng đồng", () => {
     await a.go();
     const db = fakeDb(Object.fromEntries(a.store));
     const fw: any[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (_u: string, init: any) => (fw.push(JSON.parse(init.body)), { json: async () => ({ ok: true }) })));
+    vi.stubGlobal("fetch", vi.fn(async (u: string, init: any) => {
+      if (u.includes("/forwardMessage")) fw.push(JSON.parse(init.body));
+      return { json: async () => ({ ok: true }) };
+    }));
     const deps: any = { telegram: { sendMessage: async () => ({ ok: true }) }, supabase: db.db };
     const ai = { ...loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, botToken: "T" };
     await applyLeaveForward(deps, ai, { message_id: 556, chat: { id: QLL, type: "supergroup" }, from: { id: 9 }, text: FORM } as any);

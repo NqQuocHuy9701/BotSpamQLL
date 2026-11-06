@@ -2743,6 +2743,24 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
     console.log(
       `[Bee FW] form QLL #${key} HS ${form.hs} ${form.cls} (${form.name}) -> Cộng đồng: ${ok ? "ok" : "lỗi"}`
     );
+    // Đã chuyển thành công -> thả ❤️ vào tin gốc (giống luồng fw @OP_Linh... có sẵn).
+    if (ok && ai.botToken) {
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${ai.botToken}/setMessageReaction`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: message.chat.id,
+            message_id: message.message_id,
+            reaction: [{ type: "emoji", emoji: "❤️" }],
+          }),
+        });
+        const j = (await res.json()) as { ok?: boolean; description?: string };
+        if (!j.ok) console.error(`[Bee FW] thả react lỗi: ${j.description ?? res.status}`);
+      } catch (e) {
+        console.error("[Bee FW] thả react lỗi:", e instanceof Error ? e.message : String(e));
+      }
+    }
   } catch (e) {
     console.error("[Bee FW] lỗi (bỏ qua):", e instanceof Error ? e.message : String(e));
   }
