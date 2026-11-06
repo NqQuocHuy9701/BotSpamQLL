@@ -743,7 +743,12 @@ async function handleAi(
   adminIds: number[],
   opts: { now?: Date; rng?: () => number }
 ): Promise<boolean> {
-  const text = (message.text ?? "").trim();
+  // Ghi nhận nhóm Bee đang ở (+ tin gần đây của nhóm ngoài QLL/HTKT). Fail-soft.
+  if (message.chat.type === "group" || message.chat.type === "supergroup") {
+    await observeGroup(deps.supabase, message, opts.now ?? new Date());
+  }
+  // Ảnh/tệp có chú thích: tag Bee trong caption vẫn được nhận.
+  const text = (message.text ?? message.caption ?? "").trim();
   const from = message.from;
   if (!from || from.is_bot || text === "") return false;
 
@@ -766,6 +771,9 @@ async function handleAi(
       !!rf?.is_bot &&
       (rf.username ?? "").toLowerCase() === ai.botUsername.toLowerCase();
     if (!m.mentioned && !repliesToBee) return false;
+    console.log(
+      `[Bee AI] được gọi trong nhóm ${message.chat.id} "${message.chat.title ?? ""}" bởi ${from.id}${isAdmin ? " (admin)" : ""}`
+    );
     question = m.mentioned ? m.question : text;
   }
 
@@ -1608,6 +1616,23 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "xem_cac_nhom",
+      description: "Danh sách các nhóm Telegram Bee đang ở (tên, lần cuối có tin, bot còn trong nhóm không).",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "xem_nhom",
+      description:
+        "Đọc tin nhắn gần đây (24h) của 1 nhóm ngoài QLL/HTKT theo tên, vd \"Xếp lớp\". Dùng để tóm tắt, xem ai hỏi gì, tin nào chưa ai trả lời.",
+      parameters: { type: "object", properties: { ten_nhom: { type: "string" } }, required: ["ten_nhom"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "xem_han_muc",
       description: "Hạn mức/credit hôm nay: số lần gọi Groq, token đã dùng, Groq báo còn bao nhiêu, trần lượt của Bee.",
       parameters: { type: "object", properties: {} },
@@ -1703,7 +1728,8 @@ function vnClock(now: Date): string {
 function agentSystem(title0: string, notes: string[], now: Date, isPrivate: boolean): string {
   const title = title0 === "anh/chị" ? "anh" : title0;
   return [
-    `Bạn là Tiểu Bee, trợ lý đồng nghiệp của team CTV VHHS (2 nhóm Telegram QLL và HTKT). Đang nói chuyện với admin; xưng "em", gọi "${title}".`,
+    `Bạn là Tiểu Bee, trợ lý đồng nghiệp của team CTV VHHS. Theo dõi case ở 2 nhóm QLL và HTKT, ngoài ra còn ở các nhóm khác (xem_cac_nhom). Đang nói chuyện với admin; xưng "em", gọi "${title}".`,
+    "- Hỏi về nhóm khác (\"nhóm Xếp lớp\", \"em ở những nhóm nào\", \"nhóm vừa tag em\") -> xem_cac_nhom / xem_nhom, không hỏi lại QLL hay HTKT.",
     `Giờ VN: ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm, mọi người cùng thấy."}`,
     "Giọng: như đồng nghiệp nhắn tin, ngắn (1-2 câu), thân thiện, đổi cách nói cho tự nhiên. Không cần mở đầu bằng \"Dạ\" hay gọi tên ở mọi câu, không lặp lại câu hỏi. Tối đa 1 emoji, văn bản thuần, không markdown.",
     "Quy tắc:",
@@ -1882,6 +1908,10 @@ async function runTool(
         return await ctvToday(deps.supabase, String(args.username ?? ""), now);
       case "xem_cau_hinh":
         return await configSummary(deps.supabase, now);
+      case "xem_cac_nhom":
+        return await listGroups(deps.supabase, deps.ai, now.getTime());
+      case "xem_nhom":
+        return await readGroup(deps.supabase, String(args.ten_nhom ?? ""), now.getTime());
       case "xem_han_muc":
         return deps.ai ? await buildQuotaReport(deps.supabase, deps.ai, now) : "Bee AI đang tắt.";
       case "xem_checkin":
@@ -2330,4 +2360,165 @@ export async function buildQuotaReport(supabase: SupabaseClient, ai: AiConfig, n
     lines.push("Lưu ý: sắp chạm hạn mức hoặc đã bị giới hạn, Bee có thể trả lời chậm hoặc báo bận.");
   }
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Sổ nhóm: Bee tự ghi nhận các nhóm mình đang ở (Telegram không có API liệt kê)
+// ---------------------------------------------------------------------------
+// - Sổ nhóm: 1 dòng pending_batches (admin_id -9104): id, tên, lần cuối thấy tin.
+// - Tin gần đây của nhóm NGOÀI QLL/HTKT: 1 dòng/nhóm, admin_id = chatId - 3e12
+//   (không đụng id admin thật/dương, -9xxx, id theo ngày ~ -2e9). Giữ 30 tin, 24h.
+// - QLL/HTKT đã có tracking riêng (qll_tracking) -> chỉ ghi vào sổ nhóm.
+const GROUPS_ROW_ID = -9104;
+const GROUP_LOG_OFFSET = 3_000_000_000_000;
+const GROUP_LOG_MAX = 30;
+const GROUP_LOG_TTL_MS = 24 * 3600_000;
+const REGISTRY_REFRESH_MS = 10 * 60_000;
+const TRACKED_GROUPS = new Set([QLL_CHAT_ID, HTKT_CHAT_ID]);
+// Bộ nhớ tạm theo instance: tránh ghi sổ nhóm mỗi tin (nhóm QLL rất đông).
+const registrySeen = new Map<number, number>();
+// Chỉ dùng trong test (mỗi test một DB giả).
+export function resetGroupCacheForTest(): void {
+  registrySeen.clear();
+}
+
+interface GroupInfo {
+  title: string;
+  type: string;
+  lastSeen: string;
+}
+interface GroupLogItem {
+  t: number;
+  from: string;
+  text: string;
+  mid: number;
+  replyTo?: number;
+}
+
+function groupLogRowId(chatId: number): number {
+  return chatId - GROUP_LOG_OFFSET;
+}
+
+async function readRow<T>(supabase: SupabaseClient, id: number): Promise<T | undefined> {
+  const { data } = await supabase.from("pending_batches").select("items").eq("admin_id", id).maybeSingle();
+  return (data?.items as T | undefined) ?? undefined;
+}
+
+async function writeRow(supabase: SupabaseClient, id: number, items: unknown): Promise<void> {
+  await supabase.from("pending_batches").upsert({ admin_id: id, items }, { onConflict: "admin_id" });
+}
+
+export async function observeGroup(supabase: SupabaseClient, message: TelegramMessage, now: Date): Promise<void> {
+  try {
+    const chatId = message.chat.id;
+    const nowMs = now.getTime();
+    const title = message.chat.title ?? String(chatId);
+
+    // 1) Sổ nhóm (giới hạn ghi: nhóm mới với instance này, hoặc >10 phút).
+    const last = registrySeen.get(chatId);
+    if (last === undefined || nowMs - last > REGISTRY_REFRESH_MS) {
+      const reg = (await readRow<{ kind?: string; groups?: Record<string, GroupInfo> }>(supabase, GROUPS_ROW_ID)) ?? {};
+      const groups = reg.kind === "groups" && reg.groups ? reg.groups : {};
+      groups[String(chatId)] = { title, type: message.chat.type, lastSeen: now.toISOString() };
+      await writeRow(supabase, GROUPS_ROW_ID, { kind: "groups", groups });
+      registrySeen.set(chatId, nowMs); // chỉ đánh dấu sau khi ghi xong
+    }
+
+    // 2) Tin gần đây (chỉ nhóm ngoài QLL/HTKT).
+    if (TRACKED_GROUPS.has(chatId)) return;
+    const raw = (message.text ?? message.caption ?? "").trim();
+    if (raw === "") return;
+    const f = message.from;
+    const who = f?.username ? f.username : [f?.first_name, f?.last_name].filter(Boolean).join(" ") || "?";
+    const item: GroupLogItem = {
+      t: nowMs,
+      from: f?.is_bot ? `${who} (bot)` : who,
+      text: isSensitive(raw) ? "[tin có tài khoản/mật khẩu/số dài, đã ẩn]" : raw.replace(/\s+/g, " ").slice(0, 200),
+      mid: message.message_id,
+      replyTo: message.reply_to_message?.message_id,
+    };
+    const id = groupLogRowId(chatId);
+    const cur = (await readRow<{ kind?: string; items?: GroupLogItem[] }>(supabase, id)) ?? {};
+    const items = (cur.kind === "grouplog" && Array.isArray(cur.items) ? cur.items : []).filter(
+      (x) => nowMs - x.t < GROUP_LOG_TTL_MS
+    );
+    items.push(item);
+    await writeRow(supabase, id, { kind: "grouplog", chatId, title, items: items.slice(-GROUP_LOG_MAX) });
+  } catch {
+    // ghi sổ lỗi không được làm hỏng luồng chính
+  }
+}
+
+async function loadGroups(supabase: SupabaseClient): Promise<[number, GroupInfo][]> {
+  const reg = await readRow<{ kind?: string; groups?: Record<string, GroupInfo> }>(supabase, GROUPS_ROW_ID);
+  const groups = reg?.kind === "groups" && reg.groups ? reg.groups : {};
+  return Object.entries(groups)
+    .map(([k, v]) => [Number(k), v] as [number, GroupInfo])
+    .sort((a, b) => b[1].lastSeen.localeCompare(a[1].lastSeen));
+}
+
+// Bot còn trong nhóm không (gọi Telegram, không tốn Groq). Không có token -> "?".
+async function botStatusIn(ai: AiConfig | undefined, chatId: number): Promise<string> {
+  if (!ai?.botToken) return "?";
+  try {
+    const botId = ai.botToken.split(":")[0];
+    const res = await fetch(
+      `https://api.telegram.org/bot${ai.botToken}/getChatMember?chat_id=${chatId}&user_id=${botId}`
+    );
+    const j = (await res.json()) as { ok?: boolean; result?: { status?: string } };
+    const s = j.result?.status;
+    if (!j.ok || !s) return "không truy cập được (có thể đã bị xóa khỏi nhóm)";
+    if (s === "administrator") return "admin";
+    if (s === "member" || s === "restricted") return "thành viên";
+    return "đã rời nhóm";
+  } catch {
+    return "?";
+  }
+}
+
+export async function listGroups(supabase: SupabaseClient, ai: AiConfig | undefined, nowMs: number): Promise<string> {
+  const groups = await loadGroups(supabase);
+  if (groups.length === 0) {
+    return "Em chưa ghi nhận nhóm nào. Nhóm sẽ hiện ở đây sau khi có tin nhắn đầu tiên trong nhóm (kể từ bản cập nhật này).";
+  }
+  const lines = await Promise.all(
+    groups.slice(0, 15).map(async ([id, g], i) => {
+      const role = TRACKED_GROUPS.has(id) ? "theo dõi case" : "chỉ đọc tin gần đây";
+      const ago = Math.round((nowMs - Date.parse(g.lastSeen)) / 60_000);
+      const agoText = ago < 60 ? `${ago} phút trước` : `${Math.round(ago / 60)} giờ trước`;
+      return `${i + 1}. ${g.title} (${role}) — tin gần nhất ${agoText}, bot: ${await botStatusIn(ai, id)}`;
+    })
+  );
+  return [`Bee đang biết ${groups.length} nhóm:`, ...lines].join("\n");
+}
+
+// Đọc tin gần đây của 1 nhóm theo tên (khớp gần đúng, bỏ dấu).
+export async function readGroup(supabase: SupabaseClient, name: string, nowMs: number): Promise<string> {
+  const q = foldVi(name);
+  const groups = await loadGroups(supabase);
+  const hit =
+    groups.find(([, g]) => foldVi(g.title) === q) ??
+    groups.find(([, g]) => q !== "" && foldVi(g.title).includes(q)) ??
+    groups.find(([, g]) => q.split(" ").filter((w) => w.length > 1).every((w) => foldVi(g.title).includes(w)));
+  if (!hit) {
+    const known = groups.map(([, g]) => g.title).join("; ") || "(chưa có)";
+    return `Không thấy nhóm nào tên giống "${name}". Các nhóm em biết: ${known}.`;
+  }
+  const [id, g] = hit;
+  if (TRACKED_GROUPS.has(id)) {
+    return `"${g.title}" là nhóm theo dõi case. Dùng xem_so_lieu / gui_danh_sach / tra_cuu_case để xem.`;
+  }
+  const log = await readRow<{ kind?: string; items?: GroupLogItem[] }>(supabase, groupLogRowId(id));
+  const items = (log?.kind === "grouplog" && Array.isArray(log.items) ? log.items : []).filter(
+    (x) => nowMs - x.t < GROUP_LOG_TTL_MS
+  );
+  if (items.length === 0) return `Nhóm "${g.title}": chưa có tin nào trong 24 giờ qua mà em thấy.`;
+  const repliedTo = new Set(items.map((x) => x.replyTo).filter((x): x is number => x !== undefined));
+  const lines = items.slice(-20).map((x) => {
+    const mark = repliedTo.has(x.mid) ? " (đã có người trả lời)" : "";
+    return `${vnHHmm(new Date(x.t).toISOString())} ${x.from}: ${x.text}${mark}`;
+  });
+  return [`Nhóm "${g.title}" — ${items.length} tin trong 24h qua (hiện ${lines.length} tin gần nhất):`, ...lines].join(
+    "\n"
+  );
 }

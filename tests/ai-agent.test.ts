@@ -535,3 +535,90 @@ describe("Hỏi Bee về credit/hạn mức", () => {
     expect(r).toContain("tự hồi lại sau mỗi phút");
   });
 });
+
+import { observeGroup, listGroups, readGroup, resetGroupCacheForTest } from "../lib/ai.js";
+import { beforeEach } from "vitest";
+
+describe("Bee tự nhận diện các nhóm được add vào", () => {
+  beforeEach(() => resetGroupCacheForTest());
+  const XEPLOP = -1009999999999;
+  const msg = (chatId: number, title: string, text: string, mid: number, extra: object = {}) =>
+    ({ message_id: mid, chat: { id: chatId, type: "supergroup", title }, from: { id: 5, username: "gv_a" }, text, ...extra }) as any;
+
+  it("ghi nhóm mới vào sổ + lưu tin gần đây; tin nhạy cảm bị ẩn", async () => {
+    const { db, store } = fakeDb();
+    await observeGroup(db, msg(XEPLOP, "VH - Xếp lớp", "Cần xếp lớp cho HS 203745", 10), NOW);
+    await observeGroup(db, msg(XEPLOP, "VH - Xếp lớp", "TK: abc MK: 123", 11), NOW);
+    const reg = store.get(-9104) as any;
+    expect(reg.groups[String(XEPLOP)].title).toBe("VH - Xếp lớp");
+    const log = store.get(XEPLOP - 3_000_000_000_000) as any;
+    expect(log.items.map((x: any) => x.text)).toEqual([
+      "Cần xếp lớp cho HS 203745",
+      "[tin có tài khoản/mật khẩu/số dài, đã ẩn]",
+    ]);
+  });
+
+  it("nhóm QLL/HTKT: chỉ ghi sổ, KHÔNG lưu nội dung tin", async () => {
+    const { db, store } = fakeDb();
+    await observeGroup(db, msg(-1002458492731, "HTKT", "215785 oa ạ", 1), NOW);
+    expect((store.get(-9104) as any).groups["-1002458492731"]).toBeDefined();
+    expect(store.has(-1002458492731 - 3_000_000_000_000)).toBe(false);
+  });
+
+  it("xem_nhom: tìm theo tên gần đúng không dấu, đánh dấu tin đã có người trả lời", async () => {
+    const { db } = fakeDb();
+    await observeGroup(db, msg(XEPLOP, "VH - Xếp lớp", "Ai xếp lớp giúp HS 203745 với", 10), NOW);
+    await observeGroup(db, msg(XEPLOP, "VH - Xếp lớp", "Để mình xếp", 11, { reply_to_message: { message_id: 10 } }), NOW);
+    const r = await readGroup(db, "xep lop", NOW.getTime());
+    expect(r).toContain('Nhóm "VH - Xếp lớp" — 2 tin');
+    expect(r).toContain("Ai xếp lớp giúp HS 203745 với (đã có người trả lời)");
+    expect(await readGroup(db, "kế toán", NOW.getTime())).toContain("Không thấy nhóm nào");
+  });
+
+  it("tin quá 24h không còn hiện", async () => {
+    const { db } = fakeDb();
+    await observeGroup(db, msg(XEPLOP, "VH - Xếp lớp", "tin cũ", 1), new Date(NOW.getTime() - 25 * 3600_000));
+    expect(await readGroup(db, "Xếp lớp", NOW.getTime())).toContain("chưa có tin nào trong 24 giờ");
+  });
+
+  it("xem_cac_nhom: liệt kê các nhóm, phân biệt nhóm theo dõi case", async () => {
+    const { db } = fakeDb();
+    await observeGroup(db, msg(XEPLOP, "VH - Xếp lớp", "hi", 1), NOW);
+    await observeGroup(db, msg(-1002273179613, "QLL Support", "hi", 2), NOW);
+    const r = await listGroups(db, undefined, NOW.getTime());
+    expect(r).toContain("Bee đang biết 2 nhóm");
+    expect(r).toContain("VH - Xếp lớp (chỉ đọc tin gần đây)");
+    expect(r).toContain("QLL Support (theo dõi case)");
+  });
+
+  it("tag Bee trong nhóm lạ (admin): Bee nhận và trả lời ngay trong nhóm", async () => {
+    const t = setup([say("Em đây anh ơi")]);
+    const r = await t.run("@vh_messenger_bot em có thấy nhóm này không", XEPLOP, "supergroup", ADMIN);
+    expect(r).toBe(true);
+    expect(t.f).toHaveBeenCalledTimes(1);
+    expect(t.sent[0].chat).toBe(XEPLOP);
+  });
+
+  it("tag Bee trong caption ảnh: vẫn nhận", async () => {
+    const t = setup([say("Dạ em xem ảnh rồi")]);
+    const { maybeHandleAi: run } = await import("../lib/ai.js");
+    void run;
+    await t.run("@vh_messenger_bot xem giúp", XEPLOP, "supergroup", ADMIN);
+    expect(t.f).toHaveBeenCalledTimes(1);
+  });
+
+  it("hỏi riêng 'nhóm Xếp lớp' -> AI có công cụ xem_nhom, đọc đúng tin nhóm", async () => {
+    const call = { id: "c1", type: "function", function: { name: "xem_nhom", arguments: '{"ten_nhom":"Xếp lớp"}' } };
+    const t = setup([say("", [call]), say("Nhóm Xếp lớp có 1 tin hỏi xếp lớp HS 203745 ạ")], {
+      [-9104]: { kind: "groups", groups: { [String(XEPLOP)]: { title: "VH - Xếp lớp", type: "supergroup", lastSeen: NOW.toISOString() } } },
+      [XEPLOP - 3_000_000_000_000]: {
+        kind: "grouplog",
+        items: [{ t: NOW.getTime() - 60_000, from: "gv_a", text: "Cần xếp lớp HS 203745", mid: 1 }],
+      },
+    });
+    await t.run("Em có check được nhóm Xếp lớp không?");
+    const tool = t.bodies[1].messages.find((m: any) => m.role === "tool");
+    expect(tool.content).toContain("Cần xếp lớp HS 203745");
+    expect(t.sent.at(-1)!.text).toContain("Xếp lớp");
+  });
+});
