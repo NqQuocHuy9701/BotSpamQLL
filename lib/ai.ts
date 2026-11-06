@@ -129,7 +129,8 @@ export function classifyByRules(folded: string): Intent | null {
   if (
     /\b(tag|goi|nhac|nho|giao)\b.*\bctv\b.*\bca chieu\b/.test(folded) ||
     /\bca chieu\b.*\b(tag|goi|nhac|nho|giao)\b.*\bctv\b/.test(folded) ||
-    /\b(den|khi|vao|luc|sau)\b.*\bca chieu\b.*\b(tag|goi|nhac|giao)\b/.test(folded)
+    /\b(den|khi|vao|luc|sau)\b.*\bca chieu\b.*\b(tag|goi|nhac|giao)\b/.test(folded) ||
+    /\bchieu\b.*\b(tag|goi|nhac|giao)\b.*\bctv\b/.test(folded)
   ) {
     return "hentag";
   }
@@ -623,8 +624,15 @@ async function handleAi(
   } else {
     if (message.chat.type !== "group" && message.chat.type !== "supergroup") return false;
     const m = extractMention(text, ai.botUsername);
-    if (!m.mentioned) return false; // chỉ phản hồi khi được tag
-    question = m.question;
+    // Admin reply thẳng vào tin của Bee = đang nói chuyện với Bee (không cần tag).
+    // CTV reply tin của Bee (vd nhắc SLA) vẫn bị bỏ qua để khỏi tốn lượt AI.
+    const rf = message.reply_to_message?.from;
+    const repliesToBee =
+      isAdmin &&
+      !!rf?.is_bot &&
+      (rf.username ?? "").toLowerCase() === ai.botUsername.toLowerCase();
+    if (!m.mentioned && !repliesToBee) return false;
+    question = m.mentioned ? m.question : text;
   }
 
   // Nội dung nhạy cảm (TK/MK, dãy số dài): không gửi đi đâu, không trả lời.
@@ -711,7 +719,9 @@ async function respond(
         await sendHere(deps, message, isPrivate, `Dạ việc này em chỉ nhận từ admin thôi ạ ${title} 🥺`);
         return true;
       }
-      const scope = detectScope(foldVi(question));
+      // Không nói rõ nhóm -> lấy theo tin Bee đang được reply (vd danh sách case tồn QLL).
+      let scope = detectScope(foldVi(question));
+      if (scope === "all") scope = detectScope(foldVi(message.reply_to_message?.text ?? ""));
       const where = scope === "all" ? "QLL và HTKT" : scope.toUpperCase();
       const r = await scheduleHandoff(deps.supabase, scope, message.from?.id ?? 0, now);
       let text: string;

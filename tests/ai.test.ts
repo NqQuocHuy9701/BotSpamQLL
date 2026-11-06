@@ -50,6 +50,12 @@ describe("hentag", () => {
   });
 });
 
+describe("hentag (nói tắt)", () => {
+  it("chiều tag ctv xử lý nhé", () => {
+    expect(classifyByRules(foldVi("chiều tag ctv xử lý nhé"))).toBe("hentag");
+  });
+});
+
 describe("extractMention", () => {
   it("có tag", () => {
     const r = extractMention("@vh_messenger_bot ai đang trực?", "vh_messenger_bot");
