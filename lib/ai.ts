@@ -19,6 +19,7 @@ import {
   buildCheckinList,
   buildShiftReport,
   getCurrentShiftVn,
+  htktCaseKey,
   loadMonitorConfig,
 } from "./monitor.js";
 
@@ -31,6 +32,7 @@ const COOLDOWN_MS = 5000; // cách nhau tối thiểu giữa 2 lượt của 1 n
 const MAX_QUESTION_CHARS = 300;
 const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 const QLL_LINK_ID = "2273179613"; // id nhóm QLL bỏ tiền tố -100 (link t.me/c/...)
+const HTKT_LINK_ID = "2458492731"; // id nhóm HTKT bỏ tiền tố -100
 
 export type Intent = "checkin" | "baocao" | "casetreo" | "help" | "chat" | "checkout";
 const INTENTS: readonly Intent[] = ["checkin", "baocao", "casetreo", "help", "chat", "checkout"];
@@ -112,6 +114,7 @@ export function classifyByRules(folded: string): Intent | null {
   if (/\b(check ?out|checkout|tan ca|het ca|ve ca)\b/.test(folded)) return "checkout";
   if (/\b(bao cao|thong ke|hieu suat|kpi|xep hang)\b/.test(folded)) return "baocao";
   if (
+    /\b(ton|treo)\b.*\b(qll|htkt)\b|\b(qll|htkt)\b.*\b(ton|treo)\b/.test(folded) ||
     /\b(case|ca)\b.*\b(treo|ton|chua xu ly|chua ai|chua rep|chua react|miss)\b/.test(folded) ||
     /\b(chua xu ly|case treo|case ton|con case|bi miss)\b/.test(folded)
   ) {
@@ -428,36 +431,99 @@ function shiftStartUtcIso(now: Date, key: "sang" | "chieu" | "toi"): string {
   ).toISOString();
 }
 
+export type CaseScope = "qll" | "htkt" | "all";
+
+// Nhóm nào được hỏi: có chữ htkt -> HTKT, có chữ qll -> QLL, không nói rõ -> cả hai.
+export function detectScope(folded: string): CaseScope {
+  const h = /\bhtkt\b|ho tro ky thuat/.test(folded);
+  const q = /\bqll\b/.test(folded);
+  if (h && !q) return "htkt";
+  if (q && !h) return "qll";
+  return "all";
+}
+
+const MAX_LISTED = 10;
+
+function snip(s: string | null): string {
+  return (s ?? "").replace(/\s+/g, " ").trim().slice(0, 50);
+}
+
+// QLL: message_id dương, mỗi dòng 1 case.
+async function pendingQll(supabase: SupabaseClient, sinceIso: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("qll_tracking")
+    .select("message_id, sender_name, content")
+    .eq("handled", false)
+    .gt("message_id", 0)
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: true })
+    .limit(200);
+  if (error) throw new Error(error.message);
+  const rows =
+    (data as { message_id: number; sender_name: string | null; content: string | null }[] | null) ??
+    [];
+  const lines: string[] = [];
+  rows.slice(0, MAX_LISTED).forEach((r, i) => {
+    lines.push(`${i + 1}. ${r.sender_name ?? "QLL"} — ${snip(r.content)}`);
+    lines.push(`   https://t.me/c/${QLL_LINK_ID}/${r.message_id}`);
+  });
+  if (rows.length > MAX_LISTED) lines.push(`... và ${rows.length - MAX_LISTED} case nữa.`);
+  return [String(rows.length), ...lines];
+}
+
+// HTKT: message_id âm = -(id*10+1). Gộp theo mã (htktCaseKey); một mã coi là đã xong
+// nếu bất kỳ tin nào cùng mã đã xử lý.
+async function pendingHtkt(supabase: SupabaseClient, sinceIso: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("qll_tracking")
+    .select("message_id, handled, content")
+    .lt("message_id", 0)
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: true })
+    .limit(500);
+  if (error) throw new Error(error.message);
+  const rows = (data as { message_id: number; handled: boolean; content: string | null }[] | null) ?? [];
+  const groups = new Map<string, { done: boolean; id: number; content: string | null }>();
+  for (const r of rows) {
+    const k = htktCaseKey(r.content ?? "");
+    const g = groups.get(k);
+    if (!g) groups.set(k, { done: r.handled, id: r.message_id, content: r.content });
+    else if (r.handled) g.done = true;
+  }
+  const pending = [...groups.values()].filter((g) => !g.done);
+  const lines: string[] = [];
+  pending.slice(0, MAX_LISTED).forEach((g, i) => {
+    const realId = Math.round((-g.id - 1) / 10);
+    lines.push(`${i + 1}. ${snip(g.content)}`);
+    lines.push(`   https://t.me/c/${HTKT_LINK_ID}/${realId}`);
+  });
+  if (pending.length > MAX_LISTED) lines.push(`... và ${pending.length - MAX_LISTED} case nữa.`);
+  return [String(pending.length), ...lines];
+}
+
 export async function buildPendingCases(
   supabase: SupabaseClient,
-  now: Date = new Date()
+  now: Date = new Date(),
+  scope: CaseScope = "all"
 ): Promise<string> {
   const { key, label } = getCurrentShiftVn(now);
+  const since = shiftStartUtcIso(now, key);
+  const ca = label.toUpperCase();
   try {
-    const { data, count, error } = await supabase
-      .from("qll_tracking")
-      .select("message_id, sender_name, content", { count: "exact" })
-      .eq("handled", false)
-      .gt("message_id", 0) // chỉ nhóm QLL (id dương)
-      .gte("created_at", shiftStartUtcIso(now, key))
-      .order("created_at", { ascending: true })
-      .limit(15);
-    if (error) throw new Error(error.message);
-    const rows =
-      (data as { message_id: number; sender_name: string | null; content: string | null }[] | null) ??
-      [];
-    if (rows.length === 0) {
-      return `✅ Ca ${label.toUpperCase()}: không còn case nào chưa xử lý.`;
+    const out: string[] = [];
+    const sections: [string, () => Promise<string[]>][] = [];
+    if (scope !== "htkt") sections.push(["QLL", () => pendingQll(supabase, since)]);
+    if (scope !== "qll") sections.push(["HTKT", () => pendingHtkt(supabase, since)]);
+    for (const [name, run] of sections) {
+      const [n, ...lines] = await run();
+      if (n === "0") {
+        out.push(`✅ ${name} ca ${ca}: không còn case nào tồn.`);
+      } else {
+        out.push(`📋 Case tồn ${name} — ca ${ca}: ${n}`, ...lines);
+      }
+      out.push("");
     }
-    const total = count ?? rows.length;
-    const lines = [`📋 Case chưa xử lý — ca ${label.toUpperCase()}: ${total}`];
-    rows.forEach((r, i) => {
-      const snippet = (r.content ?? "").replace(/\s+/g, " ").trim().slice(0, 45);
-      lines.push(`${i + 1}. ${r.sender_name ?? "QLL"} — ${snippet}`);
-      lines.push(`   https://t.me/c/${QLL_LINK_ID}/${r.message_id}`);
-    });
-    if (total > rows.length) lines.push(`... và ${total - rows.length} case nữa.`);
-    return lines.join("\n");
+    return out.join("\n").trim();
   } catch {
     return "Dạ em chưa lấy được danh sách case, thử lại sau nhé 🥺";
   }
@@ -626,17 +692,20 @@ async function respond(
         return true;
       }
       const html = intent === "baocao";
+      const scope = detectScope(foldVi(question));
+      const where = scope === "all" ? "cả 2 nhóm QLL và HTKT" : `nhóm ${scope.toUpperCase()}`;
+      const intro = html ? lead(title) : `Dạ em check ${where} rồi, ${title} xem case tồn nhé 😊`;
       const body = html
         ? await buildShiftReport(deps.supabase, deps.checkinSupabase, now)
-        : await buildPendingCases(deps.supabase, now);
+        : await buildPendingCases(deps.supabase, now, detectScope(foldVi(question)));
       if (isPrivate) {
-        await sendHere(deps, message, true, `${lead(title)}\n\n${body}`, html);
+        await sendHere(deps, message, true, `${intro}\n\n${body}`, html);
         return true;
       }
       // Trong nhóm: gửi riêng cho admin, nhóm chỉ nhận 1 câu xác nhận.
       const dm = await deps.telegram.sendMessage(
         from.id,
-        `${lead(title)}\n\n${body}`,
+        `${intro}\n\n${body}`,
         undefined,
         html ? "HTML" : undefined
       );

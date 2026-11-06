@@ -7,6 +7,7 @@ import {
   sanitizeReply,
   parseGroqJson,
   maybeHandleAi,
+  detectScope,
 } from "../lib/ai.js";
 
 describe("loadAiConfig", () => {
@@ -28,6 +29,16 @@ describe("foldVi / classifyByRules", () => {
     expect(classifyByRules(foldVi("cho mình báo cáo ca này"))).toBe("baocao");
     expect(classifyByRules(foldVi("còn case treo không"))).toBe("casetreo");
     expect(classifyByRules(foldVi("xyz abc"))).toBeNull();
+  });
+});
+
+describe("detectScope / case tồn theo nhóm", () => {
+  it("nhận đúng nhóm", () => {
+    expect(detectScope(foldVi("gửi anh case tồn nhóm QLL"))).toBe("qll");
+    expect(detectScope(foldVi("tồn nhóm HTKT"))).toBe("htkt");
+    expect(detectScope(foldVi("case tồn"))).toBe("all");
+    expect(classifyByRules(foldVi("tồn nhóm HTKT"))).toBe("casetreo");
+    expect(classifyByRules(foldVi("gửi anh các case tồn nhóm QLL"))).toBe("casetreo");
   });
 });
 
