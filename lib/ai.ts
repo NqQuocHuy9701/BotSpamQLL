@@ -670,8 +670,6 @@ async function respond(
     chatReply = r.reply;
   }
 
-  const from = message.from!;
-
   switch (intent) {
     case "checkin": {
       const body = deps.checkinSupabase
@@ -702,21 +700,8 @@ async function respond(
         await sendHere(deps, message, true, `${intro}\n\n${body}`, html);
         return true;
       }
-      // Trong nhóm: gửi riêng cho admin, nhóm chỉ nhận 1 câu xác nhận.
-      const dm = await deps.telegram.sendMessage(
-        from.id,
-        `${intro}\n\n${body}`,
-        undefined,
-        html ? "HTML" : undefined
-      );
-      await sendHere(
-        deps,
-        message,
-        false,
-        dm.ok
-          ? `Dạ em gửi riêng cho ${title} rồi ạ 😊`
-          : `Dạ em chưa nhắn riêng được, ${title} nhắn em ở chat riêng nhé 🥺`
-      );
+      // Trong nhóm: admin tag thì trả lời thẳng trong nhóm (reply vào tin hỏi).
+      await sendHere(deps, message, false, `${intro}\n\n${body}`, html);
       return true;
     }
     case "help": {
