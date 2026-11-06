@@ -1,6 +1,6 @@
 // Kiểm thử lớp hội thoại Bee bằng MOCK (không gọi Groq thật, không chạm DB thật).
 import { describe, it, expect, vi } from "vitest";
-import { maybeHandleAi, loadAiConfig } from "../lib/ai.js";
+import { maybeHandleAi, loadAiConfig, setTpmStateForTest } from "../lib/ai.js";
 
 const ADMIN = 6532155675;
 const NOW = new Date("2026-11-06T03:00:00Z"); // 10:00 giờ VN
@@ -69,6 +69,7 @@ function setup(
   seed: Record<number, unknown> = {},
   tableRows: Record<string, unknown[]> = {}
 ) {
+  setTpmStateForTest(null);
   const { db, store } = fakeDb(seed, tableRows);
   const { f, bodies } = fakeFetch(queue);
   const sent: { chat: number; text: string; replyTo?: number }[] = [];
@@ -168,11 +169,11 @@ describe("Nhóm B: cần AI, đúng 1 lượt hội thoại", () => {
 
 describe("Lỗi & hạn mức: không gọi AI lặp lại, báo bận thân thiện", () => {
   const busy = /bận/;
-  it("429 có Retry-After dài: không thử lại", async () => {
+  it("429 có Retry-After dài: không thử lại, báo rõ phải đợi", async () => {
     const t = setup([{ status: 429, headers: { "retry-after": "30" } }]);
     await t.run("hôm nay thế nào em");
     expect(t.f).toHaveBeenCalledTimes(1);
-    expect(t.sent[0].text).toMatch(busy);
+    expect(t.sent[0].text).toMatch(/đợi khoảng 30 giây/);
   });
   it("429 không có Retry-After: không thử lại", async () => {
     const t = setup([{ status: 429 }]);
@@ -810,5 +811,79 @@ describe("Form xin nghỉ QLL -> tự chuyển nhóm Cộng đồng", () => {
     await t.run(FORM + "\n\nCác tin dạng form như thế này em fw vào nhóm Cộng đồng được không");
     expect(t.f).toHaveBeenCalledTimes(1);
     expect(t.sent[0].text).not.toContain("Em tra theo");
+  });
+});
+
+import { parseDurationMs, estimateTokens, tpmWaitMs } from "../lib/ai.js";
+
+describe("Báo bận do hạn mức token/phút (lỗi thực tế: 5 lần 429)", () => {
+  it("parseDurationMs đọc đúng header reset của Groq", () => {
+    expect(parseDurationMs("7.66s")).toBe(7660);
+    expect(parseDurationMs("1m2.5s")).toBe(62500);
+    expect(parseDurationMs("450ms")).toBe(450);
+    expect(parseDurationMs("")).toBe(0);
+  });
+
+  it("request đã gọn hơn: system + tools dưới ~5.000 ký tự (trước ~8.100)", async () => {
+    const t = setup([say("ok")]);
+    await t.run("hôm nay sao rồi em");
+    const b = t.bodies[0];
+    const size = b.messages[0].content.length + JSON.stringify(b.tools).length;
+    expect(size).toBeLessThan(5000);
+    expect(b.tools.length).toBe(16); // không bỏ công cụ nào
+  });
+
+  it("biết trước thiếu token/phút và không kịp chờ -> KHÔNG gọi Groq, báo rõ số giây", async () => {
+    const t = setup([]);
+    setTpmStateForTest({ rem: 300, resetAt: Date.now() + 40_000 });
+    await t.run("hôm nay tình hình thế nào em");
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent[0].text).toMatch(/giới hạn miễn phí của Groq theo phút.*đợi khoảng \d+ giây/);
+  });
+
+  it("thiếu token nhưng chỉ cần chờ ~1s -> chờ rồi gọi bình thường", async () => {
+    const t = setup([say("Ổn anh ơi")]);
+    setTpmStateForTest({ rem: 300, resetAt: Date.now() + 800 });
+    await t.run("hôm nay tình hình thế nào em");
+    expect(t.f).toHaveBeenCalledTimes(1);
+    expect(t.sent[0].text).toBe("Ổn anh ơi");
+  });
+
+  it("429 với reset ngắn (1s) -> chờ rồi thử lại 1 lần, trả lời được", async () => {
+    const t = setup([{ status: 429, headers: { "x-ratelimit-reset-tokens": "1s" } }, say("Có ngay anh")]);
+    await t.run("hôm nay tình hình thế nào em");
+    expect(t.f).toHaveBeenCalledTimes(2);
+    expect(t.sent[0].text).toBe("Có ngay anh");
+  });
+
+  it("429 cần đợi lâu (30s) -> không thử lại, báo đợi ~30 giây", async () => {
+    const t = setup([{ status: 429, headers: { "retry-after": "30" } }]);
+    await t.run("hôm nay tình hình thế nào em");
+    expect(t.f).toHaveBeenCalledTimes(1);
+    expect(t.sent[0].text).toContain("đợi khoảng 30 giây");
+  });
+
+  it("header lần trước được ghi nhớ để canh lượt sau", async () => {
+    const t = setup([
+      {
+        status: 200,
+        body: { choices: [{ message: { content: "ok" } }] },
+        headers: { "x-ratelimit-remaining-tokens": "100", "x-ratelimit-reset-tokens": "50s" },
+      },
+    ]);
+    await t.run("hôm nay tình hình thế nào em");
+    expect(tpmWaitMs(estimateTokens("x".repeat(3000), 300), Date.now())).toBeGreaterThan(40_000);
+  });
+
+  it("'em ơi' giữa cuộc trò chuyện: trả mẫu, KHÔNG tốn lượt AI", async () => {
+    const t = setup([], {
+      [HISTORY_ROW]: {
+        kind: "history",
+        byUser: { [`${ADMIN}:${ADMIN}`]: [{ t: NOW.getTime() - 60_000, role: "user", content: "x" }] },
+      },
+    });
+    await t.run("em ơi");
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent).toHaveLength(1);
   });
 });

@@ -272,7 +272,9 @@ export function cannedChat(
   let pool: readonly string[] | null = null;
   if (
     folded === "" ||
-    /^(hi|hello|helo|hey|alo|chao|xin chao|bee|bee oi|ong oi|chao bee|hi bee|hello bee)$/.test(folded)
+    /^(hi|hello|helo|hey|alo|chao|xin chao|bee|bee oi|ong oi|chao bee|hi bee|hello bee|em oi|e oi|chao em|bee em oi|tieu bee|tieu bee oi)$/.test(
+      folded
+    )
   ) {
     pool = GREET;
   } else if (/^(cam on|thanks|thank you|tks|cam on bee|cam on em|ok cam on)\b/.test(folded)) {
@@ -817,7 +819,9 @@ async function handleAi(
     // cuộc trò chuyện thì "ok" có thể là đồng ý bản nháp -> để AI hiểu theo mạch.
     const midConversation =
       isAdmin && (await lastTurnAgeMs(deps.supabase, convKey(message), now.getTime())) < FOLLOWUP_WINDOW_MS;
-    if (!midConversation) {
+    // Chỉ câu kiểu đồng ý/ok mới cần hiểu theo mạch; chào hỏi luôn trả mẫu (0 lượt AI).
+    const isAck = /^(ok|oke|okie|da|vang|duoc roi|uh|u|uk|ừ)$/.test(folded);
+    if (!midConversation || !isAck) {
       canned = cannedChat(folded, "{title}", rng); // điền danh xưng sau
       if (canned !== null) intent = "chat";
     }
@@ -841,7 +845,12 @@ async function handleAi(
         await appendHistory(deps.supabase, convKey(message), question, [answer], now.getTime());
         return true;
       }
-      await sendHere(deps, message, isPrivate, FALLBACK_BUSY.replace("{title}", title));
+      // Hết hạn mức token/phút: nói rõ cần đợi bao lâu, thay vì "bận" chung chung.
+      const busy =
+        rateHintSec > 0
+          ? `Em đang chạm giới hạn miễn phí của Groq theo phút, ${title} đợi khoảng ${Math.min(rateHintSec, 60)} giây rồi nhắn lại giúp em nhé 🥺`
+          : FALLBACK_BUSY.replace("{title}", title);
+      await sendHere(deps, message, isPrivate, busy);
       return true;
     }
   }
@@ -1548,6 +1557,49 @@ export async function writeNudge(
 // Trả câu trả lời cuối (đã gửi) hoặc null nếu lỗi (để rơi về luồng cũ).
 
 const AGENT_MAX_ROUNDS = 3; // thường 1 (trò chuyện) hoặc 2 (gọi công cụ rồi trả lời)
+
+// --- Hạn mức token/phút của Groq (theo header; bộ nhớ của instance) ---
+// Groq trả x-ratelimit-remaining-tokens + x-ratelimit-reset-tokens ("7.66s",
+// "1m2.5s", "450ms") sau mỗi lần gọi. Dùng để không gửi request chắc chắn bị 429.
+let tpmState: { rem: number; resetAt: number } | null = null;
+let rateHintSec = 0; // > 0: lượt này dừng vì hạn mức phút, cần đợi ~N giây
+
+export function parseDurationMs(s: string): number {
+  const t = (s ?? "").trim();
+  if (!t) return 0;
+  let ms = 0;
+  const re = /(\d+(?:\.\d+)?)(ms|h|m|s)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(t)) !== null) {
+    const v = Number(m[1]);
+    ms += m[2] === "ms" ? v : m[2] === "s" ? v * 1000 : m[2] === "m" ? v * 60_000 : v * 3_600_000;
+  }
+  return Math.round(ms);
+}
+
+// Ước lượng token 1 request: ~3 ký tự/token (tiếng Việt + JSON) + trần output.
+export function estimateTokens(payload: string, maxOut: number): number {
+  return Math.ceil(payload.length / 3) + maxOut;
+}
+
+function noteTpm(headers: { get(k: string): string | null } | null | undefined, nowMs: number): void {
+  const rem = Number(headers?.get?.("x-ratelimit-remaining-tokens") ?? "");
+  const reset = parseDurationMs(headers?.get?.("x-ratelimit-reset-tokens") ?? "");
+  if (Number.isFinite(rem) && headers?.get?.("x-ratelimit-remaining-tokens") != null) {
+    tpmState = { rem, resetAt: nowMs + (reset || 60_000) };
+  }
+}
+
+// Cần đợi bao lâu (ms) để đủ token cho request này; 0 = gọi được ngay.
+export function tpmWaitMs(need: number, nowMs: number): number {
+  if (!tpmState || nowMs >= tpmState.resetAt) return 0;
+  return tpmState.rem >= need ? 0 : tpmState.resetAt - nowMs + 200;
+}
+
+// Chỉ dùng trong test.
+export function setTpmStateForTest(s: { rem: number; resetAt: number } | null): void {
+  tpmState = s;
+}
 const AGENT_DEADLINE_MS = 8500; // chừa chỗ cho webhook Vercel
 
 type AgentMsg =
@@ -1560,188 +1612,55 @@ interface ToolCall {
   function: { name: string; arguments: string };
 }
 
-const NHOM = { type: "string", enum: ["qll", "htkt", "all"], description: "qll, htkt hoặc all (cả hai)" };
+// Mô tả công cụ viết GỌN: danh sách công cụ gửi kèm MỖI lần gọi Groq nên tốn
+// token trực tiếp (gói free 8.000 token/phút).
+const NHOM = { type: "string", enum: ["qll", "htkt", "all"] };
+const S = { type: "string" };
+function tool(name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []) {
+  return {
+    type: "function",
+    function: {
+      name,
+      description,
+      parameters: required.length ? { type: "object", properties, required } : { type: "object", properties },
+    },
+  };
+}
 const AGENT_TOOLS = [
-  {
-    type: "function",
-    function: {
-      name: "xem_so_lieu",
-      description: "Số liệu case hôm nay theo nhóm: tổng, đã xử lý, còn tồn + vài mã tồn. Dùng để trả lời bằng lời.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_bao_cao_ca",
-      description:
-        "Báo cáo 1 ca HÔM NAY: CTV nào làm, mỗi người bao nhiêu case (tim, reply, QLL, HTKT). Bỏ trống ca = ca hiện tại.",
-      parameters: {
-        type: "object",
-        properties: { ca: { type: "string", enum: ["sang", "chieu", "toi"] } },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_checkin",
-      description: "Danh sách CTV đã check-in ca hiện tại.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "tra_cuu_case",
-      description: "Tìm case trong 3 ngày gần nhất theo mã lớp/mã HS/tên/từ khóa: nhóm, giờ, đã xử lý chưa, ai xử lý, link.",
-      parameters: { type: "object", properties: { tu_khoa: { type: "string" } }, required: ["tu_khoa"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_ctv",
-      description: "Hôm nay 1 CTV đã xử lý bao nhiêu case (theo ca, tim/reply, QLL/HTKT).",
-      parameters: {
-        type: "object",
-        properties: { username: { type: "string", description: "username Telegram, không cần @" } },
-        required: ["username"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_cau_hinh",
-      description: "Ai điều phối từng ca, CTV đang tắt SLA, lịch tag ca chiều hôm nay, danh sách lệnh bot.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_cac_nhom",
-      description: "Danh sách các nhóm Telegram Bee đang ở (tên, lần cuối có tin, bot còn trong nhóm không).",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_nhom",
-      description:
-        "Đọc tin nhắn gần đây (24h) của 1 nhóm ngoài QLL/HTKT theo tên, vd \"Xếp lớp\". Dùng để tóm tắt, xem ai hỏi gì, tin nào chưa ai trả lời.",
-      parameters: { type: "object", properties: { ten_nhom: { type: "string" } }, required: ["ten_nhom"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "gui_tin_nhom",
-      description:
-        "ĐĂNG THẬT 1 tin vào 1 nhóm theo TÊN (Bee tự tra ID nhóm, admin không cần đưa ID). Có tra_loi_cho thì reply vào tin gần nhất của người đó trong nhóm. Chỉ dùng khi admin bảo gửi/nhắn/rep rõ ràng.",
-      parameters: {
-        type: "object",
-        properties: {
-          ten_nhom: { type: "string", description: "tên nhóm, vd \"Xếp lớp\"" },
-          noi_dung: { type: "string" },
-          tra_loi_cho: {
-            type: "string",
-            description: "username người cần reply (\"admin\" = chính người đang ra lệnh); bỏ trống = gửi tin mới",
-          },
-        },
-        required: ["ten_nhom", "noi_dung"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "xem_han_muc",
-      description: "Hạn mức/credit hôm nay: số lần gọi Groq, token đã dùng, Groq báo còn bao nhiêu, trần lượt của Bee.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "gui_danh_sach",
-      description:
-        "Gửi vào cuộc trò chuyện này bản đầy đủ (bảng/danh sách có link). Dùng khi admin muốn XEM danh sách case tồn, bảng báo cáo hoặc danh sách check-in.",
-      parameters: {
-        type: "object",
-        properties: {
-          loai: { type: "string", enum: ["case_ton", "bao_cao", "checkin"] },
-          nhom: NHOM,
-        },
-        required: ["loai"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "nhan_nhom",
-      description:
-        "ĐĂNG THẬT vào nhóm: tag CTV đang trực + câu nhắc + danh sách case tồn. Chỉ gọi khi admin đã bảo gửi/nhắn rõ ràng hoặc đã đồng ý bản nháp.",
-      parameters: {
-        type: "object",
-        properties: {
-          nhom: NHOM,
-          cau_nhac: { type: "string", description: "Câu nhắc 1-2 câu, không @, không link, không liệt kê case" },
-        },
-        required: ["nhom", "cau_nhac"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "tag_ctv",
-      description:
-        "ĐĂNG THẬT vào nhóm: tag ĐÚNG những người được chỉ định. Có ma_case thì reply thẳng vào tin case đó. Dùng khi admin bảo tag/nhờ 1 người cụ thể (kể cả \"anh ý\" = người vừa nhắc).",
-      parameters: {
-        type: "object",
-        properties: {
-          nhom: { type: "string", enum: ["qll", "htkt"] },
-          usernames: { type: "array", items: { type: "string" }, description: "username Telegram, không @" },
-          ma_case: { type: "string", description: "mã case/mã HS/mã lớp để tìm tin gốc (nếu có)" },
-          loi_nhan: { type: "string", description: "câu nhờ ngắn, tự nhiên, không @, không link" },
-        },
-        required: ["nhom", "usernames", "loi_nhan"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "hen_tag_ca_chieu",
-      description: "Hẹn: sau 13h30 hôm nay tự tag CTV ca chiều xử lý case tồn.",
-      parameters: { type: "object", properties: { nhom: NHOM }, required: ["nhom"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "ghi_nho",
-      description:
-        "Ghi vào bộ não lâu dài điều admin dạy: cách nói, quy tắc làm việc, sở thích, thông tin bền vững về team. KHÔNG ghi số liệu tạm thời.",
-      parameters: {
-        type: "object",
-        properties: { noi_dung: { type: "string", description: "1 câu ngắn, rõ ý" } },
-        required: ["noi_dung"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "quen",
-      description: "Xóa 1 điều trong bộ não theo số thứ tự, hoặc so=0 để xóa hết.",
-      parameters: { type: "object", properties: { so: { type: "integer" } }, required: ["so"] },
-    },
-  },
+  tool("xem_so_lieu", "Case hôm nay theo nhóm: tổng, đã xử lý, tồn"),
+  tool("xem_bao_cao_ca", "Báo cáo 1 ca hôm nay: CTV nào, bao nhiêu case. Trống = ca hiện tại", {
+    ca: { type: "string", enum: ["sang", "chieu", "toi"] },
+  }),
+  tool("xem_checkin", "CTV đã check-in ca hiện tại"),
+  tool("tra_cuu_case", "Tìm case 3 ngày gần nhất theo mã lớp/mã HS/tên", { tu_khoa: S }, ["tu_khoa"]),
+  tool("xem_ctv", "Hôm nay 1 CTV xử lý bao nhiêu case", { username: S }, ["username"]),
+  tool("xem_cau_hinh", "Điều phối ca, CTV tắt SLA, lịch tag, lệnh bot, số form đã tự chuyển"),
+  tool("xem_cac_nhom", "Các nhóm Bee đang ở"),
+  tool("xem_nhom", "Tin 24h gần đây của 1 nhóm ngoài QLL/HTKT, theo tên", { ten_nhom: S }, ["ten_nhom"]),
+  tool(
+    "gui_tin_nhom",
+    "ĐĂNG THẬT 1 tin vào nhóm theo tên (tự tra ID). tra_loi_cho=\"admin\" để reply tin của admin",
+    { ten_nhom: S, noi_dung: S, tra_loi_cho: S },
+    ["ten_nhom", "noi_dung"]
+  ),
+  tool("xem_han_muc", "Hạn mức Groq/credit hôm nay"),
+  tool("gui_danh_sach", "Gửi bản đầy đủ có link: case tồn / bảng báo cáo / check-in", {
+    loai: { type: "string", enum: ["case_ton", "bao_cao", "checkin"] },
+    nhom: NHOM,
+  }, ["loai"]),
+  tool("nhan_nhom", "ĐĂNG THẬT: tag CTV trực + câu nhắc + case tồn QLL/HTKT", { nhom: NHOM, cau_nhac: S }, [
+    "nhom",
+    "cau_nhac",
+  ]),
+  tool(
+    "tag_ctv",
+    "ĐĂNG THẬT: tag đúng người; có ma_case thì reply vào tin case đó",
+    { nhom: { type: "string", enum: ["qll", "htkt"] }, usernames: { type: "array", items: S }, ma_case: S, loi_nhan: S },
+    ["nhom", "usernames", "loi_nhan"]
+  ),
+  tool("hen_tag_ca_chieu", "Hẹn sau 13h30 tag CTV ca chiều xử lý case tồn", { nhom: NHOM }, ["nhom"]),
+  tool("ghi_nho", "Ghi lâu dài điều admin dạy (không ghi số liệu tạm)", { noi_dung: S }, ["noi_dung"]),
+  tool("quen", "Xóa điều số so trong bộ não; so=0 xóa hết", { so: { type: "integer" } }, ["so"]),
 ];
 
 function vnClock(now: Date): string {
@@ -1752,30 +1671,20 @@ function vnClock(now: Date): string {
 
 function agentSystem(title0: string, notes: string[], now: Date, isPrivate: boolean): string {
   const title = title0 === "anh/chị" ? "anh" : title0;
+  // Viết GỌN: prompt gửi kèm MỌI lần gọi -> tốn token/phút trực tiếp.
   return [
-    `Bạn là Tiểu Bee, trợ lý đồng nghiệp của team CTV VHHS. Theo dõi case ở 2 nhóm QLL và HTKT, ngoài ra còn ở các nhóm khác (xem_cac_nhom). Đang nói chuyện với admin; xưng "em", gọi "${title}".`,
-    "- Hỏi về nhóm khác (\"nhóm Xếp lớp\", \"em ở những nhóm nào\", \"nhóm vừa tag em\") -> xem_cac_nhom / xem_nhom, không hỏi lại QLL hay HTKT.",
-    "- Gửi/rep 1 tin bất kỳ vào nhóm nào đó -> gui_tin_nhom (theo tên, không cần ID; \"rep lại anh\" = tra_loi_cho \"admin\"). nhan_nhom CHỈ để nhắc case tồn ở QLL/HTKT, không dùng gửi tin thường.",
-    "- TUYỆT ĐỐI không nói đã gửi/nhắn/tag nếu chưa gọi công cụ gửi và công cụ chưa báo thành công.",
-    "- Việc tự động đang chạy: mọi tin ở QLL có đủ form (Tên / Code / Mã học sinh + mã lớp + LỚP + Ngày vào lớp / GV dạy) — xin nghỉ, xin muộn, out sớm, phản ánh... — tự chuyển sang nhóm Cộng đồng VH - BGD; xem số lượng qua xem_cau_hinh. Ngoài việc này và hẹn tag ca chiều, em KHÔNG có cơ chế tự động nào khác: không được hứa \"em sẽ tự fw/chuyển/gửi\" các loại tin khác.",
-    `Giờ VN: ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm, mọi người cùng thấy."}`,
-    "Giọng: như đồng nghiệp nhắn tin, ngắn (1-2 câu), thân thiện, đổi cách nói cho tự nhiên. Không cần mở đầu bằng \"Dạ\" hay gọi tên ở mọi câu, không lặp lại câu hỏi. Tối đa 1 emoji, văn bản thuần, không markdown.",
+    `Bạn là Tiểu Bee, trợ lý đồng nghiệp team CTV VHHS (theo dõi case nhóm QLL, HTKT; còn ở các nhóm khác). Nói với admin: xưng "em", gọi "${title}".`,
+    `Giờ VN ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm."}`,
+    "Giọng: đồng nghiệp nhắn tin, 1-2 câu, tự nhiên, không mở đầu \"Dạ\" mọi câu, tối đa 1 emoji, không markdown, tên CTV không kèm @.",
     "Quy tắc:",
-    "- Hiểu câu nối tiếp và đại từ (\"nhóm đó\", \"còn bên kia\", \"ok gửi đi\") theo các tin trước.",
-    "- Số liệu chỉ lấy qua công cụ, không bịa. Thiếu thông tin quan trọng thì hỏi lại 1 câu ngắn, không đoán.",
-    "- Tag 1 người/1 case cụ thể (\"tag anh ý vào case 215785\") -> tag_ctv đúng người đó (\"anh ý\", \"bạn đó\" = người vừa nhắc trong mạch; không rõ là ai thì hỏi lại). KHÔNG dùng nhan_nhom cho việc này.",
-    "- Nhắc chung cả ca xử lý case tồn -> nhan_nhom. Được nhờ soạn/thử thì xem_so_lieu rồi đưa bản nháp và hỏi gửi không; chỉ gửi khi admin bảo gửi hoặc ra lệnh rõ. Nhóm hết case tồn thì nói không cần nhắc.",
-    "- Lời nhắn đăng vào nhóm phải là câu hoàn chỉnh tự nhiên do em viết (vd \"anh hỗ trợ giúp em case này nhé\"), không chép lại nguyên câu lệnh của admin.",
-    "- Khi trả lời admin, nêu tên CTV không kèm @ (tránh tag nhầm).",
-    "- Báo đúng kết quả công cụ; công cụ báo chưa gửi/lỗi thì không nói đã gửi.",
-    "- Admin dặn quy tắc lâu dài (\"từ nay\", \"lần sau\", \"nhớ...\") thì ghi_nho 1 câu rõ ý. Không ghi sửa nháp tạm hay số liệu trong ngày. Hỏi em nhớ gì thì chỉ kể BỘ NÃO.",
-    "- Ngoài số liệu, em giúp được việc chung như đồng nghiệp: soạn/sửa tin nhắn, gợi ý cách trả lời phụ huynh, giải thích, tính nhẩm, góp ý, trò chuyện. Việc chung dùng hiểu biết chung; còn thông tin nội bộ (case, CTV, số liệu, cấu hình) thì chỉ lấy qua công cụ.",
-    "- Hỏi về 1 case cụ thể (mã lớp, mã HS, tên) dùng tra_cuu_case; về 1 CTV dùng xem_ctv; về điều phối/SLA/lệnh bot dùng xem_cau_hinh.",
-    "- Việc thay đổi dữ liệu (chuyển ca, thêm/xóa CTV, tắt SLA...) em chưa tự làm được: chỉ admin gõ đúng lệnh (xem_cau_hinh có danh sách lệnh) và đưa luôn câu lệnh mẫu.",
-    "- Câu hỏi mơ hồ: đoán ý hợp lý nhất theo mạch; nếu vẫn có 2 khả năng khác nhau thì hỏi lại 1 câu.",
-    notes.length
-      ? "BỘ NÃO (admin dạy, luôn làm theo):\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n")
-      : "BỘ NÃO: (trống)",
+    "- Hiểu câu nối tiếp/đại từ (\"nhóm đó\", \"anh ý\", \"ok gửi đi\") theo tin trước. Mơ hồ thật thì hỏi lại 1 câu.",
+    "- Số liệu/case/CTV/cấu hình chỉ lấy qua công cụ, không bịa. Việc chung (soạn tin, trả lời phụ huynh, giải thích, tính nhẩm) thì tự làm.",
+    "- Nhóm ngoài QLL/HTKT: xem_cac_nhom, xem_nhom; gửi/rep tin thường: gui_tin_nhom (theo tên).",
+    "- Nhắc cả ca case tồn: nhan_nhom; tag 1 người/1 case: tag_ctv. Nhờ soạn thử thì đưa nháp, chỉ gửi khi admin bảo gửi. Lời nhắn tự viết tự nhiên, không chép lệnh.",
+    "- Chưa có công cụ báo thành công thì KHÔNG nói đã gửi/tag. Không hứa tự động việc gì ngoài: hẹn tag ca chiều, và form QLL đủ mẫu tự chuyển sang nhóm Cộng đồng VH - BGD.",
+    "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
+    "- Admin dặn lâu dài (\"từ nay\", \"lần sau\", \"nhớ\") thì ghi_nho 1 câu. Hỏi em nhớ gì thì kể BỘ NÃO.",
+    notes.length ? "BỘ NÃO:\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n") : "BỘ NÃO: (trống)",
   ].join("\n");
 }
 
@@ -1804,7 +1713,7 @@ async function agentCall(
   sb?: SupabaseClient // có thì ghi sổ hạn mức
 ): Promise<{ content: string; tool_calls?: ToolCall[]; finish?: string } | null> {
   const doFetch = ai.fetchImpl ?? fetch;
-  // Tối đa 2 lần gửi: lần 2 CHỈ khi 429 có Retry-After ngắn (<=2s) hoặc lỗi 5xx,
+  // Tối đa 2 lần gửi: lần 2 CHỈ khi 429 cần đợi ngắn (<=6s, kịp thời gian) hoặc lỗi 5xx,
   // và còn đủ thời gian. 400/401/timeout/mất mạng: không thử lại.
   for (let attempt = 0; attempt < 2; attempt++) {
     const left = deadline - Date.now();
@@ -1825,26 +1734,46 @@ async function agentCall(
         body.reasoning_effort = "low";
         body.include_reasoning = false;
       }
+      // Tự canh hạn mức token/phút (theo header Groq lần trước) TRƯỚC khi gọi, để
+      // không tự gây 429. Thiếu thì chờ tới lúc hồi (nếu kịp), không thì báo rõ.
+      const payload = JSON.stringify(body);
+      const need = estimateTokens(payload, ai.maxCompletionTokens);
+      const waitTpm = tpmWaitMs(need, Date.now());
+      if (waitTpm > 0) {
+        if (Date.now() + waitTpm + 1500 >= deadline) {
+          rateHintSec = Math.ceil(waitTpm / 1000);
+          console.error(`[Bee AI] thiếu token/phút (cần ~${need}), phải đợi ${rateHintSec}s -> báo admin`);
+          return null;
+        }
+        console.log(`[Bee AI] chờ ${waitTpm}ms cho hạn mức token/phút hồi (cần ~${need})`);
+        await sleepMs(waitTpm);
+      }
       let res: Awaited<ReturnType<typeof doFetch>>;
       try {
         res = await doFetch(GROQ_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
-          body: JSON.stringify(body),
+          body: payload,
           signal: controller.signal,
         });
       } catch (e) {
         if (sb) await recordGroqCall(sb, { status: 0, model: ai.agentModel });
         throw e;
       }
+      noteTpm(res.headers, Date.now());
       if (sb && !res.ok) await recordGroqCall(sb, { status: res.status, model: ai.agentModel, headers: res.headers });
       if (res.status === 429) {
-        const wait = Number(res.headers?.get?.("retry-after") ?? "") * 1000;
-        console.error(`[Bee AI] 429 rate limit (retry-after=${wait || "?"}ms, lần ${attempt + 1})`);
-        if (attempt === 0 && wait > 0 && wait <= 2000 && Date.now() + wait + 1500 < deadline) {
-          await sleepMs(wait);
+        // Groq báo phải đợi: retry-after (giây) hoặc x-ratelimit-reset-tokens ("7.66s").
+        const ra = Number(res.headers?.get?.("retry-after") ?? "") * 1000;
+        const wait = ra > 0 ? ra : parseDurationMs(res.headers?.get?.("x-ratelimit-reset-tokens") ?? "");
+        console.error(`[Bee AI] 429 rate limit (đợi ${wait || "?"}ms, lần ${attempt + 1})`);
+        // Groq nói rõ cần đợi <= 6s và còn kịp thời gian webhook: chờ rồi thử lại 1 lần.
+        // Không rõ thời gian đợi: KHÔNG đoán thử lại (tốn lượt), báo admin.
+        if (attempt === 0 && wait > 0 && wait <= 6000 && Date.now() + wait + 1500 < deadline) {
+          await sleepMs(wait + 200);
           continue;
         }
+        rateHintSec = wait > 0 ? Math.max(5, Math.ceil(wait / 1000)) : 20;
         return null;
       }
       if (res.status >= 500) {
@@ -2043,6 +1972,7 @@ export async function runAgent(
   now: Date
 ): Promise<string | null> {
   const deadline = Date.now() + AGENT_DEADLINE_MS;
+  rateHintSec = 0;
   const ctx = {
     deps,
     message,
