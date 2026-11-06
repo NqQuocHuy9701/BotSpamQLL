@@ -1633,6 +1633,26 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "gui_tin_nhom",
+      description:
+        "ĐĂNG THẬT 1 tin vào 1 nhóm theo TÊN (Bee tự tra ID nhóm, admin không cần đưa ID). Có tra_loi_cho thì reply vào tin gần nhất của người đó trong nhóm. Chỉ dùng khi admin bảo gửi/nhắn/rep rõ ràng.",
+      parameters: {
+        type: "object",
+        properties: {
+          ten_nhom: { type: "string", description: "tên nhóm, vd \"Xếp lớp\"" },
+          noi_dung: { type: "string" },
+          tra_loi_cho: {
+            type: "string",
+            description: "username người cần reply (\"admin\" = chính người đang ra lệnh); bỏ trống = gửi tin mới",
+          },
+        },
+        required: ["ten_nhom", "noi_dung"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "xem_han_muc",
       description: "Hạn mức/credit hôm nay: số lần gọi Groq, token đã dùng, Groq báo còn bao nhiêu, trần lượt của Bee.",
       parameters: { type: "object", properties: {} },
@@ -1730,6 +1750,8 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
   return [
     `Bạn là Tiểu Bee, trợ lý đồng nghiệp của team CTV VHHS. Theo dõi case ở 2 nhóm QLL và HTKT, ngoài ra còn ở các nhóm khác (xem_cac_nhom). Đang nói chuyện với admin; xưng "em", gọi "${title}".`,
     "- Hỏi về nhóm khác (\"nhóm Xếp lớp\", \"em ở những nhóm nào\", \"nhóm vừa tag em\") -> xem_cac_nhom / xem_nhom, không hỏi lại QLL hay HTKT.",
+    "- Gửi/rep 1 tin bất kỳ vào nhóm nào đó -> gui_tin_nhom (theo tên, không cần ID; \"rep lại anh\" = tra_loi_cho \"admin\"). nhan_nhom CHỈ để nhắc case tồn ở QLL/HTKT, không dùng gửi tin thường.",
+    "- TUYỆT ĐỐI không nói đã gửi/nhắn/tag nếu chưa gọi công cụ gửi và công cụ chưa báo thành công.",
     `Giờ VN: ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm, mọi người cùng thấy."}`,
     "Giọng: như đồng nghiệp nhắn tin, ngắn (1-2 câu), thân thiện, đổi cách nói cho tự nhiên. Không cần mở đầu bằng \"Dạ\" hay gọi tên ở mọi câu, không lặp lại câu hỏi. Tối đa 1 emoji, văn bản thuần, không markdown.",
     "Quy tắc:",
@@ -1908,6 +1930,18 @@ async function runTool(
         return await ctvToday(deps.supabase, String(args.username ?? ""), now);
       case "xem_cau_hinh":
         return await configSummary(deps.supabase, now);
+      case "gui_tin_nhom": {
+        let replyUser = String(args.tra_loi_cho ?? "").trim().replace(/^@/, "").toLowerCase();
+        if (replyUser === "admin") replyUser = `id:${message.from?.id ?? 0}`;
+        const r = await sendToGroup(
+          deps,
+          String(args.ten_nhom ?? ""),
+          sanitizeReply(String(args.noi_dung ?? "")),
+          replyUser,
+          now.getTime()
+        );
+        return `KẾT QUẢ THẬT (báo đúng như vậy): ${r}`;
+      }
       case "xem_cac_nhom":
         return await listGroups(deps.supabase, deps.ai, now.getTime());
       case "xem_nhom":
@@ -2024,6 +2058,7 @@ export async function runAgent(
   ];
 
   let acted = false; // đã thực thi công cụ có tác dụng thật (gửi/ghi)
+  let sentOk = false; // lượt này có công cụ GỬI nào báo thành công thật không
   let why = "hết vòng";
   for (let round = 0; round < AGENT_MAX_ROUNDS; round++) {
     // Vòng cuối: KHÔNG cho gọi công cụ nữa -> AI buộc phải trả lời bằng dữ liệu
@@ -2040,8 +2075,12 @@ export async function runAgent(
         why = `AI trả rỗng (finish=${m.finish ?? "?"})`;
         break;
       }
-      await sendHere(deps, message, isPrivate, text);
-      return text;
+      // Chốt chặn: không cho Bee nhận "đã gửi" khi lượt này không có công cụ
+      // gửi nào thành công thật (AI hay "tưởng tượng" ra hành động).
+      const final = claimsSent(text) && !sentOk ? FAKE_SEND_FIX : text;
+      if (final !== text) console.error(`[Bee AI] chặn câu nhận đã gửi sai: ${text.slice(0, 120)}`);
+      await sendHere(deps, message, isPrivate, final);
+      return final;
     }
     messages.push({ role: "assistant", content: m.content, tool_calls: m.tool_calls });
     for (const tc of m.tool_calls.slice(0, 3)) {
@@ -2052,7 +2091,12 @@ export async function runAgent(
         // tham số hỏng -> chạy với {}
       }
       const result = await runTool(tc.function.name, args, ctx);
-      if (/^(gui_danh_sach|nhan_nhom|tag_ctv|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) acted = true;
+      if (/^(gui_danh_sach|nhan_nhom|tag_ctv|gui_tin_nhom|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) {
+        acted = true;
+      }
+      if (/^(nhan_nhom|tag_ctv|gui_tin_nhom|gui_danh_sach|hen_tag_ca_chieu)$/.test(tc.function.name) && /Đã (gửi|tag|nhắn|lưu lịch)|em nhắn nhóm/i.test(result)) {
+        sentOk = true;
+      }
       messages.push({ role: "tool", tool_call_id: tc.id, content: result.slice(0, 1200) });
     }
   }
@@ -2393,6 +2437,7 @@ interface GroupLogItem {
   text: string;
   mid: number;
   replyTo?: number;
+  uid?: number;
 }
 
 function groupLogRowId(chatId: number): number {
@@ -2436,6 +2481,7 @@ export async function observeGroup(supabase: SupabaseClient, message: TelegramMe
       text: isSensitive(raw) ? "[tin có tài khoản/mật khẩu/số dài, đã ẩn]" : raw.replace(/\s+/g, " ").slice(0, 200),
       mid: message.message_id,
       replyTo: message.reply_to_message?.message_id,
+      uid: f?.id,
     };
     const id = groupLogRowId(chatId);
     const cur = (await readRow<{ kind?: string; items?: GroupLogItem[] }>(supabase, id)) ?? {};
@@ -2521,4 +2567,70 @@ export async function readGroup(supabase: SupabaseClient, name: string, nowMs: n
   return [`Nhóm "${g.title}" — ${items.length} tin trong 24h qua (hiện ${lines.length} tin gần nhất):`, ...lines].join(
     "\n"
   );
+}
+
+// ---------------------------------------------------------------------------
+// Gửi tin vào nhóm theo tên + chốt chặn "nhận đã gửi" sai
+// ---------------------------------------------------------------------------
+const FAKE_SEND_FIX =
+  "Em xin lỗi, em chưa gửi được tin nào thật ạ 🥺 Anh nói lại giúp em: gửi vào nhóm nào và nội dung gì nhé.";
+
+// Câu trả lời có khẳng định đã gửi/nhắn/tag/đăng không.
+export function claimsSent(text: string): boolean {
+  const s = text.normalize("NFC").toLowerCase();
+  return /(đã|vừa|rồi).{0,20}(gửi|nhắn|tag|đăng|rep)|(gửi|nhắn|tag|đăng|rep).{0,30}(rồi|xong)/.test(s) &&
+    !/(chưa|không) (gửi|nhắn|tag|đăng)/.test(s);
+}
+
+async function findGroupByName(
+  supabase: SupabaseClient,
+  name: string
+): Promise<[number, GroupInfo] | undefined> {
+  const q = foldVi(name);
+  const groups = await loadGroups(supabase);
+  return (
+    groups.find(([, g]) => foldVi(g.title) === q) ??
+    groups.find(([, g]) => q !== "" && foldVi(g.title).includes(q)) ??
+    groups.find(([, g]) => {
+      const words = q.split(" ").filter((w) => w.length > 1);
+      return words.length > 0 && words.every((w) => foldVi(g.title).includes(w));
+    })
+  );
+}
+
+// Gửi tin vào nhóm (tìm theo tên trong sổ nhóm). replyUser: reply vào tin gần
+// nhất của người đó (chỉ nhóm có lưu tin gần đây). Trả mô tả kết quả THẬT.
+export async function sendToGroup(
+  deps: AiDeps,
+  name: string,
+  text: string,
+  replyUser: string,
+  nowMs: number
+): Promise<string> {
+  if (text.trim().length < 1) return "Chưa có nội dung để gửi, hãy hỏi lại admin.";
+  const hit = await findGroupByName(deps.supabase, name);
+  if (!hit) {
+    const known = (await loadGroups(deps.supabase)).map(([, g]) => g.title).join("; ") || "(chưa có)";
+    return `Chưa gửi: không thấy nhóm tên "${name}". Các nhóm em biết: ${known}.`;
+  }
+  const [chatId, g] = hit;
+  let replyTo: number | undefined;
+  let note = "";
+  if (replyUser) {
+    const log = await readRow<{ kind?: string; items?: GroupLogItem[] }>(deps.supabase, groupLogRowId(chatId));
+    const items = (log?.kind === "grouplog" && Array.isArray(log.items) ? log.items : []).filter(
+      (x) => nowMs - x.t < GROUP_LOG_TTL_MS
+    );
+    const target = [...items].reverse().find((x) => {
+      const who = x.from.toLowerCase();
+      return replyUser.startsWith("id:")
+        ? x.uid === Number(replyUser.slice(3))
+        : who === replyUser || who.replace(" (bot)", "") === replyUser;
+    });
+    if (target) replyTo = target.mid;
+    else note = ` (không thấy tin gần đây của ${replyUser} nên gửi tin mới)`;
+  }
+  const res = await deps.telegram.sendMessage(chatId, text, replyTo);
+  if (!res.ok) return `Chưa gửi được vào nhóm "${g.title}" (Telegram từ chối, có thể bot không có quyền gửi tin).`;
+  return `Đã gửi vào nhóm "${g.title}"${replyTo ? " (reply đúng tin)" : ""}${note}: "${text}"`;
 }

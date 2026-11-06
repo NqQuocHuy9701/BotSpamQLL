@@ -622,3 +622,57 @@ describe("Bee tự nhận diện các nhóm được add vào", () => {
     expect(t.sent.at(-1)!.text).toContain("Xếp lớp");
   });
 });
+
+import { claimsSent } from "../lib/ai.js";
+
+describe("Gửi tin vào nhóm theo tên + chặn báo 'đã gửi' sai (lỗi thực tế)", () => {
+  beforeEach(() => resetGroupCacheForTest());
+  const XEPLOP = -1002493556435;
+  const seed = {
+    [-9104]: {
+      kind: "groups",
+      groups: { [String(XEPLOP)]: { title: "[BU VUIHOC VH] Hỗ Trợ Xếp Lớp", type: "supergroup", lastSeen: NOW.toISOString() } },
+    },
+    [XEPLOP - 3_000_000_000_000]: {
+      kind: "grouplog",
+      items: [{ t: NOW.getTime() - 60_000, from: "Quốc Huy", uid: ADMIN, text: "@vh_messenger_bot test", mid: 77 }],
+    },
+  };
+  const send = (args: object) => ({
+    id: "c1",
+    type: "function",
+    function: { name: "gui_tin_nhom", arguments: JSON.stringify(args) },
+  });
+
+  it("AI nói 'đã gửi' mà KHÔNG gọi công cụ -> chặn, nói thật là chưa gửi", async () => {
+    const t = setup([say('Dạ, đã gửi tin "test nhé" vào các nhóm rồi ạ.')], seed);
+    await t.run("Ờ em rep lại là test nhé");
+    expect(t.sent.some((s) => s.chat === XEPLOP)).toBe(false);
+    expect(t.sent.at(-1)!.text).toContain("chưa gửi được tin nào thật");
+  });
+
+  it("gui_tin_nhom: tìm nhóm theo tên (không cần ID), reply đúng tin của admin", async () => {
+    const t = setup([say("", [send({ ten_nhom: "Xếp lớp", noi_dung: "test nhé", tra_loi_cho: "admin" })]), say("Em rep trong nhóm Xếp lớp rồi ạ")], seed);
+    await t.run("Ờ em rep lại là test nhé");
+    const post = t.sent.find((s) => s.chat === XEPLOP)!;
+    expect(post.text).toBe("test nhé");
+    expect(post.replyTo).toBe(77);
+    expect(t.sent.at(-1)!.text).toBe("Em rep trong nhóm Xếp lớp rồi ạ"); // có gửi thật -> không bị chặn
+  });
+
+  it("tên nhóm không có trong sổ: không gửi, báo các nhóm đã biết", async () => {
+    const t = setup([say("", [send({ ten_nhom: "Kế toán", noi_dung: "hi" })]), say("Em không thấy nhóm Kế toán ạ")], seed);
+    await t.run("gửi nhóm kế toán chữ hi");
+    expect(t.sent.some((s) => s.chat < -1000000000000 && s.chat !== ADMIN)).toBe(false);
+    const tool = t.bodies[1].messages.find((m: any) => m.role === "tool");
+    expect(tool.content).toContain("Chưa gửi");
+    expect(tool.content).toContain("Hỗ Trợ Xếp Lớp");
+  });
+
+  it("claimsSent nhận đúng câu khẳng định đã gửi", () => {
+    expect(claimsSent('Dạ, đã gửi tin "test nhé" vào các nhóm rồi ạ.')).toBe(true);
+    expect(claimsSent("tin test nhé mình đã gửi vào nhóm Xếp lớp ạ")).toBe(true);
+    expect(claimsSent("Em chưa gửi được ạ")).toBe(false);
+    expect(claimsSent("Hôm nay QLL còn 1 case ạ")).toBe(false);
+  });
+});
