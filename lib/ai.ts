@@ -164,6 +164,23 @@ export function foldVi(s: string): string {
 const ANALYTIC_RE =
   /(nhieu nhat|it nhat|cao nhat|thap nhat|bao nhieu|so sanh|tai sao|vi sao|ban nhat|dung dau|\bai\b.*(xu ly|lam|top|tot|cham)|nhan xet|danh gia|the nao|ra sao)/;
 
+// Có cần AI hiểu câu này (thay vì luật từ khóa) không — chỉ áp cho admin.
+export function needsAiUnderstanding(intent: Intent, raw: string): boolean {
+  if (intent === "nhacnhom" || intent === "hentag") return true; // hành động đăng vào nhóm
+  if (intent === "xemnho" || intent === "quennho" || intent === "daynho") return false;
+  const s = ` ${raw.normalize("NFC").toLowerCase().replace(/[,.!?;:()"']/g, " ")} `;
+  // JS \b không nhận chữ có dấu -> dùng khoảng trắng làm ranh giới từ.
+  const has = (words: string) => new RegExp(` (${words}) `).test(s);
+  return (
+    /@[a-z0-9_]{3,}/i.test(s) || // nhắc tới 1 người cụ thể
+    /\d{3,}/.test(s) || // mã case / mã HS
+    /[a-z_]+\.\d{4}\.\d{3,4}/i.test(s) || // mã lớp
+    has("tag|nhắn|nhắc|đăng|gửi vào|gửi lên") || // ra lệnh hành động
+    has("(?:anh|chị|bạn|em|người|case|nhóm|cái|tin|bên) (?:ý|ấy|đó|này|kia|nọ)") || // đại từ
+    / (còn|thế còn|vậy còn) .*(thì sao|sao) /.test(s) // câu nối tiếp
+  );
+}
+
 // Lệnh bộ nhớ: đọc câu CÒN DẤU (vì "nhớ" và "nhờ" bỏ dấu đều thành "nho").
 export function classifyMemory(raw: string): Intent | null {
   const s = raw.normalize("NFC").toLowerCase().trim().replace(/^bee[\s,]+/, "");
@@ -768,6 +785,10 @@ async function handleAi(
   // Nhóm A (không cần AI): lệnh bộ nhớ rõ ràng + yêu cầu nghiệp vụ khớp luật.
   let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
   if (intent === null) intent = classifyByRules(folded);
+  // Admin: luật từ khóa chỉ dùng cho câu XEM đơn giản. Câu ra lệnh hành động
+  // (nhắn/tag/hẹn) hoặc nhắc tới người/case cụ thể, đại từ ("anh ý", "case đó")
+  // phải để AI hiểu theo mạch hội thoại.
+  if (isAdmin && intent !== null && needsAiUnderstanding(intent, question)) intent = null;
   let canned: string | null = null;
   if (intent === null) {
     // Câu xã giao ngắn ("ok", "cảm ơn"): trả mẫu có sẵn. Riêng admin đang giữa
@@ -1598,6 +1619,24 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "tag_ctv",
+      description:
+        "ĐĂNG THẬT vào nhóm: tag ĐÚNG những người được chỉ định. Có ma_case thì reply thẳng vào tin case đó. Dùng khi admin bảo tag/nhờ 1 người cụ thể (kể cả \"anh ý\" = người vừa nhắc).",
+      parameters: {
+        type: "object",
+        properties: {
+          nhom: { type: "string", enum: ["qll", "htkt"] },
+          usernames: { type: "array", items: { type: "string" }, description: "username Telegram, không @" },
+          ma_case: { type: "string", description: "mã case/mã HS/mã lớp để tìm tin gốc (nếu có)" },
+          loi_nhan: { type: "string", description: "câu nhờ ngắn, tự nhiên, không @, không link" },
+        },
+        required: ["nhom", "usernames", "loi_nhan"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "hen_tag_ca_chieu",
       description: "Hẹn: sau 13h30 hôm nay tự tag CTV ca chiều xử lý case tồn.",
       parameters: { type: "object", properties: { nhom: NHOM }, required: ["nhom"] },
@@ -1641,7 +1680,10 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "Quy tắc:",
     "- Hiểu câu nối tiếp và đại từ (\"nhóm đó\", \"còn bên kia\", \"ok gửi đi\") theo các tin trước.",
     "- Số liệu chỉ lấy qua công cụ, không bịa. Thiếu thông tin quan trọng thì hỏi lại 1 câu ngắn, không đoán.",
-    "- Nhắn nhóm: được nhờ soạn/thử thì xem_so_lieu rồi đưa bản nháp và hỏi gửi không; chỉ gọi nhan_nhom khi admin bảo gửi hoặc ra lệnh nhắn rõ. Nhóm hết case tồn thì nói không cần nhắc.",
+    "- Tag 1 người/1 case cụ thể (\"tag anh ý vào case 215785\") -> tag_ctv đúng người đó (\"anh ý\", \"bạn đó\" = người vừa nhắc trong mạch; không rõ là ai thì hỏi lại). KHÔNG dùng nhan_nhom cho việc này.",
+    "- Nhắc chung cả ca xử lý case tồn -> nhan_nhom. Được nhờ soạn/thử thì xem_so_lieu rồi đưa bản nháp và hỏi gửi không; chỉ gửi khi admin bảo gửi hoặc ra lệnh rõ. Nhóm hết case tồn thì nói không cần nhắc.",
+    "- Lời nhắn đăng vào nhóm phải là câu hoàn chỉnh tự nhiên do em viết (vd \"anh hỗ trợ giúp em case này nhé\"), không chép lại nguyên câu lệnh của admin.",
+    "- Khi trả lời admin, nêu tên CTV không kèm @ (tránh tag nhầm).",
     "- Báo đúng kết quả công cụ; công cụ báo chưa gửi/lỗi thì không nói đã gửi.",
     "- Admin dặn quy tắc lâu dài (\"từ nay\", \"lần sau\", \"nhớ...\") thì ghi_nho 1 câu rõ ý. Không ghi sửa nháp tạm hay số liệu trong ngày. Hỏi em nhớ gì thì chỉ kể BỘ NÃO.",
     "- Ngoài số liệu, em giúp được việc chung như đồng nghiệp: soạn/sửa tin nhắn, gợi ý cách trả lời phụ huynh, giải thích, tính nhẩm, góp ý, trò chuyện. Việc chung dùng hiểu biết chung; còn thông tin nội bộ (case, CTV, số liệu, cấu hình) thì chỉ lấy qua công cụ.",
@@ -1657,6 +1699,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
 // Bỏ markdown để hiển thị gọn trên Telegram (không dùng parse_mode).
 export function plainText(s: string): string {
   return s
+    .replace(/@([A-Za-z0-9_]{3,})/g, "$1") // lời Bee nói không tag ai; tag chỉ qua công cụ
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/__(.+?)__/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
@@ -1803,6 +1846,17 @@ async function runTool(
         if (scope === "all") scope = detectScope(foldVi(message.reply_to_message?.text ?? ""));
         const cau = sanitizeReply(String(args.cau_nhac ?? ""));
         const r = await remindGroups(deps, scope, title, now, cau.length >= 5 ? cau : "");
+        return `KẾT QUẢ THẬT (báo đúng như vậy): ${r}`;
+      }
+      case "tag_ctv": {
+        const nhom = args.nhom === "qll" ? "qll" : args.nhom === "htkt" ? "htkt" : null;
+        if (!nhom) return "Chưa rõ nhóm QLL hay HTKT, hãy hỏi lại admin.";
+        const users = (Array.isArray(args.usernames) ? args.usernames : [])
+          .map((u) => String(u).trim().replace(/^@/, "").toLowerCase())
+          .filter((u) => /^[a-z0-9_]{3,32}$/.test(u));
+        if (users.length === 0) return "Chưa rõ tag ai, hãy hỏi lại admin (cần username).";
+        const loiNhan = sanitizeReply(String(args.loi_nhan ?? "")) || "nhờ mình hỗ trợ giúp em nhé 😊";
+        const r = await tagInGroup(deps, nhom, users.slice(0, 5), String(args.ma_case ?? ""), loiNhan);
         return `KẾT QUẢ THẬT (báo đúng như vậy): ${r}`;
       }
       case "hen_tag_ca_chieu": {
@@ -2032,4 +2086,48 @@ export async function configSummary(supabase: SupabaseClient, now: Date): Promis
     "Lệnh bot (admin gõ ở chat riêng):",
     commands,
   ].join("\n");
+}
+
+// Tìm tin case gần nhất trong 1 nhóm theo mã/từ khóa (3 ngày dữ liệu).
+// Trả id tin THẬT trong nhóm (HTKT đổi ngược từ id âm phái sinh).
+async function findCaseMessage(
+  supabase: SupabaseClient,
+  nhom: "qll" | "htkt",
+  keyword: string
+): Promise<{ realId: number; content: string | null } | null> {
+  const kw = keyword.replace(/[%,()*\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  if (kw.length < 3) return null;
+  let q = supabase.from("qll_tracking").select("message_id, content").ilike("content", `%${kw}%`);
+  q = nhom === "qll" ? q.gt("message_id", 0) : q.lt("message_id", 0);
+  const { data } = await q.order("created_at", { ascending: false }).limit(1);
+  const row = (data as { message_id: number; content: string | null }[] | null)?.[0];
+  if (!row) return null;
+  const realId = row.message_id > 0 ? row.message_id : Math.round((-row.message_id - 1) / 10);
+  return { realId, content: row.content };
+}
+
+// Tag đúng người trong nhóm; có mã case thì reply vào tin case đó. Trả mô tả kết
+// quả thật (để AI báo lại đúng).
+async function tagInGroup(
+  deps: AiDeps,
+  nhom: "qll" | "htkt",
+  users: string[],
+  maCase: string,
+  loiNhan: string
+): Promise<string> {
+  const chatId = nhom === "qll" ? QLL_CHAT_ID : HTKT_CHAT_ID;
+  const label = nhom.toUpperCase();
+  let replyTo: number | undefined;
+  let note = "";
+  if (maCase.trim() !== "") {
+    const found = await findCaseMessage(deps.supabase, nhom, maCase);
+    if (found) replyTo = found.realId;
+    else note = ` (không tìm thấy tin case "${maCase}" trong ${label} nên đăng tin riêng)`;
+  }
+  const text = `${users.map((u) => `@${u}`).join(" ")} ${loiNhan}`;
+  const res = await deps.telegram.sendMessage(chatId, text, replyTo);
+  if (!res.ok) return `Chưa gửi được vào nhóm ${label}.`;
+  return replyTo
+    ? `Đã tag ${users.join(", ")} ngay dưới tin case ${maCase} trong nhóm ${label}.`
+    : `Đã tag ${users.join(", ")} trong nhóm ${label}${note}.`;
 }

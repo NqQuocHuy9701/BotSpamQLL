@@ -7,7 +7,7 @@ const NOW = new Date("2026-11-06T03:00:00Z"); // 10:00 giờ VN
 const HISTORY_ROW = -9102;
 
 // Supabase giả: lưu pending_batches theo admin_id, mọi truy vấn khác trả rỗng.
-function fakeDb(seed: Record<number, unknown> = {}) {
+function fakeDb(seed: Record<number, unknown> = {}, tableRows: Record<string, unknown[]> = {}) {
   const store = new Map<number, unknown>(Object.entries(seed).map(([k, v]) => [Number(k), v]));
   const from = (table: string) => {
     const filters: Record<string, unknown> = {};
@@ -34,7 +34,7 @@ function fakeDb(seed: Record<number, unknown> = {}) {
         return { error: null };
       },
       insert: async () => ({ error: null }),
-      then: (res: (v: unknown) => unknown) => res({ data: [], error: null, count: 0 }),
+      then: (res: (v: unknown) => unknown) => res({ data: tableRows[table] ?? [], error: null, count: 0 }),
     };
     return chain;
   };
@@ -64,12 +64,18 @@ const say = (content: string, tool_calls?: unknown[]) => ({
   body: { choices: [{ message: { content, tool_calls } }], usage: { prompt_tokens: 100, completion_tokens: 20 } },
 });
 
-function setup(queue: FakeRes[], seed: Record<number, unknown> = {}) {
-  const { db, store } = fakeDb(seed);
+function setup(
+  queue: FakeRes[],
+  seed: Record<number, unknown> = {},
+  tableRows: Record<string, unknown[]> = {}
+) {
+  const { db, store } = fakeDb(seed, tableRows);
   const { f, bodies } = fakeFetch(queue);
-  const sent: { chat: number; text: string }[] = [];
+  const sent: { chat: number; text: string; replyTo?: number }[] = [];
   const telegram: any = {
-    sendMessage: vi.fn(async (chat: number, text: string) => (sent.push({ chat, text }), { ok: true })),
+    sendMessage: vi.fn(
+      async (chat: number, text: string, replyTo?: number) => (sent.push({ chat, text, replyTo }), { ok: true })
+    ),
   };
   const ai = { ...loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, fetchImpl: f as any };
   const deps: any = { telegram, supabase: db, ai };
@@ -306,5 +312,103 @@ describe("Tin có số điện thoại / mật khẩu: không gửi lên AI", ()
     expect(r).toBe(true);
     expect(t.f).not.toHaveBeenCalled();
     expect(t.sent.length).toBe(0);
+  });
+});
+
+describe("Hiểu đúng ý: 'tag anh ý trong nhóm HTKT case 215785' (lỗi thực tế)", () => {
+  const HTKT = -1002458492731;
+  const KEY = `${ADMIN}:${ADMIN}`;
+  // Mạch trước đó: admin vừa nhắc @vh_anhpd1.
+  const ctx = {
+    [HISTORY_ROW]: {
+      kind: "history",
+      byUser: {
+        [KEY]: [
+          { t: NOW.getTime() - 60_000, role: "user", content: "Anh này cơ mà @vh_anhpd1" },
+          { t: NOW.getTime() - 60_000, role: "assistant", content: "Hôm nay vh_anhpd1 xử lý 15 case ạ" },
+        ],
+      },
+    },
+  };
+  const caseRow = { message_id: -(149662 * 10 + 1), content: "215785 oa ạ" };
+  const tagCall = {
+    id: "c1",
+    type: "function",
+    function: {
+      name: "tag_ctv",
+      arguments: JSON.stringify({
+        nhom: "htkt",
+        usernames: ["vh_anhpd1"],
+        ma_case: "215785",
+        loi_nhan: "anh hỗ trợ giúp em case này nhé 😊",
+      }),
+    },
+  };
+
+  it("không đi luật 'nhắn nhóm' cứng; AI đọc được mạch có @vh_anhpd1", async () => {
+    const t = setup([say("Anh ý là ai ạ?")], ctx, { qll_tracking: [caseRow] });
+    await t.run("Em thử tag anh ý trong nhóm HTKT case 215785 đi");
+    expect(t.f).toHaveBeenCalledTimes(1);
+    const msgs = t.bodies[0].messages.map((m: any) => m.content).join("\n");
+    expect(msgs).toContain("@vh_anhpd1");
+    expect(t.sent.some((s) => s.chat === HTKT)).toBe(false); // không tự đăng tag cả ca
+  });
+
+  it("tag_ctv: chỉ tag đúng người, reply ngay dưới tin case 215785", async () => {
+    const t = setup([say("", [tagCall]), say("Em tag anh vh_anhpd1 vào case đó rồi ạ")], ctx, {
+      qll_tracking: [caseRow],
+    });
+    await t.run("Em thử tag anh ý trong nhóm HTKT case 215785 đi");
+    const post = t.sent.find((s) => s.chat === HTKT)!;
+    expect(post.text).toBe("@vh_anhpd1 anh hỗ trợ giúp em case này nhé 😊");
+    expect(post.replyTo).toBe(149662);
+    const tool = t.bodies[1].messages.find((m: any) => m.role === "tool");
+    expect(tool.content).toContain("ngay dưới tin case 215785");
+    // câu báo lại admin không tag ai
+    expect(t.sent.at(-1)!.text).not.toContain("@");
+  });
+
+  it("không tìm thấy case: vẫn tag đúng người, báo rõ là đăng tin riêng", async () => {
+    const t = setup([say("", [tagCall]), say("Không thấy tin case nên em tag riêng ạ")], ctx);
+    await t.run("tag anh ý case 215785 bên HTKT");
+    const post = t.sent.find((s) => s.chat === HTKT)!;
+    expect(post.replyTo).toBeUndefined();
+    const tool = t.bodies[1].messages.find((m: any) => m.role === "tool");
+    expect(tool.content).toContain("không tìm thấy tin case");
+  });
+
+  it("username không hợp lệ: không đăng gì, bảo AI hỏi lại", async () => {
+    const bad = { ...tagCall, function: { name: "tag_ctv", arguments: JSON.stringify({ nhom: "htkt", usernames: ["anh ý"], loi_nhan: "x" }) } };
+    const t = setup([say("", [bad]), say("Anh ý là ai ạ?")], ctx);
+    await t.run("tag anh ý giúp em");
+    expect(t.sent.some((s) => s.chat === HTKT)).toBe(false);
+  });
+
+  it("lời Bee trả lời admin không tag ai (bỏ @)", async () => {
+    const t = setup([say("Dạ, anh @vh_anhpd1 hôm nay xử lý 15 case ạ")]);
+    await t.run("anh này cơ mà");
+    expect(t.sent[0].text).toBe("Dạ, anh vh_anhpd1 hôm nay xử lý 15 case ạ");
+  });
+
+  it("câu xem đơn giản vẫn đi TypeScript (không tốn AI)", async () => {
+    const t = setup([]);
+    await t.run("case tồn nhóm HTKT");
+    expect(t.f).not.toHaveBeenCalled();
+  });
+});
+
+import { needsAiUnderstanding } from "../lib/ai.js";
+
+describe("needsAiUnderstanding: câu nào phải để AI hiểu theo mạch", () => {
+  it.each([
+    ["nhacnhom", "Em thử tag anh ý trong nhóm HTKT case 215785 đi", true],
+    ["casetreo", "case đó xử lý chưa em", true],
+    ["casetreo", "còn bên kia thì sao", true],
+    ["checkin", "anh ấy check-in chưa", true],
+    ["casetreo", "case tồn nhóm HTKT", false],
+    ["checkin", "ai đang trực", false],
+    ["baocao", "báo cáo ca", false],
+  ] as const)("%s | %s -> %s", (intent, q, expected) => {
+    expect(needsAiUnderstanding(intent as any, q)).toBe(expected);
   });
 });
