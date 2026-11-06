@@ -449,3 +449,67 @@ describe("Hỏi ca đã qua ('ca sáng nay có những ai làm') — lỗi 'Bee 
     expect(t.sent.some((s) => /bận/.test(s.text))).toBe(false);
   });
 });
+
+import { classifyByRules, foldVi, recordGroqCall, buildQuotaReport } from "../lib/ai.js";
+
+describe("Hỏi Bee về credit/hạn mức", () => {
+  const USAGE_ROW = -9103;
+
+  it("nhận đúng câu hỏi hạn mức, không nhầm câu hỏi số lượt của CTV", () => {
+    for (const q of ["bee còn bao nhiêu credit", "hạn mức groq sao rồi", "còn lượt ai không em", "check quota giúp anh"]) {
+      expect(classifyByRules(foldVi(q))).toBe("hanmuc");
+    }
+    expect(classifyByRules(foldVi("minhlt bao nhiêu lượt reply"))).not.toBe("hanmuc");
+  });
+
+  it("admin hỏi credit: TypeScript trả lời, KHÔNG gọi Groq", async () => {
+    const t = setup([]);
+    await t.run("Bee còn bao nhiêu credit vậy em");
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent[0].text).toContain("Hạn mức hôm nay");
+    expect(t.sent[0].text).toContain("Vercel, Supabase");
+  });
+
+  it("người không phải admin trong nhóm hỏi credit: từ chối, không lộ số", async () => {
+    const t = setup([]);
+    await t.run("@vh_messenger_bot còn bao nhiêu credit", -1002458492731, "supergroup", 222);
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent[0].text).toContain("chỉ báo cho admin");
+  });
+
+  it("mỗi lần gọi Groq được ghi sổ: token + header còn lại", async () => {
+    const t = setup([
+      {
+        status: 200,
+        body: { choices: [{ message: { content: "Ổn ạ" } }], usage: { prompt_tokens: 800, completion_tokens: 40 } },
+        headers: {
+          "x-ratelimit-remaining-requests": "990",
+          "x-ratelimit-limit-requests": "1000",
+          "x-ratelimit-remaining-tokens": "7100",
+          "x-ratelimit-limit-tokens": "8000",
+        },
+      },
+    ]);
+    await t.run("hôm nay thế nào em");
+    const u = t.store.get(USAGE_ROW) as any;
+    expect(u).toMatchObject({ calls: 1, ok: 1, errors: 0, tokIn: 800, tokOut: 40, remReq: "990", remTok: "7100" });
+  });
+
+  it("429 được đếm vào sổ", async () => {
+    const t = setup([{ status: 429 }]);
+    await t.run("hôm nay thế nào em");
+    expect(t.store.get(USAGE_ROW)).toMatchObject({ calls: 1, ok: 0, errors: 1, rate429: 1 });
+  });
+
+  it("báo cáo hạn mức đọc đúng sổ, sang ngày mới thì reset bộ đếm", async () => {
+    const { db } = fakeDb();
+    await recordGroqCall(db, { status: 200, model: "m", tokIn: 1000, tokOut: 100 }, NOW);
+    await recordGroqCall(db, { status: 429, model: "m" }, NOW);
+    const ai = loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!;
+    const today = await buildQuotaReport(db, ai, NOW);
+    expect(today).toContain("gọi 2 lần (thành công 1, lỗi 1, bị giới hạn 429: 1)");
+    expect(today).toContain("1.100/200.000");
+    const tomorrow = await buildQuotaReport(db, ai, new Date(NOW.getTime() + 24 * 3600_000));
+    expect(tomorrow).toContain("gọi 0 lần");
+  });
+});

@@ -46,7 +46,8 @@ export type Intent =
   | "nhacnhom"
   | "daynho"
   | "xemnho"
-  | "quennho";
+  | "quennho"
+  | "hanmuc";
 const INTENTS: readonly Intent[] = [
   "checkin",
   "baocao",
@@ -59,6 +60,7 @@ const INTENTS: readonly Intent[] = [
   "daynho",
   "xemnho",
   "quennho",
+  "hanmuc",
 ];
 
 // Câu dẫn trước số liệu (có sẵn, không tốn lượt AI).
@@ -199,6 +201,13 @@ export function classifyMemory(raw: string): Intent | null {
 }
 
 export function classifyByRules(folded: string): Intent | null {
+  // Hỏi hạn mức/credit hệ thống: TypeScript trả lời, không tốn AI.
+  if (
+    /\b(credit|credits|quota|han muc|rate limit|token|groq)\b/.test(folded) ||
+    /\b(het|con|bao nhieu|so) luot (ai|goi|hoi|cua bee|bee)\b|\bluot ai\b|\bbee het luot\b/.test(folded)
+  ) {
+    return "hanmuc";
+  }
   // Dặn Bee: đến ca chiều thì tag CTV ca chiều xử lý case tồn.
   if (
     /\b(tag|goi|nhac|nho|giao)\b.*\bctv\b.*\bca chieu\b/.test(folded) ||
@@ -1020,6 +1029,14 @@ async function respond(
       await sendHere(deps, message, isPrivate, text);
       return true;
     }
+    case "hanmuc": {
+      if (!isAdmin) {
+        await sendHere(deps, message, isPrivate, `Dạ mục này em chỉ báo cho admin thôi ạ ${title} 🥺`);
+        return true;
+      }
+      await sendHere(deps, message, isPrivate, await buildQuotaReport(deps.supabase, ai, now));
+      return true;
+    }
     case "checkout": {
       const pool = CHECKOUT_REPLY;
       await sendHere(deps, message, isPrivate, pool[pickIndex(pool.length, undefined)].replace(/\{title\}/g, title));
@@ -1591,6 +1608,14 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "xem_han_muc",
+      description: "Hạn mức/credit hôm nay: số lần gọi Groq, token đã dùng, Groq báo còn bao nhiêu, trần lượt của Bee.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "gui_danh_sach",
       description:
         "Gửi vào cuộc trò chuyện này bản đầy đủ (bảng/danh sách có link). Dùng khi admin muốn XEM danh sách case tồn, bảng báo cáo hoặc danh sách check-in.",
@@ -1721,7 +1746,8 @@ async function agentCall(
   ai: AiConfig,
   messages: AgentMsg[],
   deadline: number,
-  allowTools = true
+  allowTools = true,
+  sb?: SupabaseClient // có thì ghi sổ hạn mức
 ): Promise<{ content: string; tool_calls?: ToolCall[]; finish?: string } | null> {
   const doFetch = ai.fetchImpl ?? fetch;
   // Tối đa 2 lần gửi: lần 2 CHỈ khi 429 có Retry-After ngắn (<=2s) hoặc lỗi 5xx,
@@ -1745,12 +1771,19 @@ async function agentCall(
         body.reasoning_effort = "low";
         body.include_reasoning = false;
       }
-      const res = await doFetch(GROQ_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      let res: Awaited<ReturnType<typeof doFetch>>;
+      try {
+        res = await doFetch(GROQ_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (e) {
+        if (sb) await recordGroqCall(sb, { status: 0, model: ai.agentModel });
+        throw e;
+      }
+      if (sb && !res.ok) await recordGroqCall(sb, { status: res.status, model: ai.agentModel, headers: res.headers });
       if (res.status === 429) {
         const wait = Number(res.headers?.get?.("retry-after") ?? "") * 1000;
         console.error(`[Bee AI] 429 rate limit (retry-after=${wait || "?"}ms, lần ${attempt + 1})`);
@@ -1777,6 +1810,15 @@ async function agentCall(
         }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
+      if (sb) {
+        await recordGroqCall(sb, {
+          status: res.status,
+          model: ai.agentModel,
+          tokIn: data.usage?.prompt_tokens,
+          tokOut: data.usage?.completion_tokens,
+          headers: res.headers,
+        });
+      }
       // Theo dõi quota qua log Vercel: token mỗi lần gọi + phần còn lại theo header.
       console.log(
         `[Bee AI] ok model=${ai.agentModel} ${Date.now() - t0}ms in=${data.usage?.prompt_tokens ?? "?"} out=${
@@ -1840,6 +1882,8 @@ async function runTool(
         return await ctvToday(deps.supabase, String(args.username ?? ""), now);
       case "xem_cau_hinh":
         return await configSummary(deps.supabase, now);
+      case "xem_han_muc":
+        return deps.ai ? await buildQuotaReport(deps.supabase, deps.ai, now) : "Bee AI đang tắt.";
       case "xem_checkin":
         return deps.checkinSupabase
           ? await buildCheckinList(deps.checkinSupabase, now)
@@ -1955,7 +1999,7 @@ export async function runAgent(
     // Vòng cuối: KHÔNG cho gọi công cụ nữa -> AI buộc phải trả lời bằng dữ liệu
     // đã lấy được, thay vì bỏ dở (trước đây rơi vào "Bee đang hơi bận").
     const lastRound = round === AGENT_MAX_ROUNDS - 1;
-    const m = await agentCall(ai, messages, deadline, !lastRound);
+    const m = await agentCall(ai, messages, deadline, !lastRound, deps.supabase);
     if (!m) {
       why = "gọi AI thất bại";
       break;
@@ -2162,4 +2206,121 @@ async function tagInGroup(
   return replyTo
     ? `Đã tag ${users.join(", ")} ngay dưới tin case ${maCase} trong nhóm ${label}.`
     : `Đã tag ${users.join(", ")} trong nhóm ${label}${note}.`;
+}
+
+// ---------------------------------------------------------------------------
+// Sổ theo dõi hạn mức Groq (1 dòng trong pending_batches, không đổi schema)
+// ---------------------------------------------------------------------------
+const USAGE_ROW_ID = -9103;
+const GROQ_FREE_TPD = 200_000; // token/ngày gói free (để ước tính, theo docs Groq)
+
+interface UsageRow {
+  kind: "groq_usage";
+  day: string;
+  calls: number;
+  ok: number;
+  errors: number;
+  rate429: number;
+  tokIn: number;
+  tokOut: number;
+  model?: string;
+  lastAt?: string;
+  remReq?: string; // lượt còn trong ngày (header Groq)
+  limReq?: string;
+  remTok?: string; // token còn trong phút (header Groq)
+  limTok?: string;
+}
+
+export interface GroqCallMeta {
+  status: number; // 0 = lỗi mạng/timeout
+  model: string;
+  tokIn?: number;
+  tokOut?: number;
+  headers?: { get(k: string): string | null } | null;
+}
+
+async function readUsage(supabase: SupabaseClient, day: string): Promise<UsageRow> {
+  const empty: UsageRow = { kind: "groq_usage", day, calls: 0, ok: 0, errors: 0, rate429: 0, tokIn: 0, tokOut: 0 };
+  try {
+    const { data } = await supabase
+      .from("pending_batches")
+      .select("items")
+      .eq("admin_id", USAGE_ROW_ID)
+      .maybeSingle();
+    const it = data?.items as Partial<UsageRow> | undefined;
+    if (!it || it.kind !== "groq_usage") return empty;
+    // Sang ngày mới: reset bộ đếm, giữ lại header gần nhất để còn tham khảo.
+    if (it.day !== day) return { ...empty, model: it.model, lastAt: it.lastAt, remReq: it.remReq, limReq: it.limReq, remTok: it.remTok, limTok: it.limTok };
+    return { ...empty, ...it } as UsageRow;
+  } catch {
+    return empty;
+  }
+}
+
+// Ghi 1 lần gọi Groq. Đọc-rồi-ghi (không nguyên tử): lệch vài lượt khi trùng
+// thời điểm là chấp nhận được. Không bao giờ ném lỗi.
+export async function recordGroqCall(supabase: SupabaseClient, meta: GroqCallMeta, now = new Date()): Promise<void> {
+  try {
+    const u = await readUsage(supabase, vnDay(now));
+    u.calls++;
+    if (meta.status >= 200 && meta.status < 300) u.ok++;
+    else u.errors++;
+    if (meta.status === 429) u.rate429++;
+    u.tokIn += meta.tokIn ?? 0;
+    u.tokOut += meta.tokOut ?? 0;
+    u.model = meta.model;
+    u.lastAt = now.toISOString();
+    const h = meta.headers;
+    const g = (k: string) => h?.get?.(k) ?? undefined;
+    u.remReq = g("x-ratelimit-remaining-requests") ?? u.remReq;
+    u.limReq = g("x-ratelimit-limit-requests") ?? u.limReq;
+    u.remTok = g("x-ratelimit-remaining-tokens") ?? u.remTok;
+    u.limTok = g("x-ratelimit-limit-tokens") ?? u.limTok;
+    await supabase
+      .from("pending_batches")
+      .upsert({ admin_id: USAGE_ROW_ID, items: u }, { onConflict: "admin_id" });
+  } catch {
+    // bỏ qua: thống kê không được làm hỏng luồng chính
+  }
+}
+
+function fmtNum(n: number | string | undefined): string {
+  const v = typeof n === "string" ? Number(n) : n;
+  return v === undefined || !Number.isFinite(v) ? "?" : v.toLocaleString("vi-VN");
+}
+
+// Câu trả lời hạn mức — TypeScript dựng, KHÔNG tốn lượt AI.
+export async function buildQuotaReport(supabase: SupabaseClient, ai: AiConfig, now: Date): Promise<string> {
+  const day = vnDay(now);
+  const u = await readUsage(supabase, day);
+  let beeCount = 0;
+  try {
+    const { data } = await supabase
+      .from("pending_batches")
+      .select("items")
+      .eq("admin_id", quotaRowId(day))
+      .maybeSingle();
+    const it = data?.items as { day?: string; count?: number } | undefined;
+    if (it?.day === day && typeof it.count === "number") beeCount = it.count;
+  } catch {
+    // bỏ qua
+  }
+  const tok = u.tokIn + u.tokOut;
+  const pct = Math.round((tok / GROQ_FREE_TPD) * 100);
+  const lines = [
+    "Hạn mức hôm nay của Bee nè 😊",
+    `• Groq (${u.model ?? ai.agentModel}): gọi ${u.calls} lần (thành công ${u.ok}, lỗi ${u.errors}, bị giới hạn 429: ${u.rate429})`,
+    `• Token hôm nay: vào ${fmtNum(u.tokIn)}, ra ${fmtNum(u.tokOut)} → khoảng ${fmtNum(tok)}/${fmtNum(GROQ_FREE_TPD)} (${pct}%)`,
+  ];
+  if (u.remReq || u.remTok) {
+    lines.push(
+      `• Groq báo còn (lúc ${u.lastAt ? vnHHmm(u.lastAt) : "?"}): ${fmtNum(u.remReq)}/${fmtNum(u.limReq)} lượt trong ngày, ${fmtNum(u.remTok)}/${fmtNum(u.limTok)} token trong phút`
+    );
+  }
+  lines.push(`• Trần riêng của Bee: ${beeCount}/${ai.dailyCap} lượt hỏi AI`);
+  lines.push("• Vercel, Supabase: em chưa có quyền đọc, anh xem ở trang Usage của từng hệ thống nhé.");
+  if (pct >= 80 || u.rate429 > 0) {
+    lines.push("Lưu ý: sắp chạm hạn mức hoặc đã bị giới hạn, Bee có thể trả lời chậm hoặc báo bận.");
+  }
+  return lines.join("\n");
 }
