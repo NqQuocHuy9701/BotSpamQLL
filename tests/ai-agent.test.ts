@@ -19,6 +19,7 @@ function fakeDb(seed: Record<number, unknown> = {}) {
       order: () => chain,
       limit: () => chain,
       in: () => chain,
+      ilike: () => chain,
       update: () => chain,
       delete: () => chain,
       eq: (k: string, v: unknown) => ((filters[k] = v), chain),
@@ -245,5 +246,65 @@ describe("Hiệu ứng 'đang nhập...' khi chờ AI", () => {
     expect(t.typing).not.toHaveBeenCalled();
     expect(t.sent).toEqual(["Ổn anh ơi"]);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("Nhiều vấn đề hơn: công cụ chỉ đọc mới", () => {
+  const call = (name: string, args: object) => ({
+    id: "c1",
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  });
+
+  it("AI được cấp đủ công cụ mới", async () => {
+    const t = setup([say("Dạ")]);
+    await t.run("hôm nay thế nào em");
+    const names = t.bodies[0].tools.map((x: any) => x.function.name);
+    expect(names).toEqual(expect.arrayContaining(["tra_cuu_case", "xem_ctv", "xem_cau_hinh"]));
+  });
+
+  for (const [name, args, expectText] of [
+    ["tra_cuu_case", { tu_khoa: "TOAN.2026.1517" }, "Không tìm thấy case"],
+    ["xem_ctv", { username: "@vh_minhlt" }, "vh_minhlt chưa có lượt"],
+    ["xem_cau_hinh", {}, "Điều phối:"],
+  ] as const) {
+    it(`${name}: chạy công cụ, gửi kết quả cho AI viết câu trả lời`, async () => {
+      const t = setup([say("", [call(name, args)]), say("Xong ạ")]);
+      await t.run("cho anh hỏi chút");
+      expect(t.f).toHaveBeenCalledTimes(2);
+      const toolMsg = t.bodies[1].messages.find((m: any) => m.role === "tool");
+      expect(toolMsg.content).toContain(expectText);
+      expect(t.sent.at(-1)!.text).toBe("Xong ạ");
+    });
+  }
+
+  it("prompt cho phép việc chung (soạn tin, trả lời phụ huynh) thay vì từ chối", async () => {
+    const t = setup([say("Anh có thể nhắn: ...")]);
+    await t.run("soạn giúp anh tin xin lỗi phụ huynh vì trả lời chậm");
+    expect(t.bodies[0].messages[0].content).toMatch(/phụ huynh/);
+    expect(t.f).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Tin có số điện thoại / mật khẩu: không gửi lên AI", () => {
+  it("admin tra SĐT: TypeScript tự tra DB, KHÔNG gọi Groq", async () => {
+    const t = setup([]);
+    await t.run("tra giúp anh case 0964517258");
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent[0].text).toContain("0964517258");
+    expect(t.sent[0].text).toContain("Không tìm thấy case");
+  });
+  it("admin gửi TK/MK: không gọi Groq, nhắc nhẹ", async () => {
+    const t = setup([]);
+    await t.run("mk: abc123 tk: xyz");
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent.length).toBe(1);
+  });
+  it("người không phải admin trong nhóm: im lặng như cũ", async () => {
+    const t = setup([]);
+    const r = await t.run("@vh_messenger_bot số em 0964517258", -1002458492731, "supergroup", 222);
+    expect(r).toBe(true);
+    expect(t.f).not.toHaveBeenCalled();
+    expect(t.sent.length).toBe(0);
   });
 });

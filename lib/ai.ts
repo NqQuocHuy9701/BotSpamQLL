@@ -17,6 +17,7 @@ import { isSensitive } from "./detector.js";
 import { pickIndex } from "./messages.js";
 import {
   buildCheckinList,
+  buildHelpText,
   buildShiftReport,
   getCurrentShiftCheckins,
   htktCaseKey,
@@ -742,8 +743,23 @@ async function handleAi(
     question = m.mentioned ? m.question : text;
   }
 
-  // Nội dung nhạy cảm (TK/MK, dãy số dài): không gửi đi đâu, không trả lời.
-  if (isSensitive(question)) return true;
+  // Nội dung nhạy cảm (TK/MK, dãy số dài như SĐT): KHÔNG gửi lên AI.
+  // Admin: tra cứu thẳng trong DB bằng TypeScript (không tốn lượt AI) nếu có dãy
+  // số; không thì nhắc nhẹ. Người khác: im lặng như cũ.
+  if (isSensitive(question)) {
+    if (!isAdmin) return true;
+    const digits = question.replace(/[\s.\-]/g, "").match(/\d{8,}/)?.[0];
+    let text: string;
+    try {
+      text = digits
+        ? `Em tra theo ${digits} (không gửi số này cho AI) nè:\n\n${await lookupCases(deps.supabase, digits, true)}`
+        : "Tin có tài khoản/mật khẩu nên em không xử lý bằng AI ạ. Anh nhắn mã lớp hoặc mã HS để em tra nhé 😊";
+    } catch {
+      text = "Em chưa tra được, anh thử lại sau nhé 🥺";
+    }
+    await sendHere(deps, message, isPrivate, text);
+    return true;
+  }
 
   const now = opts.now ?? new Date();
   const rng = opts.rng ?? Math.random;
@@ -1522,6 +1538,34 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "tra_cuu_case",
+      description: "Tìm case trong 3 ngày gần nhất theo mã lớp/mã HS/tên/từ khóa: nhóm, giờ, đã xử lý chưa, ai xử lý, link.",
+      parameters: { type: "object", properties: { tu_khoa: { type: "string" } }, required: ["tu_khoa"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "xem_ctv",
+      description: "Hôm nay 1 CTV đã xử lý bao nhiêu case (theo ca, tim/reply, QLL/HTKT).",
+      parameters: {
+        type: "object",
+        properties: { username: { type: "string", description: "username Telegram, không cần @" } },
+        required: ["username"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "xem_cau_hinh",
+      description: "Ai điều phối từng ca, CTV đang tắt SLA, lịch tag ca chiều hôm nay, danh sách lệnh bot.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "gui_danh_sach",
       description:
         "Gửi vào cuộc trò chuyện này bản đầy đủ (bảng/danh sách có link). Dùng khi admin muốn XEM danh sách case tồn, bảng báo cáo hoặc danh sách check-in.",
@@ -1600,7 +1644,10 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Nhắn nhóm: được nhờ soạn/thử thì xem_so_lieu rồi đưa bản nháp và hỏi gửi không; chỉ gọi nhan_nhom khi admin bảo gửi hoặc ra lệnh nhắn rõ. Nhóm hết case tồn thì nói không cần nhắc.",
     "- Báo đúng kết quả công cụ; công cụ báo chưa gửi/lỗi thì không nói đã gửi.",
     "- Admin dặn quy tắc lâu dài (\"từ nay\", \"lần sau\", \"nhớ...\") thì ghi_nho 1 câu rõ ý. Không ghi sửa nháp tạm hay số liệu trong ngày. Hỏi em nhớ gì thì chỉ kể BỘ NÃO.",
-    "- Việc không có công cụ (chuyển ca, thêm người...) thì nói chưa làm được, gợi ý /help.",
+    "- Ngoài số liệu, em giúp được việc chung như đồng nghiệp: soạn/sửa tin nhắn, gợi ý cách trả lời phụ huynh, giải thích, tính nhẩm, góp ý, trò chuyện. Việc chung dùng hiểu biết chung; còn thông tin nội bộ (case, CTV, số liệu, cấu hình) thì chỉ lấy qua công cụ.",
+    "- Hỏi về 1 case cụ thể (mã lớp, mã HS, tên) dùng tra_cuu_case; về 1 CTV dùng xem_ctv; về điều phối/SLA/lệnh bot dùng xem_cau_hinh.",
+    "- Việc thay đổi dữ liệu (chuyển ca, thêm/xóa CTV, tắt SLA...) em chưa tự làm được: chỉ admin gõ đúng lệnh (xem_cau_hinh có danh sách lệnh) và đưa luôn câu lệnh mẫu.",
+    "- Câu hỏi mơ hồ: đoán ý hợp lý nhất theo mạch; nếu vẫn có 2 khả năng khác nhau thì hỏi lại 1 câu.",
     notes.length
       ? "BỘ NÃO (admin dạy, luôn làm theo):\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n")
       : "BỘ NÃO: (trống)",
@@ -1723,6 +1770,12 @@ async function runTool(
         return await buildDayCaseStats(deps.supabase, now);
       case "xem_bao_cao_ca":
         return stripHtml(await buildShiftReport(deps.supabase, deps.checkinSupabase, now));
+      case "tra_cuu_case":
+        return await lookupCases(deps.supabase, String(args.tu_khoa ?? ""), true);
+      case "xem_ctv":
+        return await ctvToday(deps.supabase, String(args.username ?? ""), now);
+      case "xem_cau_hinh":
+        return await configSummary(deps.supabase, now);
       case "xem_checkin":
         return deps.checkinSupabase
           ? await buildCheckinList(deps.checkinSupabase, now)
@@ -1852,4 +1905,131 @@ export async function runAgent(
     return text;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Công cụ CHỈ ĐỌC bổ sung cho Bee (không ghi DB, không đổi nghiệp vụ)
+// ---------------------------------------------------------------------------
+
+function vnHHmm(iso: string | null): string {
+  if (!iso) return "?";
+  const vn = new Date(new Date(iso).getTime() + VN_OFFSET_MS);
+  const p = (x: number) => String(x).padStart(2, "0");
+  return `${p(vn.getUTCHours())}:${p(vn.getUTCMinutes())} ${p(vn.getUTCDate())}/${p(vn.getUTCMonth() + 1)}`;
+}
+
+function caseLink(scopedId: number): { group: string; link: string } {
+  if (scopedId > 0) return { group: "QLL", link: `https://t.me/c/${QLL_LINK_ID}/${scopedId}` };
+  return { group: "HTKT", link: `https://t.me/c/${HTKT_LINK_ID}/${Math.round((-scopedId - 1) / 10)}` };
+}
+
+// Tìm case theo từ khóa trong qll_tracking (dữ liệu giữ ~3 ngày). withLinks=false
+// khi gửi cho AI đọc thì vẫn kèm link để AI có thể dẫn lại cho admin.
+export async function lookupCases(
+  supabase: SupabaseClient,
+  keyword: string,
+  withLinks: boolean
+): Promise<string> {
+  const kw = keyword.replace(/[%,()*\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  if (kw.length < 3) return "Từ khóa quá ngắn (cần ít nhất 3 ký tự).";
+  const { data, error } = await supabase
+    .from("qll_tracking")
+    .select("message_id, sender_name, content, handled, created_at")
+    .ilike("content", `%${kw}%`)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  if (error) throw new Error(error.message);
+  const rows =
+    (data as {
+      message_id: number;
+      sender_name: string | null;
+      content: string | null;
+      handled: boolean;
+      created_at: string | null;
+    }[] | null) ?? [];
+  if (rows.length === 0) return `Không tìm thấy case nào chứa "${kw}" trong 3 ngày gần nhất.`;
+
+  // Ai đã tương tác (tim/reply) với các case này.
+  const who = new Map<number, string[]>();
+  try {
+    const { data: inter } = await supabase
+      .from("shift_interactions")
+      .select("message_id, ctv_username, kind")
+      .in(
+        "message_id",
+        rows.map((r) => r.message_id)
+      );
+    for (const r of (inter as { message_id: number; ctv_username: string | null; kind: string | null }[] | null) ??
+      []) {
+      const list = who.get(r.message_id) ?? [];
+      list.push(`${r.ctv_username ?? "?"} (${r.kind === "react" ? "tim" : "reply"})`);
+      who.set(r.message_id, list);
+    }
+  } catch {
+    // không có thông tin người xử lý -> bỏ qua
+  }
+
+  return rows
+    .map((r, i) => {
+      const { group, link } = caseLink(r.message_id);
+      const by = who.get(r.message_id);
+      return [
+        `${i + 1}. [${group}] ${vnHHmm(r.created_at)} — ${snip(r.content)}`,
+        `   ${r.handled ? "Đã xử lý" : "CHƯA xử lý"}${by?.length ? ` — ${by.join(", ")}` : ""}`,
+        withLinks ? `   ${link}` : "",
+      ]
+        .filter((l) => l !== "")
+        .join("\n");
+    })
+    .join("\n");
+}
+
+// Hôm nay 1 CTV đã tương tác bao nhiêu case (đọc shift_interactions).
+export async function ctvToday(supabase: SupabaseClient, username: string, now: Date): Promise<string> {
+  const u = username.trim().replace(/^@/, "").toLowerCase();
+  if (u === "") return "Thiếu username CTV.";
+  const { data, error } = await supabase
+    .from("shift_interactions")
+    .select("message_id, kind, shift")
+    .eq("ctv_username", u)
+    .eq("shift_date", vnDay(now));
+  if (error) throw new Error(error.message);
+  const rows = (data as { message_id: number; kind: string | null; shift: string | null }[] | null) ?? [];
+  if (rows.length === 0) return `Hôm nay ${u} chưa có lượt xử lý case nào được ghi nhận.`;
+  const all = new Set<number>();
+  const byShift = new Map<string, Set<number>>();
+  let react = 0;
+  let reply = 0;
+  for (const r of rows) {
+    all.add(r.message_id);
+    const s = r.shift ?? "?";
+    if (!byShift.has(s)) byShift.set(s, new Set());
+    byShift.get(s)!.add(r.message_id);
+    if (r.kind === "react") react++;
+    else if (r.kind === "reply") reply++;
+  }
+  const qll = [...all].filter((id) => id > 0).length;
+  const name: Record<string, string> = { sang: "sáng", chieu: "chiều", toi: "tối" };
+  const shifts = [...byShift.entries()].map(([s, set]) => `ca ${name[s] ?? s}: ${set.size}`).join(", ");
+  return `Hôm nay ${u} xử lý ${all.size} case (QLL ${qll}, HTKT ${all.size - qll}; tim ${react}, reply ${reply}). Theo ca: ${shifts}.`;
+}
+
+// Cấu hình đang áp dụng: điều phối từng ca, SLA tắt cho ai, lịch tag, lệnh bot.
+export async function configSummary(supabase: SupabaseClient, now: Date): Promise<string> {
+  const cfg = await loadMonitorConfig(supabase);
+  const today = vnDay(now);
+  const slaOff = cfg.slaExcludeDate === today ? cfg.slaExclude ?? [] : [];
+  const handoff = await describeHandoff(supabase, now);
+  const commands = buildHelpText()
+    .split("\n")
+    .filter((l) => l.trim().startsWith("/") || l.includes("/"))
+    .slice(0, 25)
+    .join("\n");
+  return [
+    `Điều phối: sáng ${cfg.sang || "?"}, chiều ${cfg.chieu || "?"}, tối ${cfg.toi || "?"} (mặc định ${cfg.defaultDp || "?"}).`,
+    `Đang tắt SLA hôm nay: ${slaOff.length ? slaOff.join(", ") : "không ai"}.`,
+    handoff ? `Lịch tag ca chiều: ${handoff}` : "Lịch tag ca chiều: chưa có.",
+    "Lệnh bot (admin gõ ở chat riêng):",
+    commands,
+  ].join("\n");
 }
