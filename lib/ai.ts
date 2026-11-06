@@ -19,7 +19,6 @@ import {
   buildCheckinList,
   buildShiftReport,
   getCurrentShiftCheckins,
-  getCurrentShiftVn,
   htktCaseKey,
   loadMonitorConfig,
 } from "./monitor.js";
@@ -293,8 +292,7 @@ async function buildContext(deps: AiDeps, isAdmin: boolean, now: Date): Promise<
       // bỏ qua
     }
     try {
-      const pending = await buildPendingCases(deps.supabase, now);
-      parts.push(pending.split("\n").filter((l) => !l.includes("t.me/")).join("\n"));
+      parts.push(await buildDayCaseStats(deps.supabase, now));
     } catch {
       // bỏ qua
     }
@@ -450,15 +448,6 @@ async function gate(
 // Case chưa xử lý (admin)
 // ---------------------------------------------------------------------------
 
-function shiftStartUtcIso(now: Date, key: "sang" | "chieu" | "toi"): string {
-  const vn = new Date(now.getTime() + VN_OFFSET_MS);
-  const hour = key === "sang" ? 0 : key === "chieu" ? 13 : 17;
-  const min = key === "sang" ? 0 : 30;
-  return new Date(
-    Date.UTC(vn.getUTCFullYear(), vn.getUTCMonth(), vn.getUTCDate(), hour - 7, min, 0)
-  ).toISOString();
-}
-
 export type CaseScope = "qll" | "htkt" | "all";
 
 // Nhóm nào được hỏi: có chữ htkt -> HTKT, có chữ qll -> QLL, không nói rõ -> cả hai.
@@ -529,14 +518,52 @@ async function pendingHtkt(supabase: SupabaseClient, sinceIso: string): Promise<
   return [String(pending.length), ...lines];
 }
 
+// Số liệu case CẢ NGÀY theo từng nhóm (không link) để AI đọc và trả lời bằng lời:
+// tổng, đã xử lý (có tim/reply), còn tồn + vài mã tồn đầu tiên.
+export async function buildDayCaseStats(supabase: SupabaseClient, now: Date): Promise<string> {
+  const { data, error } = await supabase
+    .from("qll_tracking")
+    .select("message_id, handled, content")
+    .gte("created_at", dayStartUtcIso(now))
+    .limit(1500);
+  if (error) throw new Error(error.message);
+  const rows = (data as { message_id: number; handled: boolean; content: string | null }[] | null) ?? [];
+
+  const qll = rows.filter((r) => r.message_id > 0);
+  const qllPending = qll.filter((r) => !r.handled);
+
+  const groups = new Map<string, { done: boolean; content: string | null }>();
+  for (const r of rows) {
+    if (r.message_id >= 0) continue;
+    const k = htktCaseKey(r.content ?? "");
+    const g = groups.get(k);
+    if (!g) groups.set(k, { done: r.handled, content: r.content });
+    else if (r.handled) g.done = true;
+  }
+  const htktAll = [...groups.values()];
+  const htktPending = htktAll.filter((g) => !g.done);
+
+  const lst = (items: (string | null)[]) =>
+    items.slice(0, 8).map((c) => `- ${snip(c)}`).join("\n");
+  return [
+    "SỐ LIỆU CASE HÔM NAY (từ đầu ngày, mỗi nhóm một dòng tổng):",
+    `QLL: tổng ${qll.length}, đã xử lý ${qll.length - qllPending.length}, còn tồn ${qllPending.length}`,
+    qllPending.length ? lst(qllPending.map((r) => r.content)) : "",
+    `HTKT (đã gộp theo mã lớp): tổng ${htktAll.length}, đã xử lý ${htktAll.length - htktPending.length}, còn tồn ${htktPending.length}`,
+    htktPending.length ? lst(htktPending.map((g) => g.content)) : "",
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+}
+
 export async function buildPendingCases(
   supabase: SupabaseClient,
   now: Date = new Date(),
   scope: CaseScope = "all"
 ): Promise<string> {
-  const { key, label } = getCurrentShiftVn(now);
-  const since = shiftStartUtcIso(now, key);
-  const ca = label.toUpperCase();
+  // Case tồn = chưa xử lý TỪ ĐẦU NGÀY (kể cả của ca trước), không chỉ ca hiện tại.
+  const since = dayStartUtcIso(now);
+
   try {
     const out: string[] = [];
     const sections: [string, () => Promise<string[]>][] = [];
@@ -545,9 +572,9 @@ export async function buildPendingCases(
     for (const [name, run] of sections) {
       const [n, ...lines] = await run();
       if (n === "0") {
-        out.push(`✅ ${name} ca ${ca}: không còn case nào tồn.`);
+        out.push(`✅ ${name} hôm nay: không còn case nào tồn.`);
       } else {
-        out.push(`📋 Case tồn ${name} — ca ${ca}: ${n}`, ...lines);
+        out.push(`📋 Case tồn ${name} hôm nay: ${n}`, ...lines);
       }
       out.push("");
     }
