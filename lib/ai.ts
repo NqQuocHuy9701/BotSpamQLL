@@ -204,9 +204,13 @@ export function parseGroqJson(
       intent?: unknown;
       reply?: unknown;
     };
+    const reply = sanitizeReply(typeof obj.reply === "string" ? obj.reply : "");
     const intent = String(obj.intent ?? "").toLowerCase().trim() as Intent;
-    if (!INTENTS.includes(intent)) return null;
-    return { intent, reply: sanitizeReply(typeof obj.reply === "string" ? obj.reply : "") };
+    if (!INTENTS.includes(intent)) {
+      // Intent lạ nhưng có câu trả lời -> coi như trò chuyện, khỏi báo "bận".
+      return reply !== "" ? { intent: "chat", reply } : null;
+    }
+    return { intent, reply };
   } catch {
     return null;
   }
@@ -267,7 +271,19 @@ async function buildContext(deps: AiDeps, isAdmin: boolean, now: Date): Promise<
   return parts.join("\n\n").slice(0, 3500);
 }
 
+// Thử tối đa 2 lần (lỗi lẻ tẻ của Groq thường qua được ở lần 2).
 async function callGroq(
+  ai: AiConfig,
+  question: string,
+  title: string,
+  context = ""
+): Promise<{ intent: Intent; reply: string } | null> {
+  const first = await callGroqOnce(ai, question, title, context);
+  if (first) return first;
+  return await callGroqOnce(ai, question, title, context);
+}
+
+async function callGroqOnce(
   ai: AiConfig,
   question: string,
   title: string,
@@ -302,13 +318,21 @@ async function callGroq(
       signal: controller.signal,
     });
     if (!res.ok) {
-      console.error(`Groq HTTP ${res.status}`);
+      const detail = (await res.text().catch(() => "")).slice(0, 200);
+      console.error(`Groq HTTP ${res.status} ${detail}`);
       return null;
     }
     const data = (await res.json()) as {
-      choices?: { message?: { content?: string | null } }[];
+      choices?: { message?: { content?: string | null }; finish_reason?: string }[];
     };
-    return parseGroqJson(data.choices?.[0]?.message?.content);
+    const content = data.choices?.[0]?.message?.content;
+    const parsed = parseGroqJson(content);
+    if (!parsed) {
+      console.error(
+        `Groq trả nội dung không đọc được (finish=${data.choices?.[0]?.finish_reason}): ${String(content).slice(0, 200)}`
+      );
+    }
+    return parsed;
   } catch (e) {
     console.error("Groq lỗi:", e instanceof Error ? e.message : String(e));
     return null;
