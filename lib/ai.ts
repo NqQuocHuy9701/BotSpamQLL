@@ -62,10 +62,10 @@ const INTENTS: readonly Intent[] = [
 
 // Câu dẫn trước số liệu (có sẵn, không tốn lượt AI).
 const LEAD: readonly string[] = [
-  "Dạ {title} xem nhé 😊",
-  "Dạ em gửi {title} đây ạ 😊",
-  "Dạ có ngay ạ, {title} xem giúp em nhé 😊",
-  "Dạ đây ạ {title} 😊",
+  "Có ngay đây ạ 😊",
+  "Em gửi {title} nè 😊",
+  "Đây ạ, {title} xem giúp em nhé 😊",
+  "Của {title} đây 😊",
 ];
 const CHECKOUT_REPLY: readonly string[] = [
   "Dạ Bee chưa theo dõi được check-out ạ, {title} xem trong nhóm check-in giúp em nhé 🥺",
@@ -79,6 +79,7 @@ export interface AiConfig {
   apiKey: string;
   model: string;
   agentModel: string; // model trò chuyện 2 chiều + công cụ (admin)
+  maxCompletionTokens: number; // trần output mỗi lần gọi (gồm cả suy luận ngắn)
   botUsername: string; // không có @, lowercase
   dailyCap: number;
   timeoutMs: number;
@@ -91,6 +92,11 @@ export interface AiDeps {
   supabase: SupabaseClient;
   checkinSupabase?: SupabaseClient;
   ai?: AiConfig;
+}
+
+function clampInt(v: string | undefined, def: number, lo: number, hi: number): number {
+  const n = Number.parseInt((v ?? "").trim(), 10);
+  return Number.isFinite(n) ? Math.min(Math.max(n, lo), hi) : def;
 }
 
 export function loadAiConfig(
@@ -108,7 +114,9 @@ export function loadAiConfig(
       .replace(/^@/, "")
       .toLowerCase(),
     dailyCap: Number.isFinite(cap) && cap > 0 ? Math.min(cap, MAX_DAILY_CAP) : DEFAULT_DAILY_CAP,
-    timeoutMs: 5000, // webhook Vercel ~10s -> AI tối đa 5s rồi bỏ cuộc
+    // webhook Vercel ~10s -> mỗi lần gọi AI tối đa GROQ_TIMEOUT ms (1000-8000)
+    timeoutMs: clampInt(env.GROQ_TIMEOUT, 5000, 1000, 8000),
+    maxCompletionTokens: clampInt(env.GROQ_MAX_COMPLETION_TOKENS, 300, 100, 800),
   };
 }
 
@@ -136,7 +144,7 @@ const ANALYTIC_RE =
 // Lệnh bộ nhớ: đọc câu CÒN DẤU (vì "nhớ" và "nhờ" bỏ dấu đều thành "nho").
 export function classifyMemory(raw: string): Intent | null {
   const s = raw.normalize("NFC").toLowerCase().trim().replace(/^bee[\s,]+/, "");
-  if (/^(em |bee )?(đã |đang )?(nhớ|học|ghi nhớ) (gì|những gì)|^(xem|liệt kê) (ghi nhớ|lời dạy)/.test(s)) {
+  if (/(nhớ|học)( được)? (gì|những gì)|^(xem|liệt kê) (ghi nhớ|lời dạy)/.test(s)) {
     return "xemnho";
   }
   if (/^(quên|xóa|xoá) (hết|số|lời dạy|ghi nhớ|\d)|^quên\s*\d/.test(s)) return "quennho";
@@ -193,17 +201,17 @@ export function classifyByRules(folded: string): Intent | null {
 }
 
 const GREET: readonly string[] = [
-  "Dạ em đây ạ, {title} cần Bee hỗ trợ gì ạ? 😊",
-  "Dạ Bee nghe ạ, {title} cứ nhắn nhé! 😊",
-  "Chào {title} ạ, {title} cần em xem gì không ạ? 😊",
+  "Em đây, {title} cần gì ạ? 😊",
+  "Bee nghe nè, {title} cứ nói nhé 😊",
+  "Chào {title}, hôm nay cần em xem gì không ạ? 😊",
 ];
 const THANKS: readonly string[] = [
-  "Dạ không có chi ạ, cần gì {title} cứ gọi Bee nhé! 😊",
-  "Dạ em cảm ơn {title} ạ, Bee luôn sẵn sàng! 😊",
+  "Không có gì ạ, cần gì {title} cứ gọi em 😊",
+  "Dạ, có gì {title} cứ nhắn em nhé 😊",
 ];
 const ACK: readonly string[] = [
-  "Dạ vâng ạ 😊",
-  "Dạ ok ạ, cần gì {title} cứ gọi Bee nhé! 😊",
+  "Vâng ạ 😊",
+  "Ok ạ, cần gì {title} cứ gọi Bee nhé 😊",
 ];
 
 // Câu xã giao thường gặp: trả lời có sẵn, KHÔNG tốn lượt AI.
@@ -357,10 +365,8 @@ async function callGroq(
   notes: string[] = [],
   history: ChatTurn[] = []
 ): Promise<{ intent: Intent; reply: string } | null> {
-  const system = buildSystemPrompt(title, context, notes);
-  const first = await callGroqOnce(ai, system, question, history);
-  if (first) return first;
-  return await callGroqOnce(ai, system, question, history);
+  // 1 lần gọi duy nhất cho mỗi yêu cầu (không retry để giữ quota).
+  return await callGroqOnce(ai, buildSystemPrompt(title, context, notes), question, history);
 }
 
 async function callGroqOnce(
@@ -381,7 +387,7 @@ async function callGroqOnce(
         { role: "user", content: question.slice(0, MAX_QUESTION_CHARS) },
       ],
       temperature: 0.3,
-      max_completion_tokens: 450,
+      max_completion_tokens: ai.maxCompletionTokens,
       response_format: { type: "json_object" },
     };
     // Model suy luận (gpt-oss, qwen): ép suy luận ít + không trả phần suy luận.
@@ -721,27 +727,36 @@ async function handleAi(
   const rng = opts.rng ?? Math.random;
   const folded = foldVi(question);
 
-  // Lệnh bộ nhớ (dạy/xem/quên) chỉ dành cho admin; người khác đi luồng thường.
-  // ADMIN: trò chuyện 2 chiều tự nhiên với "bộ não" (AI + công cụ + trí nhớ),
-  // kể cả dạy/xem/quên. Lỗi/hết lượt -> rơi xuống luồng cũ (luật từ khóa).
-  if (isAdmin) {
+  // Nhóm A (không cần AI): lệnh bộ nhớ rõ ràng + yêu cầu nghiệp vụ khớp luật.
+  let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
+  if (intent === null) intent = classifyByRules(folded);
+  let canned: string | null = null;
+  if (intent === null) {
+    // Câu xã giao ngắn ("ok", "cảm ơn"): trả mẫu có sẵn. Riêng admin đang giữa
+    // cuộc trò chuyện thì "ok" có thể là đồng ý bản nháp -> để AI hiểu theo mạch.
+    const midConversation =
+      isAdmin && (await lastTurnAgeMs(deps.supabase, convKey(message), now.getTime())) < FOLLOWUP_WINDOW_MS;
+    if (!midConversation) {
+      canned = cannedChat(folded, "{title}", rng); // điền danh xưng sau
+      if (canned !== null) intent = "chat";
+    }
+  }
+
+  // Nhóm B (cần AI) của ADMIN: trò chuyện 2 chiều với "bộ não" (AI + công cụ +
+  // trí nhớ). Mỗi tin chỉ 1 lượt hội thoại AI; lỗi thì báo bận, KHÔNG gọi AI lần
+  // nữa ở luồng cũ. Hết trần ngày -> rơi xuống luồng cũ (báo hết lượt).
+  if (isAdmin && intent === null) {
     const g = await gate(deps.supabase, from.id, true, false, ai.dailyCap, now);
     if (g === "ok") {
       const title = await resolveTitle(deps.supabase, from.username);
       const answer = await runAgent(deps, ai, message, isPrivate, question, title, now);
       if (answer !== null) {
-        await appendHistory(deps.supabase, from.id, question, [answer], now.getTime());
+        await appendHistory(deps.supabase, convKey(message), question, [answer], now.getTime());
         return true;
       }
+      await sendHere(deps, message, isPrivate, FALLBACK_BUSY.replace("{title}", title));
+      return true;
     }
-  }
-
-  let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
-  if (intent === null) intent = classifyByRules(folded);
-  let canned: string | null = null;
-  if (intent === null) {
-    canned = cannedChat(folded, "{title}", rng); // điền danh xưng sau
-    if (canned !== null) intent = "chat";
   }
   const needsAi = intent === null;
 
@@ -780,7 +795,7 @@ async function handleAi(
     handled = await respond(d, ai, message, isPrivate, isAdmin, question, intent, canned, title, now, adminIds);
   }
   if (isAdmin && handled) {
-    await appendHistory(deps.supabase, from.id, question, replies, now.getTime());
+    await appendHistory(deps.supabase, convKey(message), question, replies, now.getTime());
   }
   return handled;
 }
@@ -818,7 +833,7 @@ async function respond(
   // Lời dạy áp cho mọi người hỏi; mạch hội thoại chỉ lưu cho admin.
   const notes = await loadNotes(deps.supabase);
   const history =
-    isAdmin && message.from ? await loadHistory(deps.supabase, message.from.id, now.getTime()) : [];
+    isAdmin && message.from ? await loadHistory(deps.supabase, convKey(message), now.getTime()) : [];
 
   if (intent === null) {
     const context = await buildContext(deps, isAdmin, now);
@@ -1286,7 +1301,24 @@ const NOTES_ROW_ID = -9101;
 const HISTORY_ROW_ID = -9102;
 const MAX_NOTES = 20;
 const MAX_NOTE_CHARS = 300;
-const HISTORY_TURNS = 10; // 5 cặp hỏi-đáp
+const HISTORY_TURNS = 6; // 3 cặp hỏi-đáp gần nhất (đủ hiểu câu nối tiếp, ít token)
+const FOLLOWUP_WINDOW_MS = 10 * 60_000; // trong 10 phút coi là đang nói chuyện dở
+
+// Khóa ngữ cảnh: tách theo cuộc trò chuyện (chat_id) VÀ người nói (user_id).
+export function convKey(message: TelegramMessage): string {
+  return `${message.chat.id}:${message.from?.id ?? 0}`;
+}
+
+// Bao lâu từ lượt hội thoại gần nhất của người này (Infinity nếu chưa có).
+export async function lastTurnAgeMs(
+  supabase: SupabaseClient,
+  userId: string,
+  nowMs: number
+): Promise<number> {
+  const row = await readHistoryRow(supabase);
+  const list = row.byUser[String(userId)] ?? [];
+  return list.length ? nowMs - list[list.length - 1].t : Infinity;
+}
 const HISTORY_TTL_MS = 2 * 60 * 60 * 1000; // quá 2 giờ thì quên mạch cũ
 
 export async function loadNotes(supabase: SupabaseClient): Promise<string[]> {
@@ -1346,12 +1378,13 @@ async function readHistoryRow(supabase: SupabaseClient): Promise<HistoryRow> {
 
 export async function loadHistory(
   supabase: SupabaseClient,
-  userId: number,
+  userId: string,
   nowMs: number
 ): Promise<ChatTurn[]> {
   const row = await readHistoryRow(supabase);
   return (row.byUser[String(userId)] ?? [])
     .filter((h) => nowMs - h.t < HISTORY_TTL_MS)
+    .slice(-HISTORY_TURNS)
     .map((h) => ({ role: h.role, content: h.content }));
 }
 
@@ -1359,7 +1392,7 @@ export async function loadHistory(
 // khi 2 tin đến cùng lúc là chấp nhận được.
 export async function appendHistory(
   supabase: SupabaseClient,
-  userId: number,
+  userId: string,
   question: string,
   answers: string[],
   nowMs: number
@@ -1413,7 +1446,7 @@ export async function writeNudge(
 // Admin dạy điều gì (cách nói, quy tắc, thông tin team) -> AI tự gọi ghi_nho.
 // Trả câu trả lời cuối (đã gửi) hoặc null nếu lỗi (để rơi về luồng cũ).
 
-const AGENT_MAX_ROUNDS = 4;
+const AGENT_MAX_ROUNDS = 3; // thường 1 (trò chuyện) hoặc 2 (gọi công cụ rồi trả lời)
 const AGENT_DEADLINE_MS = 8500; // chừa chỗ cho webhook Vercel
 
 type AgentMsg =
@@ -1524,21 +1557,19 @@ function vnClock(now: Date): string {
 function agentSystem(title0: string, notes: string[], now: Date, isPrivate: boolean): string {
   const title = title0 === "anh/chị" ? "anh" : title0;
   return [
-    `Bạn là Tiểu Bee 🐝, trợ lý của team CTV VHHS (hỗ trợ 2 nhóm Telegram: QLL và HTKT). Đang nói chuyện với admin, gọi là "${title}", xưng "em".`,
-    `Bây giờ là ${vnClock(now)} (giờ VN). Ca sáng 8h-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Đang chat riêng." : "Đang trong nhóm (mọi người cùng thấy)."}`,
-    "Cách nói chuyện: tự nhiên như người thật, thân thiện, lễ phép (hay mở đầu bằng \"Dạ\"), ngắn gọn (thường 1-3 câu), viết hoa đầu câu đúng chính tả. Hiểu câu nói tắt theo mạch trước đó. Tối đa 1 emoji. Văn bản thuần, KHÔNG dùng markdown (**, #, bảng).",
+    `Bạn là Tiểu Bee, trợ lý đồng nghiệp của team CTV VHHS (2 nhóm Telegram QLL và HTKT). Đang nói chuyện với admin; xưng "em", gọi "${title}".`,
+    `Giờ VN: ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm, mọi người cùng thấy."}`,
+    "Giọng: như đồng nghiệp nhắn tin, ngắn (1-2 câu), thân thiện, đổi cách nói cho tự nhiên. Không cần mở đầu bằng \"Dạ\" hay gọi tên ở mọi câu, không lặp lại câu hỏi. Tối đa 1 emoji, văn bản thuần, không markdown.",
     "Quy tắc:",
-    "- Số liệu PHẢI lấy qua công cụ, không bịa. Nói số liệu gọn tự nhiên (vd \"QLL xử lý hết 25 case rồi ạ\").",
-    "- Được nhờ soạn/thử câu nhắc nhóm: gọi xem_so_lieu trước, rồi tự soạn luôn bản nháp theo BỘ NÃO, đưa ra rồi hỏi có gửi không. Admin bảo gửi/ok/được thì mới gọi nhan_nhom. Admin ra lệnh nhắn nhóm rõ ràng thì gửi luôn.",
-    "- Admin dạy, dặn, góp ý cách làm hoặc nói \"từ nay/lần sau/nhớ...\" thì gọi ghi_nho (viết lại ý thành 1 câu rõ ràng), rồi xác nhận ngắn gọn. Hỏi em nhớ gì thì CHỈ kể các mục trong BỘ NÃO (không kể các quy tắc này).",
-    "- KHÔNG ghi_nho: chỉnh sửa bản nháp đang bàn, số liệu/tình hình hôm nay, câu hỏi thường.",
-    "- Nhóm không còn case tồn thì nói luôn là không cần nhắc, không soạn nháp.",
-    "- Báo ĐÚNG kết quả công cụ trả về: công cụ nói chưa gửi/lỗi thì không được nói đã gửi.",
-    "- Chỉ khi thật sự không hiểu ý mới hỏi lại.",
-    "- Việc không có công cụ (chuyển ca, thêm người, sửa dữ liệu...) thì nói thật là em chưa làm được và gợi ý gõ /help.",
+    "- Hiểu câu nối tiếp và đại từ (\"nhóm đó\", \"còn bên kia\", \"ok gửi đi\") theo các tin trước.",
+    "- Số liệu chỉ lấy qua công cụ, không bịa. Thiếu thông tin quan trọng thì hỏi lại 1 câu ngắn, không đoán.",
+    "- Nhắn nhóm: được nhờ soạn/thử thì xem_so_lieu rồi đưa bản nháp và hỏi gửi không; chỉ gọi nhan_nhom khi admin bảo gửi hoặc ra lệnh nhắn rõ. Nhóm hết case tồn thì nói không cần nhắc.",
+    "- Báo đúng kết quả công cụ; công cụ báo chưa gửi/lỗi thì không nói đã gửi.",
+    "- Admin dặn quy tắc lâu dài (\"từ nay\", \"lần sau\", \"nhớ...\") thì ghi_nho 1 câu rõ ý. Không ghi sửa nháp tạm hay số liệu trong ngày. Hỏi em nhớ gì thì chỉ kể BỘ NÃO.",
+    "- Việc không có công cụ (chuyển ca, thêm người...) thì nói chưa làm được, gợi ý /help.",
     notes.length
-      ? "BỘ NÃO (điều admin đã dạy, luôn làm theo):\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n")
-      : "BỘ NÃO: (chưa được dạy gì)",
+      ? "BỘ NÃO (admin dạy, luôn làm theo):\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n")
+      : "BỘ NÃO: (trống)",
   ].join("\n");
 }
 
@@ -1564,11 +1595,14 @@ async function agentCall(
   deadline: number
 ): Promise<{ content: string; tool_calls?: ToolCall[] } | null> {
   const doFetch = ai.fetchImpl ?? fetch;
+  // Tối đa 2 lần gửi: lần 2 CHỈ khi 429 có Retry-After ngắn (<=2s) hoặc lỗi 5xx,
+  // và còn đủ thời gian. 400/401/timeout/mất mạng: không thử lại.
   for (let attempt = 0; attempt < 2; attempt++) {
     const left = deadline - Date.now();
     if (left < 800) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(left, 6000));
+    const timer = setTimeout(() => controller.abort(), Math.min(left, ai.timeoutMs));
+    const t0 = Date.now();
     try {
       const body: Record<string, unknown> = {
         model: ai.agentModel,
@@ -1576,7 +1610,7 @@ async function agentCall(
         tools: AGENT_TOOLS,
         tool_choice: "auto",
         temperature: 0.6,
-        max_completion_tokens: 700,
+        max_completion_tokens: ai.maxCompletionTokens,
       };
       if (/gpt-oss|qwen/i.test(ai.agentModel)) {
         body.reasoning_effort = "low";
@@ -1589,22 +1623,36 @@ async function agentCall(
         signal: controller.signal,
       });
       if (res.status === 429) {
-        // Hạn mức theo phút: chờ ngắn rồi thử lại 1 lần nếu còn thời gian.
-        const wait = Number(res.headers.get("retry-after") ?? "2") * 1000;
-        console.error(`Bee agent 429, chờ ${wait}ms`);
-        if (attempt === 0 && Date.now() + wait + 1500 < deadline) {
+        const wait = Number(res.headers?.get?.("retry-after") ?? "") * 1000;
+        console.error(`[Bee AI] 429 rate limit (retry-after=${wait || "?"}ms, lần ${attempt + 1})`);
+        if (attempt === 0 && wait > 0 && wait <= 2000 && Date.now() + wait + 1500 < deadline) {
           await sleepMs(wait);
           continue;
         }
         return null;
       }
+      if (res.status >= 500) {
+        console.error(`[Bee AI] HTTP ${res.status} lỗi phía Groq (lần ${attempt + 1})`);
+        if (attempt === 0) continue;
+        return null;
+      }
       if (!res.ok) {
-        console.error(`Bee agent HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+        // 400: request/model sai; 401: key sai -> không thử lại.
+        console.error(`[Bee AI] HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
         return null;
       }
       const data = (await res.json()) as {
         choices?: { message?: { content?: string | null; tool_calls?: ToolCall[] } }[];
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
+      // Theo dõi quota qua log Vercel: token mỗi lần gọi + phần còn lại theo header.
+      console.log(
+        `[Bee AI] ok model=${ai.agentModel} ${Date.now() - t0}ms in=${data.usage?.prompt_tokens ?? "?"} out=${
+          data.usage?.completion_tokens ?? "?"
+        } còn_req_ngày=${res.headers?.get?.("x-ratelimit-remaining-requests") ?? "?"} còn_tok_phút=${
+          res.headers?.get?.("x-ratelimit-remaining-tokens") ?? "?"
+        }`
+      );
       const m = data.choices?.[0]?.message;
       if (!m) return null;
       return { content: m.content ?? "", tool_calls: m.tool_calls?.length ? m.tool_calls : undefined };
@@ -1727,7 +1775,7 @@ export async function runAgent(
     now,
     notes: await loadNotes(deps.supabase),
   };
-  const history = message.from ? await loadHistory(deps.supabase, message.from.id, now.getTime()) : [];
+  const history = message.from ? await loadHistory(deps.supabase, convKey(message), now.getTime()) : [];
   // Admin reply vào 1 tin cụ thể -> đưa nội dung tin đó vào làm ngữ cảnh.
   const quoted = (message.reply_to_message?.text ?? "").replace(/https?:\/\/\S+/g, "").slice(0, 300);
   const userText =
@@ -1735,7 +1783,7 @@ export async function runAgent(
 
   const messages: AgentMsg[] = [
     { role: "system", content: agentSystem(title, ctx.notes, now, isPrivate) },
-    ...history.map((h) => ({ role: h.role, content: h.content.slice(0, 300) })),
+    ...history.map((h) => ({ role: h.role, content: h.content.slice(0, 200) })),
     { role: "user", content: userText },
   ];
 
@@ -1759,7 +1807,7 @@ export async function runAgent(
       }
       const result = await runTool(tc.function.name, args, ctx);
       if (/^(gui_danh_sach|nhan_nhom|hen_tag_ca_chieu|ghi_nho|quen)$/.test(tc.function.name)) acted = true;
-      messages.push({ role: "tool", tool_call_id: tc.id, content: result.slice(0, 2500) });
+      messages.push({ role: "tool", tool_call_id: tc.id, content: result.slice(0, 1200) });
     }
   }
   // Đã làm việc thật nhưng không kịp nói câu cuối -> báo ngắn, KHÔNG rơi về luồng
