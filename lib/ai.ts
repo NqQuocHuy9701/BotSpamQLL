@@ -41,7 +41,8 @@ export type Intent =
   | "help"
   | "chat"
   | "checkout"
-  | "hentag";
+  | "hentag"
+  | "nhacnhom";
 const INTENTS: readonly Intent[] = [
   "checkin",
   "baocao",
@@ -50,6 +51,7 @@ const INTENTS: readonly Intent[] = [
   "chat",
   "checkout",
   "hentag",
+  "nhacnhom",
 ];
 
 // Câu dẫn trước số liệu (có sẵn, không tốn lượt AI).
@@ -132,6 +134,13 @@ export function classifyByRules(folded: string): Intent | null {
     /\bchieu\b.*\b(tag|goi|nhac|giao)\b.*\bctv\b/.test(folded)
   ) {
     return "hentag";
+  }
+  // Nhắn/nhắc thẳng vào nhóm ("nhắn nhóm HTKT"): đăng case tồn + tag CTV đang trực.
+  if (
+    /\b(nhan|nhac|tag|goi)\b.*\b(nhom|group)\b.*\b(qll|htkt)\b|\b(nhan|nhac|tag|goi)\b.*\b(qll|htkt)\b/.test(folded) &&
+    !/\b(cho|gui)\s+(a|anh|e|em|chi)\b/.test(folded)
+  ) {
+    return "nhacnhom";
   }
   if (ANALYTIC_RE.test(folded) && !/\b(truc|check ?in|checkin|diem danh)\b/.test(folded)) return null;
   // Bee chưa có dữ liệu check-out: trả lời thẳng thay vì nhả danh sách check-in.
@@ -258,6 +267,7 @@ function buildSystemPrompt(title: string, context: string): string {
     "- help: hỏi Bee làm được gì",
     "- checkout: hỏi ai đã check-out/tan ca (Bee chưa có dữ liệu này)",
     "- hentag: dặn đến ca chiều thì tag CTV ca chiều xử lý case tồn",
+    "- nhacnhom: nhờ nhắn/nhắc vào nhóm QLL hoặc HTKT ngay bây giờ",
     `reply (khi intent=chat): trả lời tự nhiên như đang trò chuyện, tiếng Việt, xưng "em", gọi người hỏi là "${title}", 1-3 câu ngắn, mở đầu "Dạ", tối đa 1 emoji mặt cười. Chỉ dùng số liệu trong DỮ LIỆU, KHÔNG bịa; nếu DỮ LIỆU không có thì nói thẳng em chưa có thông tin đó. Có thể nêu tên CTV (không gắn @). Việc ghi/sửa dữ liệu (chuyển ca, thêm người...) Bee chưa làm được qua chat: nói rõ và gợi ý gõ lệnh /help. Intent khác thì reply là "".`,
     "DỮ LIỆU (ca hiện tại, chỉ đọc):",
     context.trim() === "" ? "(không có)" : context,
@@ -741,6 +751,16 @@ async function respond(
       await sendHere(deps, message, isPrivate, deps.checkinSupabase ? `${lead(title)}\n\n${body}` : body);
       return true;
     }
+    case "nhacnhom": {
+      if (!isAdmin) {
+        await sendHere(deps, message, isPrivate, `Dạ việc này em chỉ nhận từ admin thôi ạ ${title} 🥺`);
+        return true;
+      }
+      let scope = detectScope(foldVi(question));
+      if (scope === "all") scope = detectScope(foldVi(message.reply_to_message?.text ?? ""));
+      await sendHere(deps, message, isPrivate, await remindGroups(deps, scope, title, now));
+      return true;
+    }
     case "hentag": {
       if (!isAdmin) {
         await sendHere(deps, message, isPrivate, `Dạ việc này em chỉ nhận từ admin thôi ạ ${title} 🥺`);
@@ -1029,5 +1049,51 @@ export async function describeHandoff(supabase: SupabaseClient, now: Date): Prom
     return "Đã có lịch tag CTV ca chiều xử lý case tồn, đang chờ sau 13h30.";
   } catch {
     return "";
+  }
+}
+
+// Admin nhờ "nhắn nhóm QLL/HTKT": đăng ngay vào nhóm, tag CTV đã check-in ca hiện
+// tại + liệt kê case tồn từ đầu ngày. Nhóm nào không còn tồn thì bỏ qua. Trả câu
+// báo lại admin (không ném lỗi).
+async function remindGroups(
+  deps: AiDeps,
+  scope: CaseScope,
+  title: string,
+  now: Date
+): Promise<string> {
+  try {
+    const ctvs = deps.checkinSupabase ? await getCurrentShiftCheckins(deps.checkinSupabase, now) : [];
+    const tags = ctvs.map((u) => `@${u}`).join(" ");
+    const since = dayStartUtcIso(now);
+    const scopes: ("qll" | "htkt")[] = scope === "all" ? ["qll", "htkt"] : [scope];
+    const posted: string[] = [];
+    const empty: string[] = [];
+    const failed: string[] = [];
+    for (const s of scopes) {
+      const [n, ...lines] =
+        s === "qll" ? await pendingQll(deps.supabase, since) : await pendingHtkt(deps.supabase, since);
+      if (n === "0") {
+        empty.push(scopeLabel(s));
+        continue;
+      }
+      const head = tags ? `${tags} ơi, nhờ mình` : "Nhờ các bạn";
+      const text =
+        `${head} xử lý giúp các case tồn ${scopeLabel(s)} nhé 😊\n\n` +
+        `📋 Case tồn ${scopeLabel(s)}: ${n}\n${lines.join("\n")}`;
+      const res = await deps.telegram.sendMessage(s === "qll" ? QLL_CHAT_ID : HTKT_CHAT_ID, text);
+      (res.ok ? posted : failed).push(`${scopeLabel(s)} (${n} case)`);
+    }
+    const parts: string[] = [];
+    if (posted.length) {
+      parts.push(
+        `Dạ em nhắn nhóm ${posted.join(", ")} rồi ạ` + (ctvs.length ? `, em đã tag ${ctvs.length} CTV đang trực ca 😊` : " 😊")
+      );
+    }
+    if (empty.length) parts.push(`Nhóm ${empty.join(", ")} không còn case tồn nên em không nhắn ạ.`);
+    if (failed.length) parts.push(`Em chưa gửi được vào nhóm ${failed.join(", ")}, ${title} thử lại giúp em nhé 🥺`);
+    return parts.join("\n");
+  } catch (e) {
+    console.error("remindGroups lỗi:", e instanceof Error ? e.message : String(e));
+    return `Dạ em chưa nhắn nhóm được, ${title} thử lại sau nhé 🥺`;
   }
 }

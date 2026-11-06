@@ -56,6 +56,15 @@ describe("hentag (nói tắt)", () => {
   });
 });
 
+describe("nhacnhom", () => {
+  it("nhắn nhóm", () => {
+    expect(classifyByRules(foldVi("Nhắn nhóm HTKT"))).toBe("nhacnhom");
+    expect(classifyByRules(foldVi("nhắc nhóm QLL xử lý nhé"))).toBe("nhacnhom");
+    expect(classifyByRules(foldVi("gửi anh case tồn nhóm QLL"))).toBe("casetreo");
+    expect(classifyByRules(foldVi("tag ctv ca chiều xử lý case tồn QLL"))).toBe("hentag");
+  });
+});
+
 describe("extractMention", () => {
   it("có tag", () => {
     const r = extractMention("@vh_messenger_bot ai đang trực?", "vh_messenger_bot");
