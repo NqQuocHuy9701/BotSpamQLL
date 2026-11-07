@@ -1722,13 +1722,14 @@ function vnClock(now: Date): string {
   return `${p(vn.getUTCHours())}:${p(vn.getUTCMinutes())} ngày ${p(vn.getUTCDate())}/${p(vn.getUTCMonth() + 1)}`;
 }
 
-function agentSystem(title0: string, notes: string[], now: Date, isPrivate: boolean): string {
+function agentSystem(title0: string, notes: string[], now: Date, isPrivate: boolean, replyContext?: string): string {
   const title = title0 === "anh/chị" ? "anh" : title0;
   // Viết GỌN: prompt gửi kèm MỌI lần gọi -> tốn token/phút trực tiếp.
   return [
     `Bạn là Tiểu Bee, trợ lý đồng nghiệp team CTV VHHS (theo dõi case nhóm QLL, HTKT; còn ở các nhóm khác). Nói với admin: xưng "em", gọi "${title}".`,
     `Giờ VN ${vnClock(now)}. Ca sáng 8-12h, chiều 13h30-17h, tối 17h30-21h30. ${isPrivate ? "Chat riêng." : "Trong nhóm."}`,
     "Giọng: đồng nghiệp nhắn tin, 1-2 câu, tự nhiên, không mở đầu \"Dạ\" mọi câu, tối đa 1 emoji, không markdown, tên CTV không kèm @.",
+    replyContext ? `NGƯCẢNH TIN NHẮN ĐƯỢC REPLY:\n"${replyContext}"\n(Hãy ưu tiên trả lời, tóm tắt hoặc xử lý dựa trên nội dung tin nhắn này nếu admin hỏi về nó).` : "",
     "Quy tắc:",
     "- Hiểu câu nối tiếp/đại từ (\"nhóm đó\", \"anh ý\", \"ok gửi đi\") theo tin trước. Mơ hồ thật thì hỏi lại 1 câu.",
     "- Số liệu/case/CTV/cấu hình chỉ lấy qua công cụ, không bịa. Việc chung (soạn tin, trả lời phụ huynh, giải thích, tính nhẩm) thì tự làm.",
@@ -1739,7 +1740,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
     "- Admin dặn lâu dài (\"từ nay\", \"lần sau\", \"nhớ\") thì ghi_nho 1 câu. Hỏi em nhớ gì thì kể BỘ NÃO.",
     notes.length ? "BỘ NÃO:\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n") : "BỘ NÃO: (trống)",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 // Bỏ markdown để hiển thị gọn trên Telegram (không dùng parse_mode).
@@ -2074,8 +2075,9 @@ export async function runAgent(
   const userText =
     (quoted ? `(đang trả lời tin: "${quoted}")\n` : "") + question.slice(0, MAX_QUESTION_CHARS);
 
+  const replyCtx = message.reply_to_message?.text?.trim() || message.reply_to_message?.caption?.trim();
   const messages: AgentMsg[] = [
-    { role: "system", content: agentSystem(title, ctx.notes, now, isPrivate) },
+    { role: "system", content: agentSystem(title, ctx.notes, now, isPrivate, replyCtx) },
     ...history.map((h) => ({ role: h.role, content: h.content.slice(0, 200) })),
     { role: "user", content: userText },
   ];
