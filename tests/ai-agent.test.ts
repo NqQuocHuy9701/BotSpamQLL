@@ -1049,12 +1049,12 @@ describe("Tin Bee đã chuyển + ❤️ không bị nhắc SLA (lỗi thực t�
   }
   const today = "2026-11-06";
 
-  it("đánh dấu handled=true đúng các tin Bee đã chuyển hôm nay, chỉ tin đang handled=false", async () => {
-    const d = db({ kind: "leavefw", day: today, keys: ["142153", "142107"], count: 2 });
+  it("chỉ đánh dấu tin Bee ĐÃ thả ❤️ thành công (không phải mọi tin đã thử chuyển)", async () => {
+    const d = db({ kind: "leavefw", day: today, keys: ["142153", "142107", "142999"], reacted: ["142153", "142107"], count: 3 });
     const n = await markForwardedHandled(d.client, NOW);
     expect(n).toBe(2);
     expect(d.updates).toHaveLength(1);
-    expect(d.updates[0].ids).toEqual([142153, 142107]);
+    expect(d.updates[0].ids).toEqual([142153, 142107]); // 142999 chuyển lỗi/không có tim -> vẫn nhắc SLA
     expect(d.updates[0].payload).toEqual({ handled: true });
     expect(d.updates[0].filters).toEqual({ handled: false });
   });
@@ -1071,5 +1071,45 @@ describe("Tin Bee đã chuyển + ❤️ không bị nhắc SLA (lỗi thực t�
   it("lỗi DB -> không ném lỗi (không làm hỏng cron)", async () => {
     const bad: any = { from: () => { throw new Error("db down"); } };
     await expect(markForwardedHandled(bad, NOW)).resolves.toBe(0);
+  });
+});
+
+describe("Luồng đầy đủ: Bee react -> có/không bị nhắc SLA", () => {
+  const QLL2 = -1002273179613;
+  const FORM2 = [
+    "Bùi Bích San",
+    "Code: 6443837",
+    "Mã học sinh: 199182 TOAN.2026.0001 | TOÁN 5 | LỚP 1-1 | NỀN TẢNG 2 | Ngày vào lớp: 01/10/2026",
+    "GV dạy: T1 - Cô A",
+  ].join("\n");
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function forward(heartOk: boolean, fwOk = true) {
+    const { db, store } = fakeDb();
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => ({
+      status: 200,
+      json: async () => ({ ok: url.includes("setMessageReaction") ? heartOk : fwOk }),
+    })));
+    const deps: any = { telegram: { sendMessage: async () => ({ ok: fwOk }) }, supabase: db };
+    const ai = { ...loadAiConfig({ AI_ENABLED: "true", GROQ_API_KEY: "k" })!, botToken: "T" };
+    await applyLeaveForward(deps, ai, { message_id: 142153, chat: { id: QLL2, type: "supergroup" }, from: { id: 9 }, text: FORM2 } as any);
+    return (store.get(-9105) as any) ?? {};
+  }
+
+  it("Bee chuyển + thả ❤️ thành công -> có trong danh sách đánh dấu handled (KHÔNG nhắc SLA)", async () => {
+    const led = await forward(true);
+    expect(Array.isArray(led.keys) ? led.keys : []).toContain("142153");
+    expect(led.reacted).toContain("142153");
+  });
+
+  it("thả ❤️ lỗi -> KHÔNG đánh dấu (vẫn nhắc SLA như case thường)", async () => {
+    const led = await forward(false);
+    expect(Array.isArray(led.keys) ? led.keys : []).toContain("142153");
+    expect(led.reacted ?? []).not.toContain("142153");
+  });
+
+  it("chuyển lỗi hoàn toàn -> không thả ❤️, không đánh dấu (vẫn nhắc SLA)", async () => {
+    const led = await forward(true, false);
+    expect(led.reacted ?? []).not.toContain("142153");
   });
 });

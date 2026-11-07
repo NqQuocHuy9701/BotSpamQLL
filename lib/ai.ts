@@ -2807,11 +2807,15 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
       return;
     }
     const count = (sameDay ? cur?.count ?? 0 : 0) + 1;
+    const reacted = sameDay && Array.isArray((cur as { reacted?: unknown })?.reacted)
+      ? ((cur as { reacted: string[] }).reacted)
+      : [];
     await writeRow(deps.supabase, LEAVE_ROW_ID, {
       kind: "leavefw",
       day,
       keys: [...keys, key].slice(-LEAVE_KEYS_MAX),
       count,
+      reacted, // giữ danh sách tin đã thả ❤️ thành công
     });
 
     let ok = false;
@@ -2856,6 +2860,8 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
         });
         const j = (await res.json()) as { ok?: boolean; description?: string };
         if (!j.ok) console.error(`[Bee FW] thả react lỗi: ${j.description ?? res.status}`);
+        // CHỈ tin thả ❤️ THÀNH CÔNG mới được coi là đã react (cron đánh dấu handled).
+        else await recordReacted(deps.supabase, message.message_id);
       } catch (e) {
         console.error("[Bee FW] thả react lỗi:", e instanceof Error ? e.message : String(e));
       }
@@ -2863,6 +2869,14 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
   } catch (e) {
     console.error("[Bee FW] lỗi (bỏ qua):", e instanceof Error ? e.message : String(e));
   }
+}
+
+async function recordReacted(supabase: SupabaseClient, messageId: number): Promise<void> {
+  const cur = await readRow<Record<string, unknown>>(supabase, LEAVE_ROW_ID);
+  if (!cur || cur.kind !== "leavefw") return;
+  const reacted = Array.isArray(cur.reacted) ? (cur.reacted as string[]) : [];
+  if (reacted.includes(String(messageId))) return;
+  await writeRow(supabase, LEAVE_ROW_ID, { ...cur, reacted: [...reacted, String(messageId)].slice(-LEAVE_KEYS_MAX) });
 }
 
 // Số form xin nghỉ đã chuyển hôm nay (cho Bee trả lời admin).
@@ -3019,9 +3033,10 @@ export async function handlePendingPost(
 // case (upsert handled=false). Gọi từ cron, TRƯỚC bước nhắc SLA. Không ném lỗi.
 export async function markForwardedHandled(supabase: SupabaseClient, now: Date = new Date()): Promise<number> {
   try {
-    const cur = await readRow<{ kind?: string; day?: string; keys?: string[] }>(supabase, LEAVE_ROW_ID);
-    if (cur?.kind !== "leavefw" || cur.day !== vnDay(now) || !Array.isArray(cur.keys)) return 0;
-    const ids = cur.keys.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    const cur = await readRow<{ kind?: string; day?: string; reacted?: string[] }>(supabase, LEAVE_ROW_ID);
+    // Chỉ tin Bee ĐÃ thả ❤️ thành công (không phải mọi tin đã thử chuyển).
+    if (cur?.kind !== "leavefw" || cur.day !== vnDay(now) || !Array.isArray(cur.reacted)) return 0;
+    const ids = cur.reacted.map(Number).filter((n) => Number.isInteger(n) && n > 0);
     if (ids.length === 0) return 0;
     const { data, error } = await supabase
       .from("qll_tracking")
