@@ -1420,10 +1420,10 @@ async function remindGroups(
 // -9001/-9002 của luồng cũ, hay các id theo ngày ~ -2e9).
 const NOTES_ROW_ID = -9101;
 const HISTORY_ROW_ID = -9102;
-const MAX_NOTES = 20;
-const MAX_NOTE_CHARS = 300;
-const HISTORY_TURNS = 6; // 3 cặp hỏi-đáp gần nhất (đủ hiểu câu nối tiếp, ít token)
-const FOLLOWUP_WINDOW_MS = 10 * 60_000; // trong 10 phút coi là đang nói chuyện dở
+const MAX_NOTES = 30;
+const MAX_NOTE_CHARS = 400;
+const HISTORY_TURNS = 10; // 5 cặp hỏi-đáp gần nhất (tăng độ sâu ngữ cảnh v5)
+const FOLLOWUP_WINDOW_MS = 15 * 60_000; // mở rộng thời gian ghi nhớ mạch hội thoại lên 15 phút
 
 // Khóa ngữ cảnh: tách theo cuộc trò chuyện (chat_id) VÀ người nói (user_id).
 export function convKey(message: TelegramMessage): string {
