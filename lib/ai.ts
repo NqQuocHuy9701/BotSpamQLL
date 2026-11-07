@@ -1734,7 +1734,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Số liệu/case/CTV/cấu hình chỉ lấy qua công cụ, không bịa. Việc chung (soạn tin, trả lời phụ huynh, giải thích, tính nhẩm) thì tự làm.",
     "- Nhóm ngoài QLL/HTKT: xem_cac_nhom, xem_nhom; gửi/rep tin thường: gui_tin_nhom (theo tên).",
     "- Bảo tag ai -> tag_ctv ngay (username + ma_case; lời nhắn hệ thống viết). Chưa rõ tag ai thì hỏi admin, KHÔNG gọi công cụ.",
-    "- Nhắc cả ca case tồn: nhan_nhom; tin tự do: gui_tin_nhom (2 cái này chỉ tạo nháp cho admin duyệt).",
+    "- Nhắc cả ca case tồn: nhan_nhom (nếu nhắn riêng tạo nháp duyệt, nếu nhắn trong nhóm thì thực hiện đăng luôn); tin tự do: gui_tin_nhom.",
     "- Chưa có công cụ báo thành công thì KHÔNG nói đã gửi/tag. Không hứa tự động việc gì ngoài: hẹn tag ca chiều, và form QLL đủ mẫu tự chuyển sang nhóm Cộng đồng VH - BGD.",
     "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
     "- Admin dặn lâu dài (\"từ nay\", \"lần sau\", \"nhớ\") thì ghi_nho 1 câu. Hỏi em nhớ gì thì kể BỘ NÃO.",
@@ -1931,7 +1931,8 @@ async function runTool(
   const { deps, message, isPrivate, title, now } = ctx;
   // CHỐT CHẶN: AI KHÔNG được tự đăng vào nhóm. Công cụ đăng chỉ tạo BẢN NHÁP;
   // code gửi bản nháp cho admin, admin nhắn "gửi" (TypeScript xử lý) mới đăng thật.
-  if (POST_TOOLS.has(name) && !ctx.confirmed) {
+  // Khi admin nhắn trong nhóm: thực hiện luôn (confirmed=true), không tạo bản nháp.
+  if (POST_TOOLS.has(name) && !ctx.confirmed && ctx.isPrivate) {
     return await draftPost(name, args, ctx);
   }
   try {
