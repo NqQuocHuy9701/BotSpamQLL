@@ -1740,7 +1740,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Hiểu câu nối tiếp/đại từ (\"nhóm đó\", \"anh ý\", \"ok gửi đi\") theo tin trước. Mơ hồ thật thì hỏi lại 1 câu.",
     "- Số liệu/case/CTV/cấu hình chỉ lấy qua công cụ, không bịa. Việc chung (soạn tin, trả lời phụ huynh, giải thích, tính nhẩm) thì tự làm.",
     "- Nhóm ngoài QLL/HTKT: xem_cac_nhom, xem_nhom; gửi/rep tin thường: gui_tin_nhom (theo tên).",
-    "- Bảo tag ai -> tag_ctv ngay (username + ma_case; lời nhắn hệ thống viết). Chưa rõ tag ai thì hỏi admin, KHÔNG gọi công cụ.",
+    "- QUAN TRỌNG KHI XỬ LÝ CHUỖI HỘI THOẠI NHIỀU BƯỚC (vd: check-in rồi tag): Khi admin yêu cầu 'tag các bạn đã điểm danh/check-in', bạn PHẢI gọi công cụ `xem_checkin` trước để lấy danh sách username, sau đó trong vòng lặp tiếp theo phải tự động gọi ngay công cụ `tag_ctv` với danh sách username vừa lấy được. TUYỆT ĐỐI KHÔNG hỏi lại admin xem muốn tag ai khi danh sách check-in đã có sẵn.",
     "- Nhắc cả ca case tồn: nhan_nhom (nếu nhắn riêng tạo nháp duyệt, nếu nhắn trong nhóm thì thực hiện đăng luôn đúng nhóm được chỉ định); tin tự do: gui_tin_nhom.",
     "- Chưa có công cụ báo thành công thì KHÔNG nói đã gửi/tag. Không hứa tự động việc gì ngoài: hẹn tag ca chiều, và form QLL đủ mẫu tự chuyển sang nhóm Cộng đồng VH - BGD.",
     "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
