@@ -1567,7 +1567,7 @@ export async function writeNudge(
 // Admin dạy điều gì (cách nói, quy tắc, thông tin team) -> AI tự gọi ghi_nho.
 // Trả câu trả lời cuối (đã gửi) hoặc null nếu lỗi (để rơi về luồng cũ).
 
-const AGENT_MAX_ROUNDS = 3; // thường 1 (trò chuyện) hoặc 2 (gọi công cụ rồi trả lời)
+const AGENT_MAX_ROUNDS = 5; // tăng số vòng lặp tối đa để Agent xử lý chuỗi tool chaining mượt mà
 
 // --- Hạn mức token/phút của Groq (theo header; bộ nhớ của instance) ---
 // Groq trả x-ratelimit-remaining-tokens + x-ratelimit-reset-tokens ("7.66s",
