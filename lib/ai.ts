@@ -1744,7 +1744,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- QUAN TRỌNG VỀ NHẮN NHÓM & TAG CTV: Khi admin yêu cầu 'nhắn nhóm HTKT tag tên các CTV đang trong ca làm vào nhé', bạn PHẢI gọi ngay công cụ `nhan_nhom` với tham số `nhom: \"htkt\"`. TUYỆT ĐỐI KHÔNG hỏi lại admin muốn tag CTV nào vì công cụ nhan_nhom đã tự động lấy danh sách CTV trực ca.",
     "- Chưa có công cụ báo thành công thì KHÔNG nói đã gửi/tag. Không hứa tự động việc gì ngoài: hẹn tag ca chiều, và form QLL đủ mẫu tự chuyển sang nhóm Cộng đồng VH - BGD.",
     "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
-    "- Admin dặn lâu dài (\"từ nay\", \"lần sau\", \"nhớ\") thì ghi_nho 1 câu. Hỏi em nhớ gì thì kể BỘ NÃO.",
+    "- TỰ HỌC VÀ LẮNG NGHE NHÓM: Bee liên tục quan sát và học hỏi từ các tin nhắn diễn ra trong nhóm chat. Khi admin hoặc CTV hỏi về một vấn đề đã xuất hiện trong ngữ cảnh nhóm hoặc cần tra cứu thông tin nhóm, Bee sẽ tự động kết hợp trí nhớ dài hạn (BỘ NÃO) và nhật ký nhóm để đưa ra câu trả lời chính xác, thực tế nhất mà không cần phải hỏi lại.",
     notes.length ? "BỘ NÃO:\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n") : "BỘ NÃO: (trống)",
   ].filter(Boolean).join("\n");
 }
