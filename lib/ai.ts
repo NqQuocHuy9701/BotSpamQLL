@@ -1063,10 +1063,6 @@ async function respond(
       return true;
     }
     case "hanmuc": {
-      if (!isAdmin) {
-        await sendHere(deps, message, isPrivate, `Dạ mục này em chỉ báo cho admin thôi ạ ${title} 🥺`);
-        return true;
-      }
       await sendHere(deps, message, isPrivate, await buildQuotaReport(deps.supabase, ai, now));
       return true;
     }
@@ -1077,10 +1073,6 @@ async function respond(
     }
     case "baocao":
     case "casetreo": {
-      if (!isAdmin) {
-        await sendHere(deps, message, isPrivate, `Dạ mục này em chỉ báo cho admin thôi ạ ${title} 🥺`);
-        return true;
-      }
       const html = intent === "baocao";
       const scope = detectScope(foldVi(question));
       const where = scope === "all" ? "cả 2 nhóm QLL và HTKT" : `nhóm ${scope.toUpperCase()}`;
@@ -1092,7 +1084,7 @@ async function respond(
         await sendHere(deps, message, true, `${intro}\n\n${body}`, html);
         return true;
       }
-      // Trong nhóm: admin tag thì trả lời thẳng trong nhóm (reply vào tin hỏi).
+      // Trong nhóm: tag thì trả lời thẳng trong nhóm (reply vào tin hỏi).
       await sendHere(deps, message, false, `${intro}\n\n${body}`, html);
       return true;
     }

@@ -472,11 +472,11 @@ describe("Hỏi Bee về credit/hạn mức", () => {
     expect(t.sent[0].text).toContain("Vercel, Supabase");
   });
 
-  it("người không phải admin trong nhóm hỏi credit: từ chối, không lộ số", async () => {
+  it("người không phải admin trong nhóm hỏi credit: vẫn trả lời bình thường", async () => {
     const t = setup([]);
     await t.run("@vh_messenger_bot còn bao nhiêu credit", -1002458492731, "supergroup", 222);
     expect(t.f).not.toHaveBeenCalled();
-    expect(t.sent[0].text).toContain("chỉ báo cho admin");
+    expect(t.sent[0].text).toContain("Hạn mức hôm nay");
   });
 
   it("mỗi lần gọi Groq được ghi sổ: token + header còn lại", async () => {
