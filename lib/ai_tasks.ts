@@ -1,14 +1,19 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-// Phase 2 task-state substrate. It is not wired into the live agent yet and
-// stays disabled unless AI_TASK_STATE_ENABLED=true is explicitly configured.
-// Rows use the existing pending_batches table; this module never migrates it.
+// Task-state storage for private tool workflows and gated approvals. It stays disabled
+// unless AI_TASK_STATE_ENABLED=true is explicitly configured. Rows use the
+// existing pending_batches table; this module never migrates it.
 const TASK_ROW_BASE = 7_000_000_000_000;
 const TASK_ROW_SPAN = 999_999_999_999;
 export const TASK_TTL_MS = 10 * 60_000;
+const TASK_STATUSES = new Set<TaskStatus>([
+  "DRAFT", "PENDING", "RUNNING", "AWAITING_INPUT", "AWAITING_APPROVAL", "APPROVED", "EXECUTING",
+  "COMPLETED", "FAILED", "CANCELLED", "EXPIRED", "UNKNOWN_RESULT",
+]);
 
 export type TaskStatus =
+  | "DRAFT"
   | "PENDING"
   | "RUNNING"
   | "AWAITING_INPUT"
@@ -24,6 +29,7 @@ export type TaskStatus =
 export interface AgentTask {
   kind: "agent_task";
   taskId: string;
+  requestKey?: string;
   ownerUserId: number;
   ownerAdminId?: number;
   chatId: number;
@@ -55,10 +61,13 @@ export interface NewTask {
   plan: string[];
   payloadHash?: string;
   requiresApproval?: boolean;
+  draft?: boolean;
   ttlMs?: number;
+  requestKey?: string;
 }
 
 const ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
+  DRAFT: ["AWAITING_INPUT", "AWAITING_APPROVAL", "CANCELLED", "EXPIRED"],
   PENDING: ["RUNNING", "AWAITING_INPUT", "AWAITING_APPROVAL", "CANCELLED", "EXPIRED", "FAILED"],
   RUNNING: ["AWAITING_INPUT", "AWAITING_APPROVAL", "COMPLETED", "FAILED", "CANCELLED", "EXPIRED"],
   AWAITING_INPUT: ["RUNNING", "CANCELLED", "EXPIRED"],
@@ -76,11 +85,23 @@ export function taskStateEnabled(env: Record<string, string | undefined> = proce
   return (env.AI_TASK_STATE_ENABLED ?? "").trim().toLowerCase() === "true";
 }
 
+export function hashTaskPayload(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
 function taskRowId(taskId: string): number | null {
   if (!/^-[0-9]{13}$/.test(taskId)) return null;
   const rowId = Number(taskId);
   const offset = -rowId - TASK_ROW_BASE;
   return Number.isSafeInteger(rowId) && offset >= 0 && offset <= TASK_ROW_SPAN ? rowId : null;
+}
+
+function rowIdForRequest(requestKey: string): number {
+  // Stable row ID makes a retried Telegram update idempotent without a schema change.
+  let hash = 2166136261;
+  for (let i = 0; i < requestKey.length; i++) hash = Math.imul(hash ^ requestKey.charCodeAt(i), 16777619);
+  const offset = (hash >>> 0) % (TASK_ROW_SPAN + 1);
+  return -(TASK_ROW_BASE + offset);
 }
 
 function isExpired(task: AgentTask, now: Date): boolean {
@@ -89,6 +110,25 @@ function isExpired(task: AgentTask, now: Date): boolean {
 
 function scopeMatches(task: AgentTask, actorId: number, chatId: number): boolean {
   return task.ownerUserId === actorId && task.chatId === chatId && (task.groupId === undefined || task.groupId === chatId);
+}
+
+function nextUpdatedAt(current: AgentTask, now: Date): string {
+  const oldTime = Date.parse(current.updatedAt);
+  return new Date(Math.max(now.getTime(), Number.isFinite(oldTime) ? oldTime + 1 : now.getTime())).toISOString();
+}
+
+function isStoredTask(value: unknown): value is AgentTask {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const task = value as Partial<AgentTask>;
+  return task.kind === "agent_task" && typeof task.taskId === "string" &&
+    Number.isSafeInteger(task.ownerUserId) && Number.isSafeInteger(task.chatId) &&
+    typeof task.intent === "string" && typeof task.scope === "string" &&
+    Array.isArray(task.plan) && task.plan.length > 0 && task.plan.length <= 15 && task.plan.every((s) => typeof s === "string") &&
+    Array.isArray(task.stepStatuses) && task.stepStatuses.length === task.plan.length && task.stepStatuses.every((s) => typeof s === "string" && TASK_STATUSES.has(s as TaskStatus)) &&
+    typeof task.status === "string" && TASK_STATUSES.has(task.status as TaskStatus) &&
+    typeof task.createdAt === "string" && Number.isFinite(Date.parse(task.createdAt)) &&
+    typeof task.updatedAt === "string" && Number.isFinite(Date.parse(task.updatedAt)) &&
+    typeof task.expiresAt === "string" && Number.isFinite(Date.parse(task.expiresAt));
 }
 
 export async function createTask(
@@ -104,17 +144,21 @@ export async function createTask(
   if (!input.intent.trim() || !input.scope.trim() || input.plan.length === 0 || input.plan.length > 8) {
     return { ok: false, reason: "invalid_task" };
   }
+  if (input.requestKey !== undefined && (input.requestKey.trim() === "" || input.requestKey.length > 200)) {
+    return { ok: false, reason: "invalid_request_key" };
+  }
   const ttlMs = Math.min(Math.max(input.ttlMs ?? TASK_TTL_MS, 30_000), 60 * 60_000);
   const createdAt = now.toISOString();
   const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
 
   // The primary key makes task IDs unique without a schema change. Collision
   // retries are bounded; task creation never overwrites another task.
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const id = -(TASK_ROW_BASE + randomInt(0, TASK_ROW_SPAN + 1));
+  for (let attempt = 0; attempt < (input.requestKey ? 1 : 4); attempt++) {
+    const id = input.requestKey ? rowIdForRequest(input.requestKey) : -(TASK_ROW_BASE + randomInt(0, TASK_ROW_SPAN + 1));
     const task: AgentTask = {
       kind: "agent_task",
       taskId: String(id),
+      requestKey: input.requestKey,
       ownerUserId: input.ownerUserId,
       ownerAdminId: input.ownerAdminId,
       chatId: input.chatId,
@@ -123,8 +167,8 @@ export async function createTask(
       scope: input.scope.trim().slice(0, 120),
       plan: input.plan.map((s) => s.trim().slice(0, 240)).filter(Boolean),
       stepStatuses: input.plan.map(() => "PENDING"),
-      status: input.requiresApproval ? "AWAITING_APPROVAL" : "PENDING",
-      approvalStatus: input.requiresApproval ? "pending" : "not_required",
+      status: input.draft ? "DRAFT" : input.requiresApproval ? "AWAITING_APPROVAL" : "PENDING",
+      approvalStatus: input.draft ? "not_required" : input.requiresApproval ? "pending" : "not_required",
       payloadHash: input.payloadHash,
       createdAt,
       updatedAt: createdAt,
@@ -135,6 +179,21 @@ export async function createTask(
       const { error } = await db.from("pending_batches").insert({ admin_id: id, items: task });
       if (!error) return { ok: true, task };
       if (error.code !== "23505") return { ok: false, reason: "storage_error" };
+      if (input.requestKey) {
+        try {
+          const { data } = await db.from("pending_batches").select("items").eq("admin_id", id).maybeSingle();
+          const existing = data?.items as AgentTask | undefined;
+          if (
+            existing?.kind === "agent_task" &&
+            existing.requestKey === input.requestKey &&
+            existing.ownerUserId === input.ownerUserId &&
+            existing.chatId === input.chatId
+          ) return { ok: true, task: existing };
+          return { ok: false, reason: "id_allocation_failed" };
+        } catch {
+          return { ok: false, reason: "storage_error" };
+        }
+      }
     } catch {
       return { ok: false, reason: "storage_error" };
     }
@@ -156,8 +215,9 @@ export async function getTask(
   try {
     const { data, error } = await db.from("pending_batches").select("items").eq("admin_id", id).maybeSingle();
     if (error || !data?.items) return { ok: false, reason: "not_found" };
-    const task = data.items as AgentTask;
-    if (task.kind !== "agent_task" || task.taskId !== taskId || !scopeMatches(task, actorId, chatId)) {
+    if (!isStoredTask(data.items)) return { ok: false, reason: "not_found" };
+    const task = data.items;
+    if (task.taskId !== taskId || !scopeMatches(task, actorId, chatId)) {
       return { ok: false, reason: "not_found" };
     }
     if (isExpired(task, now) && !["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"].includes(task.status)) {
@@ -199,7 +259,7 @@ export async function transitionTask(
     approvalActorId: nextStatus === "APPROVED" ? options.approvalActorId : current.approvalActorId,
     approvalPayloadHash: nextStatus === "APPROVED" ? options.payloadHash : current.approvalPayloadHash,
     executionId: options.executionId ?? current.executionId,
-    updatedAt: now.toISOString(),
+    updatedAt: nextUpdatedAt(current, now),
   };
   const id = taskRowId(taskId);
   if (id === null) return { ok: false, reason: "not_found" };
@@ -212,6 +272,75 @@ export async function transitionTask(
     if (error) return { ok: false, reason: "storage_error" };
     if (!Array.isArray(data) || data.length !== 1) return { ok: false, reason: "state_conflict" };
     return { ok: true, task: updated };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+/** Append an actually selected, allowlisted tool step to a running private task. */
+export async function appendTaskStep(
+  db: SupabaseClient,
+  taskId: string,
+  actorId: number,
+  chatId: number,
+  toolName: string,
+  allowedTools: ReadonlySet<string>,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; index: number } | { ok: false; reason: string }> {
+  if (!allowedTools.has(toolName)) return { ok: false, reason: "tool_not_allowed" };
+  const loaded = await getTask(db, taskId, actorId, chatId, enabled, now);
+  if (!loaded.ok) return loaded;
+  const task = loaded.task;
+  if (task.status !== "RUNNING") return { ok: false, reason: "state_conflict" };
+  if (task.plan.length >= 15 || task.plan.length !== task.stepStatuses.length) return { ok: false, reason: "step_limit" };
+  const updated: AgentTask = {
+    ...task,
+    plan: [...task.plan, `tool:${toolName}`],
+    stepStatuses: [...task.stepStatuses, "PENDING"],
+    updatedAt: nextUpdatedAt(task, now),
+  };
+  const id = taskRowId(taskId);
+  if (id === null) return { ok: false, reason: "not_found" };
+  try {
+    const { data, error } = await db.from("pending_batches").update({ items: updated })
+      .eq("admin_id", id).eq("items->>status", "RUNNING").eq("items->>updatedAt", task.updatedAt).select("items");
+    if (error) return { ok: false, reason: "storage_error" };
+    if (!Array.isArray(data) || data.length !== 1) return { ok: false, reason: "state_conflict" };
+    return { ok: true, index: updated.plan.length - 1 };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+/** Store only a step outcome; never persist tool arguments or returned private data. */
+export async function finishTaskStep(
+  db: SupabaseClient,
+  taskId: string,
+  actorId: number,
+  chatId: number,
+  index: number,
+  outcome: "COMPLETED" | "FAILED",
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const loaded = await getTask(db, taskId, actorId, chatId, enabled, now);
+  if (!loaded.ok) return loaded;
+  const task = loaded.task;
+  if (task.status !== "RUNNING" || !Number.isInteger(index) || index < 0 || index >= task.plan.length || task.stepStatuses[index] !== "PENDING") {
+    return { ok: false, reason: "state_conflict" };
+  }
+  const stepStatuses = [...task.stepStatuses];
+  stepStatuses[index] = outcome;
+  const updated: AgentTask = { ...task, stepStatuses, updatedAt: nextUpdatedAt(task, now) };
+  const id = taskRowId(taskId);
+  if (id === null) return { ok: false, reason: "not_found" };
+  try {
+    const { data, error } = await db.from("pending_batches").update({ items: updated })
+      .eq("admin_id", id).eq("items->>status", "RUNNING").eq("items->>updatedAt", task.updatedAt).select("items");
+    if (error) return { ok: false, reason: "storage_error" };
+    if (!Array.isArray(data) || data.length !== 1) return { ok: false, reason: "state_conflict" };
+    return { ok: true };
   } catch {
     return { ok: false, reason: "storage_error" };
   }

@@ -7,6 +7,8 @@ import {
   loadNotes,
   adminNotesRowId,
   LEGACY_NOTES_ROW_ID,
+  handlePendingPost,
+  foldVi,
 } from "../lib/ai.js";
 
 const ADMIN = 6532155675;
@@ -18,6 +20,7 @@ function fakeDb(seed: Record<number, unknown> = {}, tableRows: Record<string, un
   const store = new Map<number, unknown>(Object.entries(seed).map(([k, v]) => [Number(k), v]));
   const from = (table: string) => {
     const filters: Record<string, unknown> = {};
+    let updateValue: any;
     const chain: any = {
       select: () => chain,
       gte: () => chain,
@@ -27,7 +30,7 @@ function fakeDb(seed: Record<number, unknown> = {}, tableRows: Record<string, un
       limit: () => chain,
       in: () => chain,
       ilike: () => chain,
-      update: () => chain,
+      update: (value: unknown) => ((updateValue = value), chain),
       delete: () => chain,
       eq: (k: string, v: unknown) => ((filters[k] = v), chain),
       maybeSingle: async () => {
@@ -40,8 +43,26 @@ function fakeDb(seed: Record<number, unknown> = {}, tableRows: Record<string, un
         if (table === "pending_batches") store.set(row.admin_id, row.items);
         return { error: null };
       },
-      insert: async () => ({ error: null }),
-      then: (res: (v: unknown) => unknown) => res({ data: tableRows[table] ?? [], error: null, count: 0 }),
+      insert: async (row?: { admin_id: number; items: unknown }) => {
+        if (table === "pending_batches" && row) {
+          if (store.has(row.admin_id)) return { error: { code: "23505" } };
+          store.set(row.admin_id, row.items);
+        }
+        return { error: null };
+      },
+      then: (res: (v: unknown) => unknown) => {
+        if (table === "pending_batches" && updateValue) {
+          const id = filters.admin_id as number;
+          const item = store.get(id) as any;
+          if (item && item.status === filters["items->>status"] &&
+              (filters["items->>updatedAt"] === undefined || item.updatedAt === filters["items->>updatedAt"])) {
+            store.set(id, updateValue.items);
+            return res({ data: [{ items: updateValue.items }], error: null, count: 1 });
+          }
+          return res({ data: [], error: null, count: 0 });
+        }
+        return res({ data: tableRows[table] ?? [], error: null, count: 0 });
+      },
     };
     return chain;
   };
@@ -94,7 +115,7 @@ function setup(
       [ADMIN],
       { now: NOW, rng: () => 0 }
     );
-  return { run, f, bodies, sent, store, db };
+  return { run, f, bodies, sent, store, db, deps };
 }
 
 const turns = (key: string, n: number, t = NOW.getTime() - 60_000) => ({
@@ -167,10 +188,101 @@ describe("Nhóm B: cần AI, đúng 1 lượt hội thoại", () => {
     expect(t.bodies[1].messages.some((m: any) => m.role === "tool")).toBe(true);
     expect(t.sent.at(-1)!.text).toBe("QLL với HTKT đều sạch case rồi ạ");
   });
+  it("persists a private multi-tool workflow and suppresses a duplicate Telegram update", async () => {
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "false");
+    try {
+      const call = (id: string) => ({ id, type: "function", function: { name: "xem_so_lieu", arguments: "{}" } });
+      const t = setup([say("", [call("step-1"), call("step-2")]), say("Đã kiểm tra xong."), say("", [call("retry")])]);
+      await t.run("kiểm tra tình hình hai nhóm");
+      const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task" && value.intent === "assistant_tool_workflow") as any;
+      expect(task.status).toBe("COMPLETED");
+      expect(task.plan).toEqual(["tool:xem_so_lieu", "tool:xem_so_lieu"]);
+      expect(task.stepStatuses).toEqual(["COMPLETED", "COMPLETED"]);
+
+      const messagesBeforeRetry = t.sent.length;
+      await t.run("kiểm tra tình hình hai nhóm");
+      expect(t.sent.length).toBe(messagesBeforeRetry + 1);
+      expect(t.sent.at(-1)?.text).toContain("không chạy lặp lại");
+      expect(task.status).toBe("COMPLETED");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("bỏ markdown trong câu trả lời", async () => {
     const t = setup([say("Còn **1 case** HTKT ạ")]);
     await t.run("htkt sao rồi em");
     expect(t.sent[0].text).toBe("Còn 1 case HTKT ạ");
+  });
+});
+
+describe("planner shadow mode", () => {
+  it("runs without tools and cannot change or execute the primary reply", async () => {
+    vi.stubEnv("AI_PLANNER_SHADOW", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "false");
+    try {
+      const planner = JSON.stringify({
+        intent: "send a group message",
+        missing_data: [],
+        steps: [{ tool: "gui_tin_nhom", purpose: "send requested message" }],
+        risk: "high",
+      });
+      const t = setup([say("Anh có thể nhắn: Xin lỗi phụ huynh vì phản hồi chậm ạ."), say(planner)]);
+
+      await t.run("soạn giúp anh tin xin lỗi phụ huynh vì phản hồi chậm");
+
+      expect(t.f).toHaveBeenCalledTimes(2);
+      expect(t.sent.map((item) => item.text)).toEqual(["Anh có thể nhắn: Xin lỗi phụ huynh vì phản hồi chậm ạ."]);
+      expect(t.bodies[1].tools).toBeUndefined();
+      expect(t.bodies[1].tool_choice).toBeUndefined();
+      expect(t.sent).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("stores an owner-scoped, expiring draft only when task state is enabled", async () => {
+    vi.stubEnv("AI_PLANNER_SHADOW", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    try {
+      const planner = JSON.stringify({
+        intent: "send a group message",
+        missing_data: [],
+        steps: [{ tool: "gui_tin_nhom", purpose: "includes user text and must not be stored" }],
+        risk: "high",
+      });
+      const toolCall = {
+        id: "post-1", type: "function",
+        function: { name: "gui_tin_nhom", arguments: JSON.stringify({ ten_nhom: "Ops team", noi_dung: "Bản nháp riêng" }) },
+      };
+      const t = setup(
+        [say("", [toolCall]), say(planner)],
+        {
+          [-9104]: {
+            kind: "groups",
+            groups: { "-1001234": { title: "Ops team", type: "supergroup", lastSeen: NOW.toISOString() } },
+          },
+        }
+      );
+
+      await t.run("soạn giúp anh tin gửi vào Ops team");
+
+      const tasks = [...t.store.values()].filter((value: any) => value?.kind === "agent_task") as any[];
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].ownerUserId).toBe(ADMIN);
+      expect(tasks[0].ownerAdminId).toBe(ADMIN);
+      expect(tasks[0].chatId).toBe(ADMIN);
+      expect(tasks[0].plan).toEqual(["tool:gui_tin_nhom"]);
+      expect(tasks[0].status).toBe("AWAITING_APPROVAL");
+      expect(tasks[0].expiresAt).toBe(new Date(NOW.getTime() + 10 * 60_000).toISOString());
+      expect(JSON.stringify(tasks[0])).not.toContain("includes user text");
+      expect(JSON.stringify(tasks[0])).not.toContain("soạn giúp anh tin gửi vào Ops team");
+      expect(t.sent).toHaveLength(1);
+      expect(t.sent[0].text).toContain("Em định gửi vào nhóm");
+      expect(t.sent[0].chat).toBe(ADMIN);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -558,7 +670,7 @@ describe("Hỏi ca đã qua ('ca sáng nay có những ai làm') — lỗi 'Bee 
   });
 });
 
-import { classifyByRules, foldVi, recordGroqCall, buildQuotaReport } from "../lib/ai.js";
+import { classifyByRules, recordGroqCall, buildQuotaReport } from "../lib/ai.js";
 
 describe("Hỏi Bee về credit/hạn mức", () => {
   const USAGE_ROW = -9103;
@@ -732,6 +844,178 @@ describe("Bee tự nhận diện các nhóm được add vào", () => {
 });
 
 import { claimsSent } from "../lib/ai.js";
+
+describe("phase approval gate", () => {
+  const reminderCall = {
+    id: "reminder-draft-1",
+    type: "function",
+    function: { name: "nhan_nhom", arguments: JSON.stringify({ nhom: "htkt", cau_nhac: "Anh chị xử lý giúp em nhé" }) },
+  };
+
+  it("previews the exact group reminder and sends only that snapshot after approval", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const rows = [{ message_id: -101, handled: false, content: "Case HS123 cần hỗ trợ ClassIn", created_at: NOW.toISOString() }];
+      const t = setup([say("", [reminderCall])], {}, { qll_tracking: rows });
+      await t.run("nhắn nhóm HTKT tag CTV trực và case tồn");
+
+      expect(t.sent).toHaveLength(1);
+      expect(t.sent[0].chat).toBe(ADMIN);
+      expect(t.sent[0].text).toContain("Case HS123 cần hỗ trợ ClassIn");
+      expect(t.sent.some((item) => item.chat === -1002458492731)).toBe(false);
+
+      await t.run("gửi");
+
+      const groupMessage = t.sent.find((item) => item.chat === -1002458492731);
+      expect(groupMessage?.text).toContain("Case HS123 cần hỗ trợ ClassIn");
+      expect(groupMessage?.text).toContain("Anh chị xử lý giúp em nhé");
+      const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task") as any;
+      expect(task.status).toBe("COMPLETED");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("refuses approval when reminder data changed after preview", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const rows = [{ message_id: -101, handled: false, content: "Case HS123 cần hỗ trợ ClassIn", created_at: NOW.toISOString() }];
+      const t = setup([say("", [reminderCall])], {}, { qll_tracking: rows });
+      await t.run("nhắn nhóm HTKT tag CTV trực và case tồn");
+      rows[0].content = "Case HS999 đã đổi sau khi preview";
+
+      await t.run("gửi");
+
+      expect(t.sent.some((item) => item.chat === -1002458492731)).toBe(false);
+      expect(t.sent.at(-1)?.text).toContain("đã thay đổi từ lúc xem trước");
+      const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task") as any;
+      expect(task.status).toBe("UNKNOWN_RESULT");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  const tagCall = {
+    id: "tag-draft-1",
+    type: "function",
+    function: { name: "tag_ctv", arguments: JSON.stringify({ nhom: "htkt", usernames: ["vh_test"] }) },
+  };
+
+  it("previews group tags, rejects approval from another chat, then validates and verifies the owner's approval", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const t = setup([say("", [tagCall])]);
+      await t.run("tag CTV vh_test trong HTKT");
+
+      expect(t.sent).toHaveLength(1);
+      expect(t.sent[0].chat).toBe(ADMIN);
+      expect(t.sent[0].text).toContain("Em định tag vh_test trong nhóm HTKT");
+      expect(t.sent.some((item) => item.chat === -1002458492731)).toBe(false);
+      const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task") as any;
+      expect(task.status).toBe("AWAITING_APPROVAL");
+      expect(task.ownerAdminId).toBe(ADMIN);
+
+      const otherChatApproval = await handlePendingPost(
+        t.deps,
+        { message_id: 2, chat: { id: ADMIN + 1, type: "private" }, from: { id: ADMIN }, text: "gửi" } as any,
+        true,
+        foldVi("gửi"),
+        NOW,
+        "anh",
+        async () => "executed"
+      );
+      expect(otherChatApproval).toBe(false);
+      expect(task.status).toBe("AWAITING_APPROVAL");
+
+      await t.run("gửi");
+      expect(t.sent.some((item) => item.chat === -1002458492731 && item.text.startsWith("@vh_test "))).toBe(true);
+      const completedTask = [...t.store.values()].find((value: any) => value?.taskId === task.taskId) as any;
+      expect(completedTask.status).toBe("COMPLETED");
+      expect(t.sent.at(-1)?.text).toContain("Đã tag vh_test");
+      const sentCount = t.sent.filter((item) => item.chat === -1002458492731).length;
+      const duplicate = await handlePendingPost(
+        t.deps,
+        { message_id: 3, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN }, text: "gửi" } as any,
+        true,
+        foldVi("gửi"),
+        NOW,
+        "anh",
+        async () => "executed twice"
+      );
+      expect(duplicate).toBe(false);
+      expect(t.sent.filter((item) => item.chat === -1002458492731)).toHaveLength(sentCount);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("blocks group-context tag requests when the approval gate is enabled", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const currentGroup = -1002493556435;
+      const t = setup([say("", [tagCall]), say("Em chưa thực hiện tag nào; nhắn riêng để xem trước và duyệt nhé.")]);
+      await t.run("@vh_messenger_bot tag CTV vh_test trong HTKT", currentGroup, "supergroup", ADMIN);
+      expect(t.sent.some((item) => item.chat === -1002458492731)).toBe(false);
+      expect(t.sent.some((item) => item.chat === -1002273179613)).toBe(false);
+      expect(t.sent.some((item) => item.chat === currentGroup)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects a draft whose payload changed after preview", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const t = setup([say("", [tagCall])]);
+      await t.run("tag CTV vh_test trong HTKT");
+      const pending = (t.store.get(-9106) as any).byKey[`${ADMIN}:${ADMIN}`];
+      pending.args.usernames = ["vh_other"];
+
+      await t.run("gửi");
+
+      expect(t.sent.some((item) => item.chat === -1002458492731)).toBe(false);
+      const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task") as any;
+      expect(task.status).toBe("CANCELLED");
+      expect(t.sent.at(-1)?.text).toContain("đã thay đổi sau khi xem trước");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("routes the direct schedule intent through preview and approval before writing the handoff", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const scheduleCall = {
+        id: "handoff-1", type: "function",
+        function: { name: "hen_tag_ca_chieu", arguments: JSON.stringify({ nhom: "htkt" }) },
+      };
+      const t = setup([say("", [scheduleCall])]);
+      await t.run("chiều tag CTV ca chiều xử lý nhé");
+      expect(t.f).toHaveBeenCalledTimes(1);
+      expect(t.sent.at(-1)?.text).toContain("Em định đặt lịch sau 13h30");
+      expect(t.store.has(-202611065)).toBe(false);
+      expect([...t.store.values()].some((value: any) => value?.kind === "agent_task" && value.status === "AWAITING_APPROVAL")).toBe(true);
+
+      await t.run("gửi");
+      expect(t.store.has(-202611065)).toBe(true);
+      expect([...t.store.values()].some((value: any) => value?.kind === "agent_task" && value.status === "COMPLETED")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe("Gửi tin vào nhóm theo tên + chặn báo 'đã gửi' sai (lỗi thực tế)", () => {
   beforeEach(() => resetGroupCacheForTest());

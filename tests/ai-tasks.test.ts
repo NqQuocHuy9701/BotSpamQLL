@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTask, getTask, taskStateEnabled, transitionTask } from "../lib/ai_tasks.js";
+import { appendTaskStep, createTask, finishTaskStep, getTask, taskStateEnabled, transitionTask } from "../lib/ai_tasks.js";
 
 function fakeDb() {
   const rows = new Map<number, any>();
@@ -22,7 +22,8 @@ function fakeDb() {
       then: (resolve: (value: unknown) => unknown) => {
         const id = filters.admin_id as number;
         const item = rows.get(id);
-        if (!item || item.status !== filters["items->>status"]) {
+        if (!item || item.status !== filters["items->>status"] ||
+            (filters["items->>updatedAt"] !== undefined && item.updatedAt !== filters["items->>updatedAt"])) {
           return resolve({ data: [], error: null });
         }
         rows.set(id, updateValue.items);
@@ -64,6 +65,34 @@ describe("AI Task State (disabled by default, no side effects)", () => {
     expect((await getTask(db, result.task.taskId, 10, 10, true, NOW)).ok).toBe(true);
   });
 
+  it("deduplicates a retried update by request key without replacing its task", async () => {
+    const { db, rows } = fakeDb();
+    const input = {
+      ownerUserId: 10, ownerAdminId: 10, chatId: 10, intent: "planner_tool_plan", scope: "private_admin_chat",
+      plan: ["tool:tra_cuu_case"], requestKey: "telegram:10:55:10",
+    };
+    const first = await createTask(db, input, true, NOW);
+    const retry = await createTask(db, { ...input, plan: ["tool:tag_ctv"] }, true, new Date(NOW.getTime() + 1_000));
+    expect(first.ok).toBe(true);
+    expect(retry.ok).toBe(true);
+    if (!first.ok || !retry.ok) return;
+    expect(retry.task.taskId).toBe(first.task.taskId);
+    expect(retry.task.plan).toEqual(["tool:tra_cuu_case"]);
+    expect(rows.size).toBe(1);
+  });
+
+  it("keeps planner drafts non-executable until a later validated state transition", async () => {
+    const { db } = fakeDb();
+    const created = await createTask(db, {
+      ownerUserId: 10, ownerAdminId: 10, chatId: 10, intent: "planner_tool_plan", scope: "private_admin_chat",
+      plan: ["tool:tag_ctv"], draft: true,
+    }, true, NOW);
+    if (!created.ok) throw new Error("draft creation failed");
+    expect(created.task.status).toBe("DRAFT");
+    expect(reasonOf(await transitionTask(db, created.task.taskId, 10, 10, "DRAFT", "RUNNING", {}, true, NOW)))
+      .toBe("invalid_transition");
+  });
+
   it("rejects a different owner, chat scope, and expired task", async () => {
     const { db } = fakeDb();
     const result = await createTask(db, {
@@ -101,5 +130,23 @@ describe("AI Task State (disabled by default, no side effects)", () => {
     if (!result.ok) throw new Error("task creation failed");
     expect((await transitionTask(db, result.task.taskId, 10, 10, "PENDING", "RUNNING", {}, true, NOW)).ok).toBe(true);
     expect(reasonOf(await transitionTask(db, result.task.taskId, 10, 10, "PENDING", "RUNNING", {}, true, NOW))).toBe("state_conflict");
+  });
+
+  it("records only allowlisted, owner-scoped tool outcomes with monotonic CAS revisions", async () => {
+    const { db } = fakeDb();
+    const created = await createTask(db, {
+      ownerUserId: 10, ownerAdminId: 10, chatId: 10, intent: "workflow", scope: "private", plan: ["tool:lookup"],
+    }, true, NOW);
+    if (!created.ok) throw new Error("task creation failed");
+    expect((await transitionTask(db, created.task.taskId, 10, 10, "PENDING", "RUNNING", {}, true, NOW)).ok).toBe(true);
+    expect(reasonOf(await appendTaskStep(db, created.task.taskId, 11, 10, "lookup", new Set(["lookup"]), true, NOW))).toBe("not_found");
+    expect(reasonOf(await appendTaskStep(db, created.task.taskId, 10, 10, "send_message", new Set(["lookup"]), true, NOW))).toBe("tool_not_allowed");
+    expect((await appendTaskStep(db, created.task.taskId, 10, 10, "lookup", new Set(["lookup"]), true, NOW)).ok).toBe(true);
+    const reloaded = await getTask(db, created.task.taskId, 10, 10, true, NOW);
+    if (!reloaded.ok) throw new Error("task reload failed");
+    expect(reloaded.task.stepStatuses).toEqual(["PENDING", "PENDING"]);
+    expect(reloaded.task.updatedAt).not.toBe(created.task.updatedAt);
+    expect((await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, NOW)).ok).toBe(true);
+    expect(reasonOf(await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, NOW))).toBe("state_conflict");
   });
 });
