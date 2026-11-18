@@ -1,0 +1,218 @@
+import { randomInt } from "node:crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+// Phase 2 task-state substrate. It is not wired into the live agent yet and
+// stays disabled unless AI_TASK_STATE_ENABLED=true is explicitly configured.
+// Rows use the existing pending_batches table; this module never migrates it.
+const TASK_ROW_BASE = 7_000_000_000_000;
+const TASK_ROW_SPAN = 999_999_999_999;
+export const TASK_TTL_MS = 10 * 60_000;
+
+export type TaskStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "AWAITING_INPUT"
+  | "AWAITING_APPROVAL"
+  | "APPROVED"
+  | "EXECUTING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED"
+  | "EXPIRED"
+  | "UNKNOWN_RESULT";
+
+export interface AgentTask {
+  kind: "agent_task";
+  taskId: string;
+  ownerUserId: number;
+  ownerAdminId?: number;
+  chatId: number;
+  groupId?: number;
+  intent: string;
+  scope: string;
+  plan: string[];
+  stepStatuses: TaskStatus[];
+  status: TaskStatus;
+  approvalStatus: "not_required" | "pending" | "approved" | "rejected";
+  approvalActorId?: number;
+  approvalPayloadHash?: string;
+  payloadHash?: string;
+  executionId?: string;
+  resultReference?: string;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}
+
+export interface NewTask {
+  ownerUserId: number;
+  ownerAdminId?: number;
+  chatId: number;
+  groupId?: number;
+  intent: string;
+  scope: string;
+  plan: string[];
+  payloadHash?: string;
+  requiresApproval?: boolean;
+  ttlMs?: number;
+}
+
+const ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
+  PENDING: ["RUNNING", "AWAITING_INPUT", "AWAITING_APPROVAL", "CANCELLED", "EXPIRED", "FAILED"],
+  RUNNING: ["AWAITING_INPUT", "AWAITING_APPROVAL", "COMPLETED", "FAILED", "CANCELLED", "EXPIRED"],
+  AWAITING_INPUT: ["RUNNING", "CANCELLED", "EXPIRED"],
+  AWAITING_APPROVAL: ["APPROVED", "CANCELLED", "EXPIRED"],
+  APPROVED: ["EXECUTING", "CANCELLED", "EXPIRED"],
+  EXECUTING: ["COMPLETED", "FAILED", "UNKNOWN_RESULT"],
+  COMPLETED: [],
+  FAILED: [],
+  CANCELLED: [],
+  EXPIRED: [],
+  UNKNOWN_RESULT: [],
+};
+
+export function taskStateEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return (env.AI_TASK_STATE_ENABLED ?? "").trim().toLowerCase() === "true";
+}
+
+function taskRowId(taskId: string): number | null {
+  if (!/^-[0-9]{13}$/.test(taskId)) return null;
+  const rowId = Number(taskId);
+  const offset = -rowId - TASK_ROW_BASE;
+  return Number.isSafeInteger(rowId) && offset >= 0 && offset <= TASK_ROW_SPAN ? rowId : null;
+}
+
+function isExpired(task: AgentTask, now: Date): boolean {
+  return Date.parse(task.expiresAt) <= now.getTime();
+}
+
+function scopeMatches(task: AgentTask, actorId: number, chatId: number): boolean {
+  return task.ownerUserId === actorId && task.chatId === chatId && (task.groupId === undefined || task.groupId === chatId);
+}
+
+export async function createTask(
+  db: SupabaseClient,
+  input: NewTask,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; task: AgentTask } | { ok: false; reason: string }> {
+  if (!enabled) return { ok: false, reason: "disabled" };
+  if (!Number.isSafeInteger(input.ownerUserId) || input.ownerUserId <= 0 || !Number.isSafeInteger(input.chatId)) {
+    return { ok: false, reason: "invalid_identity_or_scope" };
+  }
+  if (!input.intent.trim() || !input.scope.trim() || input.plan.length === 0 || input.plan.length > 8) {
+    return { ok: false, reason: "invalid_task" };
+  }
+  const ttlMs = Math.min(Math.max(input.ttlMs ?? TASK_TTL_MS, 30_000), 60 * 60_000);
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+
+  // The primary key makes task IDs unique without a schema change. Collision
+  // retries are bounded; task creation never overwrites another task.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const id = -(TASK_ROW_BASE + randomInt(0, TASK_ROW_SPAN + 1));
+    const task: AgentTask = {
+      kind: "agent_task",
+      taskId: String(id),
+      ownerUserId: input.ownerUserId,
+      ownerAdminId: input.ownerAdminId,
+      chatId: input.chatId,
+      groupId: input.groupId,
+      intent: input.intent.trim().slice(0, 80),
+      scope: input.scope.trim().slice(0, 120),
+      plan: input.plan.map((s) => s.trim().slice(0, 240)).filter(Boolean),
+      stepStatuses: input.plan.map(() => "PENDING"),
+      status: input.requiresApproval ? "AWAITING_APPROVAL" : "PENDING",
+      approvalStatus: input.requiresApproval ? "pending" : "not_required",
+      payloadHash: input.payloadHash,
+      createdAt,
+      updatedAt: createdAt,
+      expiresAt,
+    };
+    if (task.plan.length === 0) return { ok: false, reason: "invalid_task" };
+    try {
+      const { error } = await db.from("pending_batches").insert({ admin_id: id, items: task });
+      if (!error) return { ok: true, task };
+      if (error.code !== "23505") return { ok: false, reason: "storage_error" };
+    } catch {
+      return { ok: false, reason: "storage_error" };
+    }
+  }
+  return { ok: false, reason: "id_allocation_failed" };
+}
+
+export async function getTask(
+  db: SupabaseClient,
+  taskId: string,
+  actorId: number,
+  chatId: number,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; task: AgentTask } | { ok: false; reason: string }> {
+  if (!enabled) return { ok: false, reason: "disabled" };
+  const id = taskRowId(taskId);
+  if (id === null) return { ok: false, reason: "not_found" };
+  try {
+    const { data, error } = await db.from("pending_batches").select("items").eq("admin_id", id).maybeSingle();
+    if (error || !data?.items) return { ok: false, reason: "not_found" };
+    const task = data.items as AgentTask;
+    if (task.kind !== "agent_task" || task.taskId !== taskId || !scopeMatches(task, actorId, chatId)) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (isExpired(task, now) && !["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"].includes(task.status)) {
+      return { ok: false, reason: "expired" };
+    }
+    return { ok: true, task };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+export async function transitionTask(
+  db: SupabaseClient,
+  taskId: string,
+  actorId: number,
+  chatId: number,
+  expectedStatus: TaskStatus,
+  nextStatus: TaskStatus,
+  options: { payloadHash?: string; approvalActorId?: number; executionId?: string } = {},
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; task: AgentTask } | { ok: false; reason: string }> {
+  const loaded = await getTask(db, taskId, actorId, chatId, enabled, now);
+  if (!loaded.ok) return loaded;
+  const current = loaded.task;
+  if (current.status !== expectedStatus) return { ok: false, reason: "state_conflict" };
+  if (!ALLOWED_TRANSITIONS[current.status].includes(nextStatus)) return { ok: false, reason: "invalid_transition" };
+  if (nextStatus === "APPROVED") {
+    if (!Number.isSafeInteger(current.ownerAdminId) || !options.payloadHash || options.payloadHash !== current.payloadHash || options.approvalActorId !== current.ownerAdminId) {
+      return { ok: false, reason: "approval_mismatch" };
+    }
+  }
+  if (nextStatus === "EXECUTING" && current.status !== "APPROVED") return { ok: false, reason: "not_approved" };
+
+  const updated: AgentTask = {
+    ...current,
+    status: nextStatus,
+    approvalStatus: nextStatus === "APPROVED" ? "approved" : current.approvalStatus,
+    approvalActorId: nextStatus === "APPROVED" ? options.approvalActorId : current.approvalActorId,
+    approvalPayloadHash: nextStatus === "APPROVED" ? options.payloadHash : current.approvalPayloadHash,
+    executionId: options.executionId ?? current.executionId,
+    updatedAt: now.toISOString(),
+  };
+  const id = taskRowId(taskId);
+  if (id === null) return { ok: false, reason: "not_found" };
+  try {
+    const { data, error } = await db.from("pending_batches")
+      .update({ items: updated })
+      .eq("admin_id", id)
+      .eq("items->>status", expectedStatus)
+      .select("items");
+    if (error) return { ok: false, reason: "storage_error" };
+    if (!Array.isArray(data) || data.length !== 1) return { ok: false, reason: "state_conflict" };
+    return { ok: true, task: updated };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}

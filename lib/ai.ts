@@ -937,8 +937,12 @@ async function respond(
 ): Promise<boolean> {
   let chatReply = canned ? canned.replace(/\{title\}/g, title) : "";
 
-  // Lời dạy áp cho mọi người hỏi; mạch hội thoại chỉ lưu cho admin.
-  const notes = await loadNotes(deps.supabase);
+  // Admin memory is private and owner-scoped. Never add it to a group prompt
+  // or to a non-admin prompt.
+  const notes =
+    isAdmin && isPrivate && message.from
+      ? await loadNotes(deps.supabase, message.from.id)
+      : [];
   const history =
     isAdmin && message.from ? await loadHistory(deps.supabase, convKey(message), now.getTime()) : [];
 
@@ -990,6 +994,11 @@ async function respond(
     }
     case "daynho": {
       if (!isAdmin) return false;
+      if (!isPrivate || !message.from) {
+        auditMemory("write_admin_memory", message.from?.id, `chat:${message.chat.id}`, "denied");
+        await sendHere(deps, message, isPrivate, "Dạ phần ghi nhớ riêng chỉ dùng trong chat riêng với Bee ạ.");
+        return true;
+      }
       const note = extractNote(question);
       if (note.length < 3) {
         await sendHere(deps, message, isPrivate, `Dạ ${title} muốn em nhớ điều gì ạ? Ví dụ: "Bee nhớ: nhắc nhóm thì gọi là anh chị" 😊`);
@@ -998,7 +1007,7 @@ async function respond(
       const list = notes.filter((x) => x !== note);
       list.push(note);
       const kept = list.slice(-MAX_NOTES);
-      const ok = await saveNotes(deps.supabase, kept);
+      const ok = await saveNotes(deps.supabase, message.from.id, kept);
       await sendHere(
         deps,
         message,
@@ -1011,6 +1020,11 @@ async function respond(
     }
     case "xemnho": {
       if (!isAdmin) return false;
+      if (!isPrivate || !message.from) {
+        auditMemory("read_admin_memory", message.from?.id, `chat:${message.chat.id}`, "denied");
+        await sendHere(deps, message, isPrivate, "Dạ phần ghi nhớ riêng chỉ dùng trong chat riêng với Bee ạ.");
+        return true;
+      }
       const text = notes.length
         ? `Dạ em đang nhớ ${notes.length} lời dạy ạ 😊\n` + notes.map((x, i) => `${i + 1}. ${x}`).join("\n") +
           `\n\nMuốn bỏ thì ${title} nhắn "Bee quên số ${notes.length}" hoặc "Bee quên hết" nhé.`
@@ -1020,6 +1034,11 @@ async function respond(
     }
     case "quennho": {
       if (!isAdmin) return false;
+      if (!isPrivate || !message.from) {
+        auditMemory("delete_admin_memory", message.from?.id, `chat:${message.chat.id}`, "denied");
+        await sendHere(deps, message, isPrivate, "Dạ phần ghi nhớ riêng chỉ dùng trong chat riêng với Bee ạ.");
+        return true;
+      }
       const s = question.normalize("NFC").toLowerCase();
       let next: string[];
       let msg: string;
@@ -1035,7 +1054,7 @@ async function respond(
         msg = `Dạ em quên lời dạy số ${idx} rồi ạ: "${notes[idx - 1]}" 😊`;
         next = notes.filter((_, i) => i !== idx - 1);
       }
-      const ok = await saveNotes(deps.supabase, next);
+      const ok = await saveNotes(deps.supabase, message.from.id, next);
       await sendHere(deps, message, isPrivate, ok ? msg : `Dạ em chưa xóa được, ${title} thử lại nhé 🥺`);
       return true;
     }
@@ -1408,9 +1427,11 @@ async function remindGroups(
 // ---------------------------------------------------------------------------
 // Bộ nhớ: lời dạy của admin (lâu dài) + vài lượt hội thoại gần nhất
 // ---------------------------------------------------------------------------
-// Lưu trong pending_batches, admin_id cố định (không đụng id admin thật/dương,
-// -9001/-9002 của luồng cũ, hay các id theo ngày ~ -2e9).
-const NOTES_ROW_ID = -9101;
+// Legacy shared notes stay untouched. Their owner/scope cannot be inferred
+// safely, so prompts no longer read them. New private admin notes get a
+// distinct row in the existing table (no schema change or migration).
+export const LEGACY_NOTES_ROW_ID = -9101;
+const ADMIN_NOTES_ROW_BASE = 5_000_000_000_000;
 const HISTORY_ROW_ID = -9102;
 const MAX_NOTES = 30;
 const MAX_NOTE_CHARS = 400;
@@ -1434,25 +1455,79 @@ export async function lastTurnAgeMs(
 }
 const HISTORY_TTL_MS = 2 * 60 * 60 * 1000; // quá 2 giờ thì quên mạch cũ
 
-export async function loadNotes(supabase: SupabaseClient): Promise<string[]> {
+export function adminNotesRowId(adminId: number): number | null {
+  if (!Number.isSafeInteger(adminId) || adminId <= 0) return null;
+  return -ADMIN_NOTES_ROW_BASE - adminId;
+}
+
+// Structured, content-free audit events. Never include prompts, note text,
+// group message bodies, tokens, or tool arguments in this log.
+function auditMemory(
+  action: string,
+  actorId: number | undefined,
+  scope: string,
+  outcome: "allowed" | "denied" | "failed"
+): void {
+  console.info(
+    `[Bee audit] ${JSON.stringify({ event: "memory_access", action, actorId: actorId ?? null, scope, outcome, at: new Date().toISOString() })}`
+  );
+}
+
+export async function loadNotes(
+  supabase: SupabaseClient,
+  ownerAdminId?: number
+): Promise<string[]> {
+  const rowId = ownerAdminId === undefined ? null : adminNotesRowId(ownerAdminId);
+  if (rowId === null) {
+    auditMemory("read_admin_memory", ownerAdminId, "admin_memory", "denied");
+    return [];
+  }
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("pending_batches")
       .select("items")
-      .eq("admin_id", NOTES_ROW_ID)
+      .eq("admin_id", rowId)
       .maybeSingle();
-    const n = (data?.items as { notes?: unknown } | undefined)?.notes;
+    if (error) {
+      auditMemory("read_admin_memory", ownerAdminId, "admin_memory", "failed");
+      return [];
+    }
+    if (!data) {
+      auditMemory("read_admin_memory", ownerAdminId, "admin_memory", "allowed");
+      return [];
+    }
+    const row = data.items as { kind?: unknown; ownerAdminId?: unknown; notes?: unknown } | undefined;
+    if (row?.kind !== "admin_notes" || row.ownerAdminId !== ownerAdminId) {
+      auditMemory("read_admin_memory", ownerAdminId, "admin_memory", "denied");
+      return [];
+    }
+    const n = row.notes;
+    auditMemory("read_admin_memory", ownerAdminId, "admin_memory", "allowed");
     return Array.isArray(n) ? n.filter((x): x is string => typeof x === "string") : [];
   } catch {
+    auditMemory("read_admin_memory", ownerAdminId, "admin_memory", "failed");
     return [];
   }
 }
 
-async function saveNotes(supabase: SupabaseClient, notes: string[]): Promise<boolean> {
+async function saveNotes(
+  supabase: SupabaseClient,
+  ownerAdminId: number,
+  notes: string[]
+): Promise<boolean> {
+  const rowId = adminNotesRowId(ownerAdminId);
+  if (rowId === null) {
+    auditMemory("write_admin_memory", ownerAdminId, "admin_memory", "denied");
+    return false;
+  }
   const { error } = await supabase
     .from("pending_batches")
-    .upsert({ admin_id: NOTES_ROW_ID, items: { kind: "notes", notes } }, { onConflict: "admin_id" });
+    .upsert(
+      { admin_id: rowId, items: { kind: "admin_notes", ownerAdminId, notes } },
+      { onConflict: "admin_id" }
+    );
   if (error) console.error("saveNotes lỗi:", error.message);
+  auditMemory("write_admin_memory", ownerAdminId, "admin_memory", error ? "failed" : "allowed");
   return !error;
 }
 
@@ -1961,7 +2036,9 @@ async function runTool(
       case "xem_cac_nhom":
         return await listGroups(deps.supabase, deps.ai, now.getTime());
       case "xem_nhom":
-        return await readGroup(deps.supabase, String(args.ten_nhom ?? ""), now.getTime());
+        return isPrivate
+          ? await readGroup(deps.supabase, String(args.ten_nhom ?? ""), now.getTime())
+          : await readGroupInChat(deps.supabase, message.chat.id, message.from?.id, now.getTime());
       case "xem_han_muc":
         return deps.ai ? await buildQuotaReport(deps.supabase, deps.ai, now) : "Bee AI đang tắt.";
       case "xem_checkin":
@@ -2018,6 +2095,10 @@ async function runTool(
           : "Đã lưu lịch; sau 13h30 sẽ tự tag CTV ca chiều.";
       }
       case "ghi_nho": {
+        if (!isPrivate || !message.from) {
+          auditMemory("write_admin_memory", message.from?.id, `chat:${message.chat.id}`, "denied");
+          return "Ghi nhớ riêng chỉ dùng trong chat riêng với Bee.";
+        }
         const note = String(args.noi_dung ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_NOTE_CHARS);
         if (note.length < 3) return "Nội dung trống, chưa ghi.";
         // Chặn ghi số liệu tạm thời vào bộ não lâu dài.
@@ -2027,16 +2108,20 @@ async function runTool(
         const list = ctx.notes.filter((x) => x !== note);
         list.push(note);
         ctx.notes = list.slice(-MAX_NOTES);
-        return (await saveNotes(deps.supabase, ctx.notes))
+        return (await saveNotes(deps.supabase, message.from.id, ctx.notes))
           ? `Đã ghi nhớ (điều số ${ctx.notes.length}).`
           : "Lỗi, chưa ghi được.";
       }
       case "quen": {
+        if (!isPrivate || !message.from) {
+          auditMemory("delete_admin_memory", message.from?.id, `chat:${message.chat.id}`, "denied");
+          return "Quản lý ghi nhớ riêng chỉ dùng trong chat riêng với Bee.";
+        }
         const so = Number(args.so ?? -1);
         if (so === 0) ctx.notes = [];
         else if (so >= 1 && so <= ctx.notes.length) ctx.notes = ctx.notes.filter((_, i) => i !== so - 1);
         else return "Không có điều số đó.";
-        return (await saveNotes(deps.supabase, ctx.notes)) ? "Đã xóa." : "Lỗi, chưa xóa được.";
+        return (await saveNotes(deps.supabase, message.from.id, ctx.notes)) ? "Đã xóa." : "Lỗi, chưa xóa được.";
       }
       default:
         return "Không có công cụ này.";
@@ -2065,7 +2150,8 @@ export async function runAgent(
     isPrivate,
     title,
     now,
-    notes: await loadNotes(deps.supabase),
+    // Do not carry private admin memory into a group conversation.
+    notes: isPrivate && message.from ? await loadNotes(deps.supabase, message.from.id) : [],
   };
   const history = message.from ? await loadHistory(deps.supabase, convKey(message), now.getTime()) : [];
   // Admin reply vào 1 tin cụ thể -> đưa nội dung tin đó vào làm ngữ cảnh.
@@ -2587,6 +2673,33 @@ export async function readGroup(supabase: SupabaseClient, name: string, nowMs: n
     return `Không thấy nhóm nào tên giống "${name}". Các nhóm em biết: ${known}.`;
   }
   const [id, g] = hit;
+  return readGroupLog(supabase, id, g, nowMs);
+}
+
+// In a group chat, the caller may only read that chat's own group log. Resolve
+// by the backend-supplied chat id; never let the model choose another group.
+async function readGroupInChat(
+  supabase: SupabaseClient,
+  chatId: number,
+  actorId: number | undefined,
+  nowMs: number
+): Promise<string> {
+  const groups = await loadGroups(supabase);
+  const hit = groups.find(([id]) => id === chatId);
+  if (!hit) {
+    auditMemory("read_group_memory", actorId, `group:${chatId}`, "denied");
+    return "Chưa có ngữ cảnh nhóm này để tra cứu.";
+  }
+  auditMemory("read_group_memory", actorId, `group:${chatId}`, "allowed");
+  return readGroupLog(supabase, hit[0], hit[1], nowMs);
+}
+
+async function readGroupLog(
+  supabase: SupabaseClient,
+  id: number,
+  g: GroupInfo,
+  nowMs: number
+): Promise<string> {
   if (TRACKED_GROUPS.has(id)) {
     return `"${g.title}" là nhóm theo dõi case. Dùng xem_so_lieu / gui_danh_sach / tra_cuu_case để xem.`;
   }

@@ -1,6 +1,13 @@
 // Kiểm thử lớp hội thoại Bee bằng MOCK (không gọi Groq thật, không chạm DB thật).
 import { describe, it, expect, vi } from "vitest";
-import { maybeHandleAi, loadAiConfig, setTpmStateForTest } from "../lib/ai.js";
+import {
+  maybeHandleAi,
+  loadAiConfig,
+  setTpmStateForTest,
+  loadNotes,
+  adminNotesRowId,
+  LEGACY_NOTES_ROW_ID,
+} from "../lib/ai.js";
 
 const ADMIN = 6532155675;
 const NOW = new Date("2026-11-06T03:00:00Z"); // 10:00 giờ VN
@@ -87,7 +94,7 @@ function setup(
       [ADMIN],
       { now: NOW, rng: () => 0 }
     );
-  return { run, f, bodies, sent, store };
+  return { run, f, bodies, sent, store, db };
 }
 
 const turns = (key: string, n: number, t = NOW.getTime() - 60_000) => ({
@@ -253,6 +260,105 @@ describe("Hiệu ứng 'đang nhập...' khi chờ AI", () => {
     expect(t.typing).not.toHaveBeenCalled();
     expect(t.sent).toEqual(["Ổn anh ơi"]);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("memory isolation hardening", () => {
+  it("does not expose legacy shared notes or one admin's notes to another", async () => {
+    const legacy = { kind: "notes", notes: ["legacy private note"] };
+    const adminANotes = { kind: "admin_notes", ownerAdminId: ADMIN, notes: ["admin A private note"] };
+    const { db, store } = fakeDb({
+      [LEGACY_NOTES_ROW_ID]: legacy,
+      [adminNotesRowId(ADMIN)!]: adminANotes,
+    });
+
+    expect(await loadNotes(db, ADMIN)).toEqual(["admin A private note"]);
+    expect(await loadNotes(db, ADMIN + 1)).toEqual([]);
+    expect(await loadNotes(db)).toEqual([]);
+    expect(store.get(LEGACY_NOTES_ROW_ID)).toEqual(legacy); // preserved, not migrated/deleted
+  });
+
+  it("does not put legacy notes into a non-admin group prompt", async () => {
+    const secret = "legacy private instruction 8f9d";
+    const t = setup([say("Dạ em chưa có thông tin đó ạ")], {
+      [LEGACY_NOTES_ROW_ID]: { kind: "notes", notes: [secret] },
+    });
+
+    await t.run("@vh_messenger_bot giải thích giúp mình chuyện này", -1001234, "supergroup", 123456);
+
+    expect(t.f).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(t.bodies[0].messages)).not.toContain(secret);
+  });
+
+  it("keeps private admin notes out of group chat and rejects group memory writes", async () => {
+    const t = setup([say("Dạ em sẽ ghi nhớ riêng trong chat riêng ạ")]);
+
+    await t.run("@vh_messenger_bot Bee nhớ: quy tắc riêng của admin", -1001234, "supergroup", ADMIN);
+
+    expect(t.sent.at(-1)?.text).toContain("chỉ dùng trong chat riêng");
+    expect(await loadNotes(t.db, ADMIN)).toEqual([]);
+  });
+
+  it("writes new notes only to the private admin owner's row", async () => {
+    const t = setup([]);
+
+    await t.run("Bee nhớ: chỉ admin A được dùng quy tắc này");
+
+    expect(await loadNotes(t.db, ADMIN)).toEqual(["chỉ admin A được dùng quy tắc này"]);
+    expect(await loadNotes(t.db, ADMIN + 1)).toEqual([]);
+  });
+
+  it("audits memory reads without logging note content", async () => {
+    const secret = "do not log this private note";
+    const { db } = fakeDb({
+      [adminNotesRowId(ADMIN)!]: { kind: "admin_notes", ownerAdminId: ADMIN, notes: [secret] },
+    });
+    const audit = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await loadNotes(db, ADMIN);
+
+    const logged = audit.mock.calls.map(([line]) => String(line)).join("\n");
+    expect(logged).toContain('"actorId":6532155675');
+    expect(logged).toContain('"scope":"admin_memory"');
+    expect(logged).not.toContain(secret);
+    audit.mockRestore();
+  });
+
+  it("in a group, xem_nhom reads only the backend-resolved current chat", async () => {
+    const current = -1001111;
+    const other = -1002222;
+    const groups = {
+      kind: "groups",
+      groups: {
+        [current]: { title: "Current Group", type: "supergroup", lastSeen: NOW.toISOString() },
+        [other]: { title: "Other Group", type: "supergroup", lastSeen: NOW.toISOString() },
+      },
+    };
+    const groupLog = (chatId: number, title: string, text: string) => ({
+      kind: "grouplog",
+      chatId,
+      title,
+      items: [{ t: NOW.getTime(), from: "member", text, mid: 9 }],
+    });
+    const call = {
+      id: "c1",
+      type: "function",
+      function: { name: "xem_nhom", arguments: JSON.stringify({ ten_nhom: "Other Group" }) },
+    };
+    const t = setup(
+      [say("", [call]), say("Đây là nội dung nhóm hiện tại ạ")],
+      {
+        [-9104]: groups,
+        [current - 3_000_000_000_000]: groupLog(current, "Current Group", "current group context"),
+        [other - 3_000_000_000_000]: groupLog(other, "Other Group", "other group secret"),
+      }
+    );
+
+    await t.run("@vh_messenger_bot đọc nhóm kia", current, "supergroup", ADMIN);
+
+    const toolResult = t.bodies[1].messages.find((m: any) => m.role === "tool")?.content;
+    expect(toolResult).toContain("current group context");
+    expect(toolResult).not.toContain("other group secret");
   });
 });
 
