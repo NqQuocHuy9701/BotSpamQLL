@@ -34,6 +34,14 @@ This runbook covers the planner, turn-to-turn dialogue, task state, and external
 - No planner/tool output reaches a group without approval; no approval by another user executes the action.
 - Confirm flag values and staging database URL before any staged request; save the deployment URL and test evidence with the release review.
 
+## Testcare coverage in code
+
+- Automated mocks cover memory owner/scope isolation, prompt/argument validation, short-answer continuation, task owner/chat scope, expiry, restart/reload, compare-and-set duplicate claims/resumes, payload tampering, approval ownership, changed preview data, Telegram failure, and task-storage failure.
+- Planner tests confirm it receives no tools, cannot change the user reply, stores only bounded allowlisted metadata, and skips work at the daily AI cap.
+- Timeout, rate-limit, and existing API retry behavior are covered by the AI agent suite. These use mocks and do not measure live provider latency or real billing.
+- Local full regression currently has 19 pre-existing failures (AI agent, handler, and integration suites). New phase tests pass; compare against the same baseline before considering rollout.
+- Staging-only manual checks remain required for Vercel restart/recovery, separate credentials/database, real Telegram partial-delivery behavior, end-to-end prompt-injection attempts, and performance/cost observations.
+
 ## Current state
 
-The repository changes are local code and tests only. No staging project, staging credentials, Production database, or deployment target has been changed by this work.
+The dialogue/task implementation is on `master`; the latest Testcare additions in the current workspace are local until committed. No staging project or staging credentials are linked here. Production database, feature flags, and deployment settings have not been changed by this work.

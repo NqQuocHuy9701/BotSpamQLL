@@ -3,11 +3,13 @@ import { appendTaskStep, awaitTaskInput, clearActiveTaskLink, createTask, finish
 
 function fakeDb() {
   const rows = new Map<number, any>();
+  const failures = { insert: false, update: false, select: false };
   const from = () => {
     const filters: Record<string, unknown> = {};
     let updateValue: any;
     const q: any = {
       insert: async (row: any) => {
+        if (failures.insert) return { error: { code: "XX000", message: "storage unavailable" } };
         if (rows.has(row.admin_id)) return { error: { code: "23505" } };
         rows.set(row.admin_id, row.items);
         return { error: null };
@@ -16,10 +18,12 @@ function fakeDb() {
       update: (value: any) => ((updateValue = value), q),
       eq: (k: string, v: unknown) => ((filters[k] = v), q),
       maybeSingle: async () => {
+        if (failures.select) return { data: null, error: { code: "XX000", message: "storage unavailable" } };
         const item = rows.get(filters.admin_id as number);
         return item ? { data: { items: item }, error: null } : { data: null, error: null };
       },
       then: (resolve: (value: unknown) => unknown) => {
+        if (failures.update) return resolve({ data: null, error: { code: "XX000", message: "storage unavailable" } });
         const id = filters.admin_id as number;
         const item = rows.get(id);
         const matches = item && Object.entries(filters).every(([key, value]) => {
@@ -36,7 +40,7 @@ function fakeDb() {
     };
     return q;
   };
-  return { db: { from } as any, rows };
+  return { db: { from } as any, rows, failures };
 }
 
 const NOW = new Date("2026-11-18T03:00:00Z");
@@ -171,13 +175,48 @@ describe("AI Task State (disabled by default, no side effects)", () => {
     const reloaded = await getActiveTaskLink(db, 10, 10, true, NOW);
     expect(reloaded).toEqual({ ok: true, link: { taskId: created.task.taskId, pendingStepIndex: 0 } });
 
-    const resumed = await resumeTaskWithTools(db, created.task.taskId, 10, 10, 0, ["tra_cuu_case"], new Set(["tra_cuu_case"]), true, new Date(NOW.getTime() + 60_000));
-    expect(resumed.ok).toBe(true);
+    const later = new Date(NOW.getTime() + 60_000);
+    expect(reasonOf(await resumeTaskWithTools(db, created.task.taskId, 11, 10, 0, ["tra_cuu_case"], new Set(["tra_cuu_case"]), true, later))).toBe("not_found");
+    const contenders = await Promise.all([
+      resumeTaskWithTools(db, created.task.taskId, 10, 10, 0, ["tra_cuu_case"], new Set(["tra_cuu_case"]), true, later),
+      resumeTaskWithTools(db, created.task.taskId, 10, 10, 0, ["tra_cuu_case"], new Set(["tra_cuu_case"]), true, later),
+    ]);
+    expect(contenders.filter((result) => result.ok)).toHaveLength(1);
+    const resumed = contenders.find((result) => result.ok)!;
     if (!resumed.ok) return;
     expect(resumed.stepIndexes).toEqual([0]);
     expect((await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, new Date(NOW.getTime() + 61_000))).ok).toBe(true);
     expect((await transitionTask(db, created.task.taskId, 10, 10, "RUNNING", "COMPLETED", {}, true, new Date(NOW.getTime() + 62_000))).ok).toBe(true);
     expect(await clearActiveTaskLink(db, created.task.taskId, 10, 10, true)).toBe(true);
     expect((await getActiveTaskLink(db, 10, 10, true, new Date(NOW.getTime() + 62_000))).ok).toBe(false);
+  });
+
+  it("fails closed when task progress storage is unavailable", async () => {
+    const { db, failures } = fakeDb();
+    const created = await createTask(db, {
+      ownerUserId: 10, chatId: 10, intent: "lookup", scope: "private", plan: ["tool:tra_cuu_case"],
+    }, true, NOW);
+    if (!created.ok) throw new Error("task creation failed");
+    expect((await transitionTask(db, created.task.taskId, 10, 10, "PENDING", "RUNNING", {}, true, NOW)).ok).toBe(true);
+    failures.update = true;
+    expect(reasonOf(await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, NOW))).toBe("storage_error");
+    failures.update = false;
+    const unchanged = await getTask(db, created.task.taskId, 10, 10, true, NOW);
+    expect(unchanged.ok && unchanged.task.status).toBe("RUNNING");
+    expect(unchanged.ok && unchanged.task.stepStatuses).toEqual(["PENDING"]);
+  });
+
+  it("does not create a resumable pointer if storage insert fails", async () => {
+    const { db, failures } = fakeDb();
+    const created = await createTask(db, {
+      ownerUserId: 10, chatId: 10, intent: "lookup", scope: "private", plan: ["tool:tra_cuu_case"],
+    }, true, NOW);
+    if (!created.ok) throw new Error("task creation failed");
+    expect((await transitionTask(db, created.task.taskId, 10, 10, "PENDING", "RUNNING", {}, true, NOW)).ok).toBe(true);
+    expect((await awaitTaskInput(db, created.task.taskId, 10, 10, 0, true, NOW)).ok).toBe(true);
+    failures.insert = true;
+    expect(reasonOf(await saveActiveTaskLink(db, created.task.taskId, 10, 10, 0, true, NOW))).toBe("storage_error");
+    failures.insert = false;
+    expect((await getActiveTaskLink(db, 10, 10, true, NOW)).ok).toBe(false);
   });
 });

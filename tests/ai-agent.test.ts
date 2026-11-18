@@ -281,6 +281,22 @@ describe("planner shadow mode", () => {
       expect(t.bodies[1].tools).toBeUndefined();
       expect(t.bodies[1].tool_choice).toBeUndefined();
       expect(t.sent).toHaveLength(1);
+      expect((t.store.get(-202611064) as any)?.count).toBe(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("skips the shadow planner when the primary request consumes the remaining daily budget", async () => {
+    vi.stubEnv("AI_PLANNER_SHADOW", "true");
+    try {
+      const t = setup(
+        [say("Dạ, em xem giúp anh nhé.")],
+        { [-202611064]: { day: "2026-11-06", count: 299, last: {} } }
+      );
+      await t.run("phân tích giúp anh tình hình công việc hôm nay");
+      expect(t.f).toHaveBeenCalledTimes(1);
+      expect((t.store.get(-202611064) as any)?.count).toBe(300);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1032,6 +1048,43 @@ describe("phase approval gate", () => {
       const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task") as any;
       expect(task.status).toBe("CANCELLED");
       expect(t.sent.at(-1)?.text).toContain("đã thay đổi sau khi xem trước");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("records an unknown result and never retries a group action after Telegram failure", async () => {
+    vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    vi.stubEnv("AI_PLANNER_SHADOW", "false");
+    try {
+      const t = setup([say("", [tagCall])]);
+      let groupAttempts = 0;
+      t.deps.telegram.sendMessage = vi.fn(async (chat: number) => {
+        if (chat === -1002458492731) {
+          groupAttempts++;
+          throw new Error("telegram unavailable");
+        }
+        return { ok: true };
+      });
+      await t.run("tag CTV vh_test trong HTKT");
+      await t.run("gửi");
+
+      const task = [...t.store.values()].find((value: any) => value?.kind === "agent_task") as any;
+      expect(groupAttempts).toBe(1);
+      expect(task.status).toBe("UNKNOWN_RESULT");
+      expect(t.sent.some((item) => item.chat === -1002458492731)).toBe(false);
+      const duplicate = await handlePendingPost(
+        t.deps,
+        { message_id: 3, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN }, text: "gửi" } as any,
+        true,
+        foldVi("gửi"),
+        NOW,
+        "anh",
+        async () => "must not execute"
+      );
+      expect(duplicate).toBe(false);
+      expect(groupAttempts).toBe(1);
     } finally {
       vi.unstubAllEnvs();
     }
