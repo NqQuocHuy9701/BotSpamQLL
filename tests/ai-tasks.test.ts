@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendTaskStep, createTask, finishTaskStep, getTask, taskStateEnabled, transitionTask } from "../lib/ai_tasks.js";
+import { appendTaskStep, awaitTaskInput, clearActiveTaskLink, createTask, finishTaskStep, getActiveTaskLink, getTask, resumeTaskWithTools, saveActiveTaskLink, taskStateEnabled, transitionTask } from "../lib/ai_tasks.js";
 
 function fakeDb() {
   const rows = new Map<number, any>();
@@ -22,8 +22,12 @@ function fakeDb() {
       then: (resolve: (value: unknown) => unknown) => {
         const id = filters.admin_id as number;
         const item = rows.get(id);
-        if (!item || item.status !== filters["items->>status"] ||
-            (filters["items->>updatedAt"] !== undefined && item.updatedAt !== filters["items->>updatedAt"])) {
+        const matches = item && Object.entries(filters).every(([key, value]) => {
+          if (key === "admin_id") return id === value;
+          if (key.startsWith("items->>")) return item[key.slice("items->>".length)] === value;
+          return false;
+        });
+        if (!matches) {
           return resolve({ data: [], error: null });
         }
         rows.set(id, updateValue.items);
@@ -148,5 +152,32 @@ describe("AI Task State (disabled by default, no side effects)", () => {
     expect(reloaded.task.updatedAt).not.toBe(created.task.updatedAt);
     expect((await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, NOW)).ok).toBe(true);
     expect(reasonOf(await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, NOW))).toBe("state_conflict");
+  });
+
+  it("resumes a clarification after reload only for the same owner and chat", async () => {
+    const { db } = fakeDb();
+    const created = await createTask(db, {
+      ownerUserId: 10, ownerAdminId: 10, chatId: 10, intent: "lookup", scope: "private_admin_chat", plan: ["tool:tra_cuu_case"],
+    }, true, NOW);
+    if (!created.ok) throw new Error("task creation failed");
+    expect((await transitionTask(db, created.task.taskId, 10, 10, "PENDING", "RUNNING", {}, true, NOW)).ok).toBe(true);
+    const awaiting = await awaitTaskInput(db, created.task.taskId, 10, 10, 0, true, NOW);
+    expect(awaiting.ok).toBe(true);
+    expect((await saveActiveTaskLink(db, created.task.taskId, 10, 10, 0, true, NOW)).ok).toBe(true);
+
+    expect((await getActiveTaskLink(db, 11, 10, true, NOW)).ok).toBe(false);
+    expect((await getActiveTaskLink(db, 10, 11, true, NOW)).ok).toBe(false);
+    expect((await getActiveTaskLink(db, 10, 10, true, new Date(NOW.getTime() + 10 * 60_000))).ok).toBe(false);
+    const reloaded = await getActiveTaskLink(db, 10, 10, true, NOW);
+    expect(reloaded).toEqual({ ok: true, link: { taskId: created.task.taskId, pendingStepIndex: 0 } });
+
+    const resumed = await resumeTaskWithTools(db, created.task.taskId, 10, 10, 0, ["tra_cuu_case"], new Set(["tra_cuu_case"]), true, new Date(NOW.getTime() + 60_000));
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.stepIndexes).toEqual([0]);
+    expect((await finishTaskStep(db, created.task.taskId, 10, 10, 0, "COMPLETED", true, new Date(NOW.getTime() + 61_000))).ok).toBe(true);
+    expect((await transitionTask(db, created.task.taskId, 10, 10, "RUNNING", "COMPLETED", {}, true, new Date(NOW.getTime() + 62_000))).ok).toBe(true);
+    expect(await clearActiveTaskLink(db, created.task.taskId, 10, 10, true)).toBe(true);
+    expect((await getActiveTaskLink(db, 10, 10, true, new Date(NOW.getTime() + 62_000))).ok).toBe(false);
   });
 });

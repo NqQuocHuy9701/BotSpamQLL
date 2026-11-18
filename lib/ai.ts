@@ -16,7 +16,8 @@ import type { TelegramMessage } from "./types.js";
 import { isSensitive } from "./detector.js";
 import { pickIndex } from "./messages.js";
 import { parseShadowPlan, plannerShadowEnabled } from "./ai_planner.js";
-import { appendTaskStep, createTask, finishTaskStep, getTask, hashTaskPayload, taskStateEnabled, transitionTask } from "./ai_tasks.js";
+import { CLARIFICATION_MARKER, DIALOGUE_CONTINUITY_RULES, dialogueModeEnabled, validateAgentToolArguments } from "./ai_dialogue.js";
+import { appendTaskStep, awaitTaskInput, clearActiveTaskLink, createTask, finishTaskStep, getActiveTaskLink, getTask, hashTaskPayload, resumeTaskWithTools, saveActiveTaskLink, taskStateEnabled, transitionTask } from "./ai_tasks.js";
 import {
   buildCheckinList,
   buildHelpText,
@@ -807,6 +808,9 @@ async function handleAi(
   const now = opts.now ?? new Date();
   const rng = opts.rng ?? Math.random;
   const folded = foldVi(question);
+  const recentFollowup = dialogueModeEnabled(process.env) && isAdmin && isPrivate && question.trim().length <= MAX_QUESTION_CHARS
+    ? await hasRecentAssistantQuestion(deps.supabase, convKey(message), now.getTime())
+    : false;
 
   // Admin trả lời bản nháp đăng nhóm ("gửi" / "hủy"): TypeScript xử lý, không qua AI.
   if (isAdmin) {
@@ -817,9 +821,14 @@ async function handleAi(
     if (done) return true;
   }
 
+  if (dialogueModeEnabled(process.env) && taskStateEnabled(process.env) && isAdmin && isPrivate && from && !recentFollowup) {
+    await cancelAwaitingInputTask(deps.supabase, from.id, message.chat.id, now);
+  }
+
   // Nhóm A (không cần AI): lệnh bộ nhớ rõ ràng + yêu cầu nghiệp vụ khớp luật.
   let intent: Intent | null = isAdmin ? classifyMemory(question) : null;
   if (intent === null) intent = classifyByRules(folded);
+  if (recentFollowup) intent = null;
   // Admin: luật từ khóa chỉ dùng cho câu XEM đơn giản. Câu ra lệnh hành động
   // (nhắn/tag/hẹn) hoặc nhắc tới người/case cụ thể, đại từ ("anh ý", "case đó")
   // phải để AI hiểu theo mạch hội thoại.
@@ -1640,6 +1649,20 @@ export async function loadHistory(
     .map((h) => ({ role: h.role, content: h.content }));
 }
 
+async function hasRecentAssistantQuestion(supabase: SupabaseClient, userId: string, nowMs: number): Promise<boolean> {
+  const row = await readHistoryRow(supabase);
+  const turns = (row.byUser[String(userId)] ?? []).filter((turn) => nowMs - turn.t < FOLLOWUP_WINDOW_MS);
+  const lastAssistant = [...turns].reverse().find((turn) => turn.role === "assistant")?.content.trim() ?? "";
+  return /[?？]\s*$/.test(lastAssistant);
+}
+
+async function cancelAwaitingInputTask(supabase: SupabaseClient, ownerUserId: number, chatId: number, now: Date): Promise<void> {
+  const active = await getActiveTaskLink(supabase, ownerUserId, chatId, true, now);
+  if (!active.ok) return;
+  const cancelled = await transitionTask(supabase, active.link.taskId, ownerUserId, chatId, "AWAITING_INPUT", "CANCELLED", {}, true, now);
+  if (cancelled.ok) await clearActiveTaskLink(supabase, active.link.taskId, ownerUserId, chatId, true);
+}
+
 // Ghi thêm 1 lượt hỏi-đáp. Đọc-rồi-ghi (không nguyên tử) — mất 1 lượt hiếm hoi
 // khi 2 tin đến cùng lúc là chấp nhận được.
 export async function appendHistory(
@@ -1878,6 +1901,7 @@ function agentSystem(title0: string, notes: string[], now: Date, isPrivate: bool
     "- Chưa có công cụ báo thành công thì KHÔNG nói đã gửi/tag. Không hứa tự động việc gì ngoài: hẹn tag ca chiều, và form QLL đủ mẫu tự chuyển sang nhóm Cộng đồng VH - BGD.",
     "- Đổi dữ liệu (chuyển ca, thêm CTV, tắt SLA): em chưa làm được, đưa câu lệnh mẫu (xem_cau_hinh).",
     "- TỰ HỌC VÀ LẮNG NGHE NHÓM: Bee liên tục quan sát và học hỏi từ các tin nhắn diễn ra trong nhóm chat. Khi admin hoặc CTV hỏi về một vấn đề đã xuất hiện trong ngữ cảnh nhóm hoặc cần tra cứu thông tin nhóm, Bee sẽ tự động kết hợp trí nhớ dài hạn (BỘ NÃO) và nhật ký nhóm để đưa ra câu trả lời chính xác, thực tế nhất mà không cần phải hỏi lại.",
+    dialogueModeEnabled(process.env) ? DIALOGUE_CONTINUITY_RULES : "",
     notes.length ? "BỘ NÃO:\n" + notes.map((n, i) => `${i + 1}. ${n}`).join("\n") : "BỘ NÃO: (trống)",
   ].filter(Boolean).join("\n");
 }
@@ -2072,6 +2096,8 @@ async function runTool(
   }
 ): Promise<string> {
   const { deps, message, isPrivate, title, now } = ctx;
+  const clarification = validateAgentToolArguments(name, args);
+  if (clarification) return `${CLARIFICATION_MARKER}${clarification}`;
   // Outbound group actions use a private preview. When the approval gate is
   // enabled, tags and scheduled handoffs use the same owner-scoped confirmation flow.
   if (POST_TOOLS.has(name) && !ctx.confirmed && ctx.isPrivate) {
@@ -2328,6 +2354,12 @@ export async function runAgent(
     notes: isPrivate && message.from ? await loadNotes(deps.supabase, message.from.id) : [],
   };
   const history = message.from ? await loadHistory(deps.supabase, convKey(message), now.getTime()) : [];
+  let activeTaskLink: { taskId: string; pendingStepIndex: number } | undefined;
+  if (isPrivate && message.from && taskStateEnabled(process.env) && dialogueModeEnabled(process.env) &&
+      await hasRecentAssistantQuestion(deps.supabase, convKey(message), now.getTime())) {
+    const active = await getActiveTaskLink(deps.supabase, message.from.id, message.chat.id, true, now);
+    if (active.ok) activeTaskLink = active.link;
+  }
   // Admin reply vào 1 tin cụ thể -> đưa nội dung tin đó vào làm ngữ cảnh.
   const quoted = (message.reply_to_message?.text ?? "").replace(/https?:\/\/\S+/g, "").slice(0, 300);
   const userText =
@@ -2344,7 +2376,8 @@ export async function runAgent(
   let sentOk = false; // lượt này có công cụ GỬI nào báo thành công thật không
   const observedToolNames = new Set<string>();
   let workflowTaskId: string | undefined;
-  let workflowStepIndex = 0;
+  let workflowStepIndexes: number[] = [];
+  let workflowToolIndex = 0;
   let workflowStepFailed = false;
   const finishWorkflowTask = async () => {
     if (!workflowTaskId || !message.from) return;
@@ -2352,7 +2385,17 @@ export async function runAgent(
     if (loaded.ok && loaded.task.status === "RUNNING") {
       await transitionTask(deps.supabase, workflowTaskId, message.from.id, message.chat.id,
         "RUNNING", workflowStepFailed ? "FAILED" : "COMPLETED", {}, true, now);
+      await clearActiveTaskLink(deps.supabase, workflowTaskId, message.from.id, message.chat.id, true);
     }
+  };
+  const cancelResumableTask = async () => {
+    if (!activeTaskLink || !message.from) return;
+    const cancelled = await transitionTask(
+      deps.supabase, activeTaskLink.taskId, message.from.id, message.chat.id,
+      "AWAITING_INPUT", "CANCELLED", {}, true, now
+    );
+    if (cancelled.ok) await clearActiveTaskLink(deps.supabase, activeTaskLink.taskId, message.from.id, message.chat.id, true);
+    activeTaskLink = undefined;
   };
   const shadowAfterReply = async (): Promise<void> => {
     if (!message.from || !isPrivate) return;
@@ -2394,6 +2437,7 @@ export async function runAgent(
       // gửi nào thành công thật (AI hay "tưởng tượng" ra hành động).
       const final = claimsSent(text) && !sentOk ? FAKE_SEND_FIX : text;
       await finishWorkflowTask();
+      if (activeTaskLink && !/[?？]\s*$/.test(final)) await cancelResumableTask();
       if (final !== text) console.error(`[Bee AI] chặn câu nhận đã gửi sai: ${text.slice(0, 120)}`);
       await sendHere(deps, message, isPrivate, final);
       await shadowAfterReply();
@@ -2405,6 +2449,20 @@ export async function runAgent(
       !m.tool_calls.some((tc) => GATED_ACTION_TOOL_NAMES.has(tc.function.name));
     if (safeTaskBatch && message.from) {
       if (!workflowTaskId) {
+        if (activeTaskLink && dialogueModeEnabled(process.env)) {
+          const resumed = await resumeTaskWithTools(
+            deps.supabase, activeTaskLink.taskId, message.from.id, message.chat.id,
+            activeTaskLink.pendingStepIndex, m.tool_calls.map((tc) => tc.function.name), AGENT_TOOL_NAMES, true, now
+          );
+          if (!resumed.ok) {
+            await clearActiveTaskLink(deps.supabase, activeTaskLink.taskId, message.from.id, message.chat.id, true);
+            await sendHere(deps, message, isPrivate, "Em chưa xác minh được quyền tiếp tục tác vụ cũ nên chưa chạy công cụ nào; anh gửi lại yêu cầu giúp em nhé.");
+            return "task resume unavailable";
+          }
+          workflowTaskId = resumed.task.taskId;
+          workflowStepIndexes = resumed.stepIndexes;
+          activeTaskLink = undefined;
+        } else {
         const created = await createTask(deps.supabase, {
           ownerUserId: message.from.id,
           ownerAdminId: message.from.id,
@@ -2424,14 +2482,15 @@ export async function runAgent(
           return "duplicate task";
         }
         workflowTaskId = created.task.taskId;
-        workflowStepIndex = 0;
+        workflowStepIndexes = m.tool_calls.map((_, index) => index);
+        }
       } else {
         for (const tc of m.tool_calls) {
           const appended = await appendTaskStep(deps.supabase, workflowTaskId, message.from.id, message.chat.id, tc.function.name, AGENT_TOOL_NAMES, true, now);
           if (!appended.ok) {
             workflowStepFailed = true;
             console.error(`[Bee task state] append_step=${appended.reason}`);
-          }
+          } else workflowStepIndexes.push(appended.index);
         }
         if (workflowStepFailed) {
           await finishWorkflowTask();
@@ -2450,11 +2509,35 @@ export async function runAgent(
         // tham số hỏng -> chạy với {}
       }
       const result = await runTool(tc.function.name, args, ctx);
+      if (result.startsWith(CLARIFICATION_MARKER)) {
+        const clarification = result.slice(CLARIFICATION_MARKER.length);
+        if (workflowTaskId && safeTaskBatch && message.from) {
+          const stepIndex = workflowStepIndexes[workflowToolIndex];
+          const waiting = await awaitTaskInput(deps.supabase, workflowTaskId, message.from.id, message.chat.id, stepIndex, true, now);
+          if (waiting.ok && dialogueModeEnabled(process.env)) {
+            const linked = await saveActiveTaskLink(deps.supabase, workflowTaskId, message.from.id, message.chat.id, stepIndex, true, now);
+            if (!linked.ok) {
+              await transitionTask(deps.supabase, workflowTaskId, message.from.id, message.chat.id, "AWAITING_INPUT", "CANCELLED", {}, true, now);
+              await clearActiveTaskLink(deps.supabase, workflowTaskId, message.from.id, message.chat.id, true);
+            }
+          } else if (waiting.ok) {
+            await transitionTask(deps.supabase, workflowTaskId, message.from.id, message.chat.id, "AWAITING_INPUT", "CANCELLED", {}, true, now);
+          } else {
+            workflowStepFailed = true;
+            await finishWorkflowTask();
+          }
+          workflowToolIndex++;
+        } else if (activeTaskLink) {
+          await cancelResumableTask();
+        }
+        await sendHere(deps, message, isPrivate, clarification);
+        return clarification;
+      }
       if (workflowTaskId && safeTaskBatch) {
         const failed = /công cụ bị lỗi|chưa lấy được dữ liệu|không có công cụ này/i.test(result);
         const recorded = await finishTaskStep(
           deps.supabase, workflowTaskId, message.from!.id, message.chat.id,
-          workflowStepIndex++, failed ? "FAILED" : "COMPLETED", true, now
+          workflowStepIndexes[workflowToolIndex++], failed ? "FAILED" : "COMPLETED", true, now
         );
         if (!recorded.ok) {
           workflowStepFailed = true;
@@ -2468,6 +2551,7 @@ export async function runAgent(
       // để AI diễn giải, không tốn thêm lượt). Không có gì được đăng vào nhóm.
       if (result.startsWith(DRAFT_MARK)) {
         const preview = result.slice(DRAFT_MARK.length);
+        await cancelResumableTask();
         await finishWorkflowTask();
         await sendHere(deps, message, isPrivate, preview);
         await shadowAfterReply();

@@ -6,6 +6,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // existing pending_batches table; this module never migrates it.
 const TASK_ROW_BASE = 7_000_000_000_000;
 const TASK_ROW_SPAN = 999_999_999_999;
+const TASK_LINK_ROW_BASE = 9_000_000_000_000;
+const TASK_LINK_ROW_SPAN = 999_999_999_999;
 export const TASK_TTL_MS = 10 * 60_000;
 const TASK_STATUSES = new Set<TaskStatus>([
   "DRAFT", "PENDING", "RUNNING", "AWAITING_INPUT", "AWAITING_APPROVAL", "APPROVED", "EXECUTING",
@@ -66,6 +68,11 @@ export interface NewTask {
   requestKey?: string;
 }
 
+export interface ActiveTaskLink {
+  taskId: string;
+  pendingStepIndex: number;
+}
+
 const ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   DRAFT: ["AWAITING_INPUT", "AWAITING_APPROVAL", "CANCELLED", "EXPIRED"],
   PENDING: ["RUNNING", "AWAITING_INPUT", "AWAITING_APPROVAL", "CANCELLED", "EXPIRED", "FAILED"],
@@ -102,6 +109,12 @@ function rowIdForRequest(requestKey: string): number {
   for (let i = 0; i < requestKey.length; i++) hash = Math.imul(hash ^ requestKey.charCodeAt(i), 16777619);
   const offset = (hash >>> 0) % (TASK_ROW_SPAN + 1);
   return -(TASK_ROW_BASE + offset);
+}
+
+function taskLinkRowId(ownerUserId: number, chatId: number): number {
+  const key = `${ownerUserId}:${chatId}`;
+  const hash = Number.parseInt(createHash("sha256").update(key).digest("hex").slice(0, 12), 16);
+  return -(TASK_LINK_ROW_BASE + (hash % (TASK_LINK_ROW_SPAN + 1)));
 }
 
 function isExpired(task: AgentTask, now: Date): boolean {
@@ -343,5 +356,199 @@ export async function finishTaskStep(
     return { ok: true };
   } catch {
     return { ok: false, reason: "storage_error" };
+  }
+}
+
+/** Mark a tool step as waiting for user input and cancel unstarted sibling steps. */
+export async function awaitTaskInput(
+  db: SupabaseClient,
+  taskId: string,
+  actorId: number,
+  chatId: number,
+  stepIndex: number,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; task: AgentTask } | { ok: false; reason: string }> {
+  const loaded = await getTask(db, taskId, actorId, chatId, enabled, now);
+  if (!loaded.ok) return loaded;
+  const task = loaded.task;
+  if (task.status !== "RUNNING" || !Number.isInteger(stepIndex) || stepIndex < 0 || stepIndex >= task.plan.length || task.stepStatuses[stepIndex] !== "PENDING") {
+    return { ok: false, reason: "state_conflict" };
+  }
+  const stepStatuses = [...task.stepStatuses];
+  stepStatuses[stepIndex] = "AWAITING_INPUT";
+  for (let i = stepIndex + 1; i < stepStatuses.length; i++) {
+    if (stepStatuses[i] === "PENDING") stepStatuses[i] = "CANCELLED";
+  }
+  const updated: AgentTask = { ...task, status: "AWAITING_INPUT", stepStatuses, updatedAt: nextUpdatedAt(task, now) };
+  const id = taskRowId(taskId);
+  if (id === null) return { ok: false, reason: "not_found" };
+  try {
+    const { data, error } = await db.from("pending_batches").update({ items: updated })
+      .eq("admin_id", id).eq("items->>status", "RUNNING").eq("items->>updatedAt", task.updatedAt).select("items");
+    if (error) return { ok: false, reason: "storage_error" };
+    if (!Array.isArray(data) || data.length !== 1) return { ok: false, reason: "state_conflict" };
+    return { ok: true, task: updated };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+/** Resume an awaiting-input task for its exact owner/chat and validated tool batch. */
+export async function resumeTaskWithTools(
+  db: SupabaseClient,
+  taskId: string,
+  actorId: number,
+  chatId: number,
+  pendingStepIndex: number,
+  toolNames: string[],
+  allowedTools: ReadonlySet<string>,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; task: AgentTask; stepIndexes: number[] } | { ok: false; reason: string }> {
+  if (toolNames.length === 0 || toolNames.length > 3 || toolNames.some((name) => !allowedTools.has(name))) {
+    return { ok: false, reason: "tool_not_allowed" };
+  }
+  const loaded = await getTask(db, taskId, actorId, chatId, enabled, now);
+  if (!loaded.ok) return loaded;
+  const current = loaded.task;
+  if (current.status !== "AWAITING_INPUT" || !Number.isInteger(pendingStepIndex) || pendingStepIndex < 0 ||
+      pendingStepIndex >= current.plan.length || current.stepStatuses[pendingStepIndex] !== "AWAITING_INPUT") {
+    return { ok: false, reason: "state_conflict" };
+  }
+  const plan = [...current.plan];
+  const stepStatuses = [...current.stepStatuses];
+  const resumedSameTool = plan[pendingStepIndex] === `tool:${toolNames[0]}`;
+  const stepIndexes: number[] = [];
+  if (resumedSameTool) {
+    stepStatuses[pendingStepIndex] = "PENDING";
+    stepIndexes.push(pendingStepIndex);
+  } else {
+    stepStatuses[pendingStepIndex] = "CANCELLED";
+  }
+  const startAt = resumedSameTool ? 1 : 0;
+  for (let i = startAt; i < toolNames.length; i++) {
+    plan.push(`tool:${toolNames[i]}`);
+    stepStatuses.push("PENDING");
+    stepIndexes.push(plan.length - 1);
+  }
+  if (plan.length > 15) return { ok: false, reason: "step_limit" };
+  const updated: AgentTask = { ...current, plan, stepStatuses, status: "RUNNING", updatedAt: nextUpdatedAt(current, now) };
+  const id = taskRowId(taskId);
+  if (id === null) return { ok: false, reason: "not_found" };
+  try {
+    const { data, error } = await db.from("pending_batches").update({ items: updated })
+      .eq("admin_id", id).eq("items->>status", "AWAITING_INPUT").eq("items->>updatedAt", current.updatedAt).select("items");
+    if (error) return { ok: false, reason: "storage_error" };
+    if (!Array.isArray(data) || data.length !== 1) return { ok: false, reason: "state_conflict" };
+    return { ok: true, task: updated, stepIndexes };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+export async function saveActiveTaskLink(
+  db: SupabaseClient,
+  taskId: string,
+  ownerUserId: number,
+  chatId: number,
+  pendingStepIndex: number,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const loaded = await getTask(db, taskId, ownerUserId, chatId, enabled, now);
+  if (!loaded.ok) return loaded;
+  if (loaded.task.status !== "AWAITING_INPUT" || loaded.task.stepStatuses[pendingStepIndex] !== "AWAITING_INPUT") {
+    return { ok: false, reason: "state_conflict" };
+  }
+  const rowId = taskLinkRowId(ownerUserId, chatId);
+  const link = {
+    kind: "agent_task_link",
+    ownerUserId,
+    chatId,
+    taskId,
+    pendingStepIndex,
+    expiresAt: loaded.task.expiresAt,
+    updatedAt: now.toISOString(),
+  };
+  try {
+    const { data, error } = await db.from("pending_batches").select("items").eq("admin_id", rowId).maybeSingle();
+    if (error) return { ok: false, reason: "storage_error" };
+    const existing = data?.items as typeof link | undefined;
+    if (existing && (existing.kind !== "agent_task_link" || existing.ownerUserId !== ownerUserId || existing.chatId !== chatId)) {
+      return { ok: false, reason: "scope_conflict" };
+    }
+    if (existing?.taskId && existing.taskId !== taskId && Date.parse(existing.expiresAt) > now.getTime()) {
+      const prior = await getTask(db, existing.taskId, ownerUserId, chatId, enabled, now);
+      if (prior.ok && prior.task.status === "AWAITING_INPUT") return { ok: false, reason: "active_task_exists" };
+    }
+    if (!existing) {
+      const inserted = await db.from("pending_batches").insert({ admin_id: rowId, items: link });
+      if (inserted.error) return { ok: false, reason: inserted.error.code === "23505" ? "state_conflict" : "storage_error" };
+      return { ok: true };
+    }
+    const { data: updated, error: updateError } = await db.from("pending_batches").update({ items: link })
+      .eq("admin_id", rowId).eq("items->>kind", "agent_task_link")
+      .eq("items->>ownerUserId", ownerUserId).eq("items->>chatId", chatId)
+      .eq("items->>taskId", existing.taskId).eq("items->>updatedAt", existing.updatedAt).select("items");
+    if (updateError) return { ok: false, reason: "storage_error" };
+    return Array.isArray(updated) && updated.length === 1 ? { ok: true } : { ok: false, reason: "state_conflict" };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+export async function getActiveTaskLink(
+  db: SupabaseClient,
+  ownerUserId: number,
+  chatId: number,
+  enabled = taskStateEnabled(),
+  now = new Date()
+): Promise<{ ok: true; link: ActiveTaskLink } | { ok: false; reason: string }> {
+  if (!enabled || !Number.isSafeInteger(ownerUserId) || ownerUserId <= 0 || !Number.isSafeInteger(chatId)) {
+    return { ok: false, reason: "disabled_or_invalid_scope" };
+  }
+  try {
+    const { data, error } = await db.from("pending_batches").select("items")
+      .eq("admin_id", taskLinkRowId(ownerUserId, chatId)).maybeSingle();
+    if (error || !data?.items) return { ok: false, reason: "not_found" };
+    const value = data.items as Record<string, unknown>;
+    if (value.kind !== "agent_task_link" || value.ownerUserId !== ownerUserId || value.chatId !== chatId ||
+        typeof value.taskId !== "string" || !Number.isInteger(value.pendingStepIndex) ||
+        typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= now.getTime()) {
+      return { ok: false, reason: "not_found" };
+    }
+    const loaded = await getTask(db, value.taskId, ownerUserId, chatId, enabled, now);
+    if (!loaded.ok || loaded.task.status !== "AWAITING_INPUT" || loaded.task.stepStatuses[value.pendingStepIndex as number] !== "AWAITING_INPUT") {
+      return { ok: false, reason: loaded.ok ? "state_conflict" : loaded.reason };
+    }
+    return { ok: true, link: { taskId: value.taskId, pendingStepIndex: value.pendingStepIndex as number } };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
+
+export async function clearActiveTaskLink(
+  db: SupabaseClient,
+  taskId: string,
+  ownerUserId: number,
+  chatId: number,
+  enabled = taskStateEnabled()
+): Promise<boolean> {
+  if (!enabled || !Number.isSafeInteger(ownerUserId) || ownerUserId <= 0 || !Number.isSafeInteger(chatId)) return false;
+  const rowId = taskLinkRowId(ownerUserId, chatId);
+  try {
+    const { data, error } = await db.from("pending_batches").select("items").eq("admin_id", rowId).maybeSingle();
+    if (error || !data?.items) return false;
+    const current = data.items as Record<string, unknown>;
+    if (current.kind !== "agent_task_link" || current.ownerUserId !== ownerUserId || current.chatId !== chatId || current.taskId !== taskId) return false;
+    const { data: updated, error: updateError } = await db.from("pending_batches").update({
+      items: { kind: "agent_task_link", ownerUserId, chatId, taskId: "", pendingStepIndex: -1, expiresAt: new Date(0).toISOString(), updatedAt: new Date().toISOString() },
+    }).eq("admin_id", rowId).eq("items->>kind", "agent_task_link")
+      .eq("items->>ownerUserId", ownerUserId).eq("items->>chatId", chatId)
+      .eq("items->>taskId", taskId).eq("items->>updatedAt", current.updatedAt).select("items");
+    return !updateError && Array.isArray(updated) && updated.length === 1;
+  } catch {
+    return false;
   }
 }

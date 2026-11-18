@@ -188,6 +188,51 @@ describe("Nhóm B: cần AI, đúng 1 lượt hội thoại", () => {
     expect(t.bodies[1].messages.some((m: any) => m.role === "tool")).toBe(true);
     expect(t.sent.at(-1)!.text).toBe("QLL với HTKT đều sạch case rồi ạ");
   });
+  it("carries a clarification and the user's short answer into the next turn", async () => {
+    vi.stubEnv("AI_DIALOGUE_MODE_ENABLED", "true");
+    try {
+      const t = setup([say("Anh muốn xem nhóm nào ạ?"), say("Dạ, em đang kiểm tra HTKT cho anh đây ạ.")]);
+      await t.run("phân tích giúp anh tình hình công việc hôm nay");
+      await t.run("HTKT");
+      expect(t.bodies[1].messages[0].content).toContain("Hội thoại nối tiếp");
+      expect(t.bodies[1].messages.some((m: any) => m.role === "user" && m.content.includes("phân tích giúp anh tình hình công việc hôm nay"))).toBe(true);
+      expect(t.bodies[1].messages.at(-1).content).toContain("HTKT");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it("turns a tool call with missing required data into a clarification", async () => {
+    const missingCaseKey = {
+      id: "missing-case-key", type: "function", function: { name: "tra_cuu_case", arguments: "{}" },
+    };
+    const t = setup([say("", [missingCaseKey])]);
+    await t.run("tra case này giúp anh");
+    expect(t.f).toHaveBeenCalledTimes(1);
+    expect(t.sent.at(-1)?.text).toContain("mã lớp");
+  });
+  it("resumes the same owned task after the admin supplies the missing lookup key", async () => {
+    vi.stubEnv("AI_DIALOGUE_MODE_ENABLED", "true");
+    vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
+    try {
+      const missing = { id: "lookup-missing", type: "function", function: { name: "tra_cuu_case", arguments: "{}" } };
+      const completed = { id: "lookup-complete", type: "function", function: { name: "tra_cuu_case", arguments: JSON.stringify({ tu_khoa: "HS203745" }) } };
+      const t = setup([say("", [missing]), say("", [completed]), say("Em chưa thấy case này trong dữ liệu hiện có ạ.")]);
+      await t.run("tra case này giúp anh");
+      const waiting = [...t.store.values()].find((value: any) => value?.kind === "agent_task" && value.intent === "assistant_tool_workflow") as any;
+      expect(waiting.status).toBe("AWAITING_INPUT");
+      expect(waiting.stepStatuses).toEqual(["AWAITING_INPUT"]);
+
+      await t.run("HS203745");
+
+      const finished = [...t.store.values()].find((value: any) => value?.taskId === waiting.taskId) as any;
+      expect(finished.status).toBe("COMPLETED");
+      expect(finished.stepStatuses).toEqual(["COMPLETED"]);
+      expect(t.sent.at(-1)?.text).toContain("chưa thấy case");
+      expect([...t.store.values()].some((value: any) => value?.kind === "agent_task_link" && value.taskId === "")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("persists a private multi-tool workflow and suppresses a duplicate Telegram update", async () => {
     vi.stubEnv("AI_TASK_STATE_ENABLED", "true");
     vi.stubEnv("AI_APPROVAL_GATE_ENABLED", "false");
