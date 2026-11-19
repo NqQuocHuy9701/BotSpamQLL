@@ -96,6 +96,37 @@ export function parseSheet(buf: Buffer): BatchRow[] {
   return rows;
 }
 
+// Downloads the configured public Google Sheet tab as an XLSX workbook. The
+// sheet must be readable by anyone with the link; private sheets need Google
+// API credentials and are deliberately not accessed with user credentials.
+export async function downloadGoogleSheet(
+  spreadsheetId: string,
+  gid: string
+): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
+  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(
+    spreadsheetId
+  )}/export?format=xlsx&gid=${encodeURIComponent(gid)}`;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) {
+      return { ok: false, error: `Google trả về HTTP ${response.status}` };
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("text/html")) {
+      return {
+        ok: false,
+        error: "Sheet chưa được chia sẻ quyền xem bằng liên kết hoặc Google yêu cầu đăng nhập.",
+      };
+    }
+    return { ok: true, buffer: Buffer.from(await response.arrayBuffer()) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 // subjectHashtag(maLop): the subject hashtag derived from the first 4 chars of
 // the class code (e.g. "TOAN.2026.1176" -> "#TOAN", "MOET_TH.2025.0104" ->
 // "#MOET", "KHTN.2026.0746" -> "#KHTN"). Returns "" when the code is too short

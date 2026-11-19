@@ -99,6 +99,10 @@ riêng và thao tác trong nhóm QLL. Nó có **3 nhóm chức năng**:
 
 ---
 
+### Đọc trực tiếp Google Sheet
+
+Gõ `/sheet` trong chat riêng với bot để đọc tab `ClassIn_New` từ Google Sheet đã cấu hình. Bot map QLL và tạo danh sách chờ giống luồng gửi file Excel; cần gõ `/ok` để xếp gửi. Sheet phải cho phép xem bằng liên kết.
+
 ## 5. Định dạng file Excel
 
 Sheet đầu tiên, có dòng tiêu đề (bot tự dò dòng header kể cả khi phía trên có vài

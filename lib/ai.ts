@@ -99,6 +99,7 @@ export interface AiDeps {
   supabase: SupabaseClient;
   checkinSupabase?: SupabaseClient;
   ai?: AiConfig;
+  onBotReaction?: (chatId: number, messageId: number) => void;
 }
 
 // Hiện "Tiểu Bee đang nhập..." trong lúc chờ AI. Telegram tự tắt sau ~5s hoặc khi
@@ -752,7 +753,9 @@ async function handleAi(
   if (message.chat.type === "group" || message.chat.type === "supergroup") {
     await observeGroup(deps.supabase, message, opts.now ?? new Date());
     // Form xin nghỉ ở QLL -> tự chuyển vào nhóm Cộng đồng (không tốn lượt AI). Fail-soft.
-    await applyLeaveForward(deps, ai, message);
+    if (await applyLeaveForward(deps, ai, message)) {
+      deps.onBotReaction?.(message.chat.id, message.message_id);
+    }
   }
   // Ảnh/tệp có chú thích: tag Bee trong caption vẫn được nhận.
   const text = (message.text ?? message.caption ?? "").trim();
@@ -3268,13 +3271,14 @@ const LEAVE_KEYS_MAX = 500;
 // Tin QLL là form xin nghỉ đủ mẫu -> chuyển vào nhóm Cộng đồng. Mỗi (ngày, mã HS,
 // mã lớp) chỉ chuyển 1 lần. Chiếm khóa TRƯỚC khi gửi để webhook lặp không gửi trùng.
 // Không bao giờ ném lỗi; không đụng luồng tracking/SLA của QLL.
-export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: TelegramMessage): Promise<void> {
+export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: TelegramMessage): Promise<boolean> {
+  let reactedSuccessfully = false;
   try {
-    if (message.chat.id !== QLL_CHAT_ID || message.from?.is_bot) return;
+    if (message.chat.id !== QLL_CHAT_ID || message.from?.is_bot) return false;
     const text = message.text ?? message.caption ?? "";
-    if (extractMention(text, ai.botUsername).mentioned) return; // tin ra lệnh cho Bee
+    if (extractMention(text, ai.botUsername).mentioned) return false; // tin ra lệnh cho Bee
     const form = isLeaveFormMessage(text);
-    if (!form) return;
+    if (!form) return false;
 
     const day = vnDay(new Date());
     // Chống trùng theo TỪNG TIN (1 HS có thể vừa xin muộn vừa xin nghỉ trong ngày).
@@ -3287,7 +3291,7 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
     const keys = sameDay && Array.isArray(cur?.keys) ? cur!.keys! : [];
     if (keys.includes(key)) {
       console.log(`[Bee FW] bỏ qua form trùng ${key}`);
-      return;
+      return false;
     }
     const count = (sameDay ? cur?.count ?? 0 : 0) + 1;
     const reacted = sameDay && Array.isArray((cur as { reacted?: unknown })?.reacted)
@@ -3344,13 +3348,18 @@ export async function applyLeaveForward(deps: AiDeps, ai: AiConfig, message: Tel
         const j = (await res.json()) as { ok?: boolean; description?: string };
         if (!j.ok) console.error(`[Bee FW] thả react lỗi: ${j.description ?? res.status}`);
         // CHỈ tin thả ❤️ THÀNH CÔNG mới được coi là đã react (cron đánh dấu handled).
-        else await recordReacted(deps.supabase, message.message_id);
+        else {
+          reactedSuccessfully = true;
+          await recordReacted(deps.supabase, message.message_id);
+        }
       } catch (e) {
         console.error("[Bee FW] thả react lỗi:", e instanceof Error ? e.message : String(e));
       }
     }
+    return reactedSuccessfully;
   } catch (e) {
     console.error("[Bee FW] lỗi (bỏ qua):", e instanceof Error ? e.message : String(e));
+    return reactedSuccessfully;
   }
 }
 

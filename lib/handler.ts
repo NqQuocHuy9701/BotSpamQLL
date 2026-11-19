@@ -6,6 +6,7 @@ import {
   buildSummary,
   groupByUsername,
   parseSheet,
+  downloadGoogleSheet,
 } from "./batch.js";
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
@@ -47,6 +48,7 @@ import {
 } from "./telegram.js";
 
 import type {
+  BatchRow,
   MappedItem,
   TelegramMessage,
   TelegramUpdate,
@@ -105,6 +107,9 @@ const HTKT_GROUP_ID = -1002458492731;
 // batch is enqueued into send_queue and drip-sent later by the Vercel cron
 // (see api/cron.ts) rather than posted synchronously here.
 const BATCH_OK_COMMAND = "/ok";
+const BATCH_SHEET_COMMAND = "/sheet";
+const BATCH_SHEET_ID = "16JQo1euROTk5UezbO_qcNj7pWo-N5LcqHyY7seRHe9c";
+const BATCH_SHEET_GID = "2064108140";
 const BATCH_CANCEL_COMMAND = "/huy";
 // Stops a scheduled or in-progress send by clearing all not-yet-sent rows.
 const BATCH_STOP_COMMAND = "/cancel";
@@ -227,6 +232,16 @@ const message = update.message;
     return;
   }
 
+  // Collect reactions Bee successfully adds during this update so the case
+  // can be marked handled after its tracking row is inserted.
+  const beeReactedMessageIds = new Set<number>();
+  const aiDeps = {
+    ...deps,
+    onBotReaction: (chatId: number, messageId: number) => {
+      if (chatId === SPAMTEST_TARGET_CHAT_ID) beeReactedMessageIds.add(messageId);
+    },
+  };
+
   // Ghi chú: trước đây có nhánh đọc form check-in trong nhóm VHHS (topic 4),
   // nhưng form đó do một BOT khác đăng, mà Telegram KHÔNG gửi tin của bot khác
   // cho bot này -> nhánh không bao giờ chạy. Đã thay bằng đọc trực tiếp bảng
@@ -264,7 +279,7 @@ const message = update.message;
       }
       // 9. Bee AI: admin nhắn riêng bằng câu thường (không phải lệnh /). Chỉ chạy
       // khi AI được bật; các tin trên không khớp lệnh nào mới tới đây.
-      if (deps.ai && (await maybeHandleAi(message, deps, SPAMTEST_ADMIN_IDS))) {
+      if (deps.ai && (await maybeHandleAi(message, aiDeps, SPAMTEST_ADMIN_IDS))) {
           return;
       }
       if (!deps.relayEnabled) return;
@@ -277,7 +292,7 @@ const message = update.message;
   // Bee AI trong nhóm: CHỈ khi tin tag @bot. Không chặn luồng phía dưới (tin tag
   // vẫn được tracking case như thường); lỗi AI đã được nuốt trong maybeHandleAi.
   if (deps.ai) {
-    await maybeHandleAi(message, deps, SPAMTEST_ADMIN_IDS);
+    await maybeHandleAi(message, aiDeps, SPAMTEST_ADMIN_IDS);
   }
 
   // 🛑 CHẶN TUYỆT ĐỐI: Chỉ cho phép LUỒNG QLL (relay/forward/auto-ack) nếu đúng
@@ -336,15 +351,26 @@ const message = update.message;
     const CURRENT_GROUP_ID = message.chat.id;
     const config = loadConfig();
 
-    fetch(`https://api.telegram.org/bot${config.botToken}/setMessageReaction`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CURRENT_GROUP_ID,
-        message_id: message.message_id,
-        reaction: [{ type: "emoji", emoji: "❤️" }]
-      })
-    }).catch(console.error);
+    try {
+      const reactionResponse = await fetch(
+        `https://api.telegram.org/bot${config.botToken}/setMessageReaction`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: CURRENT_GROUP_ID,
+            message_id: message.message_id,
+            reaction: [{ type: "emoji", emoji: "❤️" }],
+          }),
+        }
+      );
+      const reactionResult = (await reactionResponse.json()) as { ok?: boolean };
+      if (reactionResult.ok === true) {
+        beeReactedMessageIds.add(message.message_id);
+      }
+    } catch (error) {
+      console.error("Bee reaction failed:", error);
+    }
 
     fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
       method: "POST",
@@ -368,6 +394,11 @@ const message = update.message;
     SPAMTEST_TARGET_CHAT_ID,
     SPAMTEST_ADMIN_IDS
   );
+  // Telegram does not send the bot its own reaction update. Mark the case
+  // after handleGroupQllMessage inserts it, or it can remain open for SLA.
+  if (beeReactedMessageIds.has(message.message_id)) {
+    await markCaseHandled(deps.supabase, message.message_id);
+  }
 
   // 5. Passive user collection chạy trên mọi update nhóm
   await collectUsers(message, deps);
@@ -747,7 +778,7 @@ async function maybeHandleBatch(
       return true;
     }
 
-    let rows;
+    let rows: BatchRow[];
     try {
       rows = parseSheet(download.buffer);
     } catch {
@@ -779,6 +810,61 @@ async function maybeHandleBatch(
   // the document / /ok / /huy branches. None of them share a prefix with /ok,
   // /huy, or /spam, so ordering them first is safe.
   if (await maybeHandleQllCommands(message, deps, text)) {
+    return true;
+  }
+
+  // Import directly from the configured Google Sheet tab. This prepares the
+  // same pending draft as an uploaded workbook; /ok is still required to send.
+  if (text.toLowerCase() === BATCH_SHEET_COMMAND) {
+    const download = await downloadGoogleSheet(BATCH_SHEET_ID, BATCH_SHEET_GID);
+    if (!download.ok) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        `Không đọc được Google Sheet. ${download.error} Kiểm tra quyền xem của sheet rồi thử lại.`
+      );
+      return true;
+    }
+
+    let rows: BatchRow[];
+    try {
+      rows = parseSheet(download.buffer);
+    } catch {
+      rows = [];
+    }
+    if (rows.length === 0) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "Tab ClassIn_New không có dữ liệu hoặc không tìm thấy tiêu đề Tên và QLL."
+      );
+      return true;
+    }
+
+    const { users: knownUsers } = await listKnownUsers(deps.supabase);
+    const items: MappedItem[] = [];
+    const mappedSummary: { tenHS: string; username: string }[] = [];
+    const unmapped: string[] = [];
+    for (const row of rows) {
+      const match = mapQllByUser(row.qll, knownUsers);
+      const base = {
+        tenHS: row.tenHS,
+        maLop: row.maLop,
+        ngayHoc: row.ngayHoc,
+        lichHoc: row.lichHoc,
+        qll: row.qll,
+      };
+      if (match.kind === "found") {
+        items.push({ ...base, username: match.username });
+        mappedSummary.push({ tenHS: row.tenHS, username: match.username });
+      } else {
+        items.push({ ...base, username: "", pending: true });
+        unmapped.push(row.qll);
+      }
+    }
+    await savePendingBatch(deps.supabase, adminId, items);
+    await deps.telegram.sendMessage(
+      message.chat.id,
+      buildSummary(rows.length, mappedSummary, unmapped)
+    );
     return true;
   }
 
