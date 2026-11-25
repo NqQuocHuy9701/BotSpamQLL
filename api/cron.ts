@@ -10,6 +10,7 @@ import { loadAiConfig, markForwardedHandled, runHandoff } from "../lib/ai.js";
 import {
   claimRow,
   countUnsent,
+  deleteDeliveredQueueRows,
   fetchNextUnsent,
   getClient,
   releaseRow,
@@ -61,10 +62,11 @@ export async function runCron(deps: CronDeps): Promise<void> {
   // Track which admins actually had a message sent THIS run, so the completion
   // DM is only considered for them (never fired by a run that sent nothing).
   const sentForAdmin = new Set<number>();
-  let sentCount = 0;
+  const deliveredIds: string[] = [];
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+    let delivered = false;
     try {
       // CLAIM first: atomically flip this row to sent. If another overlapping
       // cron run already claimed it, we lose the claim and skip (no double
@@ -78,14 +80,8 @@ export async function runCron(deps: CronDeps): Promise<void> {
         row.chat_id,
         row.message_text
       );
-      if (result.ok) {
-        sentForAdmin.add(row.admin_id);
-        sentCount++;
-        // Space out ONLY real sends; skipped/claimed-away rows add no delay.
-        if (i < rows.length - 1) {
-          await sleep(delayMs);
-        }
-      } else {
+      delivered = result.ok;
+      if (!delivered) {
         // Send failed after claiming -> release so the next run retries it.
         await releaseRow(deps.supabase, row.id);
       }
@@ -98,16 +94,30 @@ export async function runCron(deps: CronDeps): Promise<void> {
         // ignore
       }
     }
+
+    if (delivered) {
+      sentForAdmin.add(row.admin_id);
+      deliveredIds.push(row.id);
+      // Space out ONLY real sends; skipped/claimed-away rows add no delay.
+      if (i < rows.length - 1) {
+        await sleep(delayMs);
+      }
+    }
   }
 
   // Only consider completion when this run actually sent something, and only
   // for admins we sent for — so the "Đã gửi xong" DM fires exactly once, when
   // the final message drains that admin's queue (not on empty/no-op runs).
-  if (sentCount > 0) {
+  if (deliveredIds.length > 0) {
+    const cleanup = await deleteDeliveredQueueRows(deps.supabase, deliveredIds);
+    if (!cleanup.ok) {
+      // Keep these rows claimed after a cleanup failure to avoid a duplicate send.
+      console.error("Delivered queue cleanup error:", cleanup.error);
+    }
     for (const adminId of sentForAdmin) {
       try {
-        const { count } = await countUnsent(deps.supabase, adminId);
-        if (count === 0) {
+        const { ok, count } = await countUnsent(deps.supabase, adminId);
+        if (ok && count === 0) {
           await deps.telegram.sendMessage(adminId, COMPLETION_MESSAGE);
         }
       } catch {

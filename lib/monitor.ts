@@ -851,19 +851,16 @@ export async function checkUnansweredMessages(
 
   if (error || !expiredCases || expiredCases.length === 0) return;
 
-  const config = await loadMonitorConfig(supabase);
-  const titles = config.userTitles || {};
-
   // Danh sách CTV ca hiện tại = CHECK-IN THỰC TẾ (bỏ danh sách import tay
   // ctvSang/chieu/toi). Rỗng -> KHÔNG tag ai (giữ case lại, không đánh dấu).
-  let currentShiftCtv: string[] = [];
-  if (checkinClient) {
-    try {
-      currentShiftCtv = await getCurrentShiftCheckins(checkinClient, new Date(nowMs));
-    } catch {
-      currentShiftCtv = [];
-    }
-  }
+  const [config, checkedInCtv] = await Promise.all([
+    loadMonitorConfig(supabase),
+    checkinClient
+      ? getCurrentShiftCheckins(checkinClient, new Date(nowMs)).catch(() => [])
+      : [],
+  ]);
+  const titles = config.userTitles || {};
+  let currentShiftCtv = checkedInCtv;
 
   // Loại trừ CTV trong danh sách /slaoff của HÔM NAY (CTV trực nhóm khác).
   const today = getVnDateString(new Date(nowMs));

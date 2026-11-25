@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   addUserManual,
   deletePendingBatch,
+  getClient,
   insertLog,
   listUsernames,
   loadPendingBatch,
@@ -10,6 +11,18 @@ import {
   savePendingBatch,
 } from "../lib/supabase.js";
 import type { LogRecord, MappedItem } from "../lib/types.js";
+
+describe("getClient", () => {
+  it("reuses a client for the same project and key", () => {
+    const url = "https://main.example.com";
+    const main = getClient(url, "main-key");
+    const checkin = getClient("https://checkin.example.com", "checkin-key");
+
+    expect(getClient(url, "main-key")).toBe(main);
+    expect(checkin).not.toBe(main);
+    expect(getClient(url, "new-main-key")).not.toBe(main);
+  });
+});
 
 const record: LogRecord = {
   created_at: "2023-11-14T22:13:20.000Z",

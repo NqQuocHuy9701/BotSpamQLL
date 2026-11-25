@@ -9,8 +9,21 @@ import type {
   UserRecord,
 } from "./types.js";
 
+const clientsByUrl = new Map<string, { key: string; client: SupabaseClient }>();
+
 export function getClient(url: string, key: string): SupabaseClient {
-  return createClient(url, key);
+  const cached = clientsByUrl.get(url);
+  if (cached?.key === key) return cached.client;
+
+  const client = createClient(url, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+  clientsByUrl.set(url, { key, client });
+  return client;
 }
 
 // Inserts exactly one row into bot_account_logs. Resolves { ok: false, error }
@@ -316,6 +329,23 @@ export async function releaseRow(
       return { ok: false, error: error.message };
     }
     return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Deletes only rows confirmed delivered by the current cron run.
+export async function deleteDeliveredQueueRows(
+  client: SupabaseClient,
+  ids: string[]
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await client
+      .from("send_queue")
+      .delete()
+      .eq("sent", true)
+      .in("id", ids);
+    return error ? { ok: false, error: error.message } : { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

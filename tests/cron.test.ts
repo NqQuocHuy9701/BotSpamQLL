@@ -25,6 +25,10 @@ const countUnsent =
   vi.fn<
     (client: unknown, adminId?: number) => Promise<{ ok: boolean; count: number }>
   >(async () => ({ ok: true, count: 0 }));
+const deleteDeliveredQueueRows = vi.fn(async (_client: unknown, _ids: string[]) => ({
+  ok: true,
+  error: undefined as string | undefined,
+}));
 const getClient = vi.fn(() => ({}) as unknown as SupabaseClient);
 const loadConfig = vi.fn();
 const createTelegramClient = vi.fn(() => ({}) as unknown as TelegramClient);
@@ -34,6 +38,7 @@ vi.mock("../lib/supabase.js", () => ({
   claimRow,
   releaseRow,
   countUnsent,
+  deleteDeliveredQueueRows,
   getClient,
 }));
 vi.mock("../lib/config.js", () => ({ loadConfig }));
@@ -104,6 +109,12 @@ describe("runCron — drip send", () => {
     expect(claimRow).toHaveBeenNthCalledWith(3, expect.anything(), "3");
     // Successful sends are never released.
     expect(releaseRow).not.toHaveBeenCalled();
+    expect(deleteDeliveredQueueRows).toHaveBeenCalledTimes(1);
+    expect(deleteDeliveredQueueRows).toHaveBeenCalledWith(
+      expect.anything(), ["1", "2", "3"]
+    );
+    expect(deleteDeliveredQueueRows.mock.invocationCallOrder[0])
+      .toBeGreaterThan(sendMessage.mock.invocationCallOrder[2]);
 
     // Sleep fires between sends only (2 times for 3 rows), at CRON_DELAY_MS.
     expect(sleep).toHaveBeenCalledTimes(2);
@@ -180,6 +191,7 @@ describe("runCron — empty queue", () => {
     expect(claimRow).not.toHaveBeenCalled();
     expect(sleep).not.toHaveBeenCalled();
     expect(countUnsent).not.toHaveBeenCalled();
+    expect(deleteDeliveredQueueRows).not.toHaveBeenCalled();
   });
 });
 
@@ -206,6 +218,23 @@ describe("runCron — a failed send stays unsent", () => {
     // The failed row (id 2) is released back to unsent; successes are not.
     const releasedIds = releaseRow.mock.calls.map((c) => c[1]);
     expect(releasedIds).toEqual(["2"]);
+    expect(deleteDeliveredQueueRows).toHaveBeenCalledTimes(1);
+    expect(deleteDeliveredQueueRows).toHaveBeenCalledWith(
+      expect.anything(), ["1", "3"]
+    );
+  });
+
+  it("keeps a delivered row claimed when cleanup fails", async () => {
+    fetchNextUnsent.mockResolvedValue({ ok: true, rows: [row("1", "A")] });
+    countUnsent.mockResolvedValue({ ok: true, count: 0 });
+    deleteDeliveredQueueRows.mockResolvedValueOnce({ ok: false, error: "database unavailable" });
+    const { telegram, sendMessage } = fakeTelegram();
+
+    await runCron({ telegram, supabase: {} as unknown as SupabaseClient });
+
+    expect(releaseRow).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenLastCalledWith(ADMIN_ID, expect.stringContaining("Đã gửi xong"));
   });
 
   it("releases a row whose send throws, and keeps going", async () => {

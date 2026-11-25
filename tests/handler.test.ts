@@ -929,6 +929,28 @@ describe("handleUpdate — batch announcement (admin DM .xlsx -> /ok -> group)",
     expect(postedToGroup).toBe(false);
   });
 
+  it("/ok keeps the imported draft if enqueueing fails", async () => {
+    const { deps, sendMessage, sendQueueInsert, pendingDeleteEq } = makeDeps({
+      relayEnabled: false,
+      pendingItems: [{
+        tenHS: "Học sinh",
+        maLop: "KHTN.2026.0913",
+        ngayHoc: "15/10/2026",
+        lichHoc: "",
+        username: "SA_LanNT18",
+      }],
+    });
+    sendQueueInsert.mockRejectedValueOnce(new Error("database unavailable"));
+
+    await handleUpdate(textDm(ADMIN_ID, "/ok"), deps);
+
+    expect(pendingDeleteEq).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      ADMIN_ID, expect.stringContaining("Danh sách vẫn còn")
+    );
+  });
+
   it("/ok enqueues one row per item, deletes pending, confirms, and posts NOTHING to the group", async () => {
     const items: MappedItem[] = [
       {

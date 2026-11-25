@@ -1,13 +1,6 @@
 // Core orchestration: classify a Telegram update and run the relay flow.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadConfig } from "./config.js";
-import {
-  buildGroupedAnnouncement,
-  buildSummary,
-  groupByUsername,
-  parseSheet,
-  downloadGoogleSheet,
-} from "./batch.js";
 import { isSensitive } from "./detector.js";
 import { buildLogRecord, buildUserRecord, displayName } from "./mapping.js";
 import { mapQllByUser } from "./qllmap.js";
@@ -675,6 +668,7 @@ async function maybeHandleQllCommands(
 
     await savePendingBatch(deps.supabase, adminId, updated);
     const mappedCount = allItems.filter((it) => !it.pending).length + mappedSummary.length;
+    const { buildSummary } = await import("./batch.js");
     await deps.telegram.sendMessage(
       message.chat.id,
       buildSummary(allItems.length, mappedSummary, stillUnmapped) +
@@ -780,6 +774,7 @@ async function maybeHandleBatch(
 
     let rows: BatchRow[];
     try {
+      const { parseSheet } = await import("./batch.js");
       rows = parseSheet(download.buffer);
     } catch {
       await deps.telegram.sendMessage(
@@ -816,6 +811,7 @@ async function maybeHandleBatch(
   // Import directly from the configured Google Sheet tab. This prepares the
   // same pending draft as an uploaded workbook; /ok is still required to send.
   if (text.toLowerCase() === BATCH_SHEET_COMMAND) {
+    const { buildSummary, downloadGoogleSheet, parseSheet } = await import("./batch.js");
     const download = await downloadGoogleSheet(BATCH_SHEET_ID, BATCH_SHEET_GID);
     if (!download.ok) {
       await deps.telegram.sendMessage(
@@ -880,6 +876,7 @@ async function maybeHandleBatch(
       return true;
     }
 
+    const { buildSummary, parseSheet } = await import("./batch.js");
     let rows;
     try {
       rows = parseSheet(download.buffer);
@@ -973,6 +970,7 @@ async function maybeHandleBatch(
     // QLL with students in two subjects gets one message per subject (a QLL is
     // never tagged for two subjects in one message). The username is taken from
     // the bucket's items, not the composite key.
+    const { buildGroupedAnnouncement, groupByUsername } = await import("./batch.js");
     const groups = groupByUsername(items);
     const rows = Array.from(groups.values()).map((students) => ({
       admin_id: adminId,
@@ -984,8 +982,15 @@ async function maybeHandleBatch(
       ),
       send_after: sendAfter,
     }));
-    await enqueueMessages(deps.supabase, rows);
-    // Xóa phần đã gửi; GIỮ lại các dòng chưa map để còn /remap sau. Hết pending
+    const queued = await enqueueMessages(deps.supabase, rows);
+    if (!queued.ok) {
+      await deps.telegram.sendMessage(
+        message.chat.id,
+        "⚠️ Chưa đưa được danh sách vào hàng đợi. Danh sách vẫn còn, thử /ok lại sau nhé."
+      );
+      return true;
+    }
+    // Xóa phần đã đưa vào hàng đợi; giữ lại các dòng chưa map để /remap sau. Hết pending
     // thì xóa hẳn batch.
     if (stillPending.length > 0) {
       await savePendingBatch(deps.supabase, adminId, stillPending);
